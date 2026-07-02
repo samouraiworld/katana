@@ -1,0 +1,21 @@
+# Claude Code local files — never commit
+.claude/
+CLAUDE.md
+
+# Local configuration (may contain secrets)
+config.yaml
+
+# Runtime data (SQLite DB + dry-run proposal artifacts)
+/data/
+/proposals/
+
+# SQLite history database
+*.db
+
+# Build output
+/katana
+/bin/
+
+# Go
+*.test
+*.out

@@ -1,0 +1,78 @@
+# End-to-end stack: gnomonitoring + katana against the local devnet.
+#
+# The devnet itself is NOT part of this file — it is built and run separately
+# (gnoland-test/ bootstrap.sh + docker compose up), which creates the external
+# network `gnoland-test_default` that the services below join.
+#
+# Usage:
+#   1. cd gnoland-test && GNO_REPO_PATH=/path/to/gno ./bootstrap.sh && docker compose up -d
+#   2. (optional) make scenario1 && make scenario2   # onboard then down validator4
+#   3. docker compose -f docker-compose.e2e.yml up --build
+#
+# See deploy/e2e/README.md for the full walkthrough.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: katana-e2e-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gnomonitoring
+      POSTGRES_PASSWORD: gnomonitoring
+      POSTGRES_DB: gnomonitoring
+    volumes:
+      - e2e-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gnomonitoring -d gnomonitoring"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gnomonitoring:
+    image: ghcr.io/samouraiworld/gnomonitoring-server:latest
+    container_name: katana-e2e-gnomonitoring
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./deploy/e2e/gnomonitoring.config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:8989:8989"   # REST API (handy for debugging)
+    # The published image runs the server by default; uncomment if it needs an
+    # explicit command (their compose used ["./server"]).
+    # command: ["./server"]
+    networks:
+      - default
+      - gno-devnet
+
+  katana:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: katana:latest
+    container_name: katana-e2e
+    restart: unless-stopped
+    depends_on:
+      - gnomonitoring
+    volumes:
+      - ./deploy/e2e/katana.config.yaml:/app/config.yaml:ro
+      - e2e-katana-data:/app/data
+    ports:
+      - "127.0.0.1:8990:8990"   # /health
+    command: ["--config", "/app/config.yaml"]
+    networks:
+      - default
+      - gno-devnet
+
+volumes:
+  e2e-pgdata:
+  e2e-katana-data:
+
+networks:
+  default:
+  # The devnet network, created by `cd gnoland-test && docker compose up -d`.
+  # Start the devnet FIRST or this external network won't exist.
+  gno-devnet:
+    name: gnoland-test_default
+    external: true

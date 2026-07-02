@@ -1,0 +1,16 @@
+# Build output
+katana
+bin/
+
+# Local runtime data
+config.yaml
+proposals/
+*.db
+
+# VCS / docs / editor
+.git/
+.gitignore
+*.md
+
+# CI/local
+.github/

@@ -1,0 +1,55 @@
+services:
+  katana:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: katana:latest
+    container_name: katana
+    # katana is a permanent backend: keep it running and restart on failure.
+    restart: unless-stopped
+
+    # Secrets / per-deployment overrides (see config.yaml.example). Uncomment and
+    # add real values to enable; keep at least one entry for a valid mapping.
+    environment:
+      KATANA_LOG_LEVEL: "info"
+      # KATANA_GNOMON_BASE_URL: "http://gnomonitoring:8989"
+      # KATANA_GNOMON_API_TOKEN: ""
+      # KATANA_GNOKEY_PASSWORD: ""
+      # KATANA_DISCORD_WEBHOOK: ""
+      # KATANA_SLACK_WEBHOOK: ""
+      # KATANA_TELEGRAM_TOKEN: ""
+      # KATANA_TELEGRAM_CHAT_ID: ""
+
+    # Expose the /health endpoint (enable `web:` in config.yaml, listen ":8990").
+    ports:
+      - "8990:8990"
+
+    volumes:
+      # Your configuration (read-only).
+      - ./config.yaml:/app/config.yaml:ro
+      # Persistent SQLite DB + dry-run proposals.
+      # In config.yaml set (for the container):
+      #   storage.sqlite_path: "/app/data/katana.db"
+      #   proposal.output_dir: "/app/data/proposals"
+      - katana-data:/app/data
+
+    command: ["--config", "/app/config.yaml"]
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8990/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # If you run gnomonitoring via its own compose, join its network here so
+    # KATANA_GNOMON_BASE_URL can use the service name.
+    # networks:
+    #   - gnomonitoring
+
+volumes:
+  katana-data:
+
+# networks:
+#   gnomonitoring:
+#     external: true
