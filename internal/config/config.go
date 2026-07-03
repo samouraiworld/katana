@@ -5,7 +5,7 @@
 // config.yaml file. Environment variables are supported only as optional
 // overrides for secrets and per-deployment values (see applyEnvOverrides).
 //
-// Many blocks (conditions, proposal, gnokey, mode, poll interval) have a global
+// Many blocks (conditions, proposal, gnokey, poll interval) have a global
 // default and an optional per-chain override. Use Runtime(chainID) to obtain the
 // fully-resolved settings for a chain rather than reading the raw fields.
 package config
@@ -119,9 +119,8 @@ func (c CriticalCond) Duration() (time.Duration, error) {
 }
 
 // Proposal describes the on-chain GovDAO ejection entrypoint plus the lifecycle
-// timers. Mode and the timers have global defaults, overridable per chain.
+// timers. The timers have global defaults, overridable per chain.
 type Proposal struct {
-	Mode            string `yaml:"mode"` // dry-run | broadcast
 	Cooldown        string `yaml:"cooldown"`
 	RejectedBackoff string `yaml:"rejected_backoff"`
 	MaxRejections   int    `yaml:"max_rejections"`
@@ -137,7 +136,6 @@ type Proposal struct {
 
 	TitleTemplate       string `yaml:"title_template"`
 	DescriptionTemplate string `yaml:"description_template"`
-	OutputDir           string `yaml:"output_dir"`
 }
 
 // VoteTracking configures the vote-watcher worker.
@@ -187,7 +185,6 @@ type ChainConfig struct {
 	GnomonitoringChain string      `yaml:"gnomonitoring_chain"`
 	Enabled            bool        `yaml:"enabled"`
 	PollInterval       string      `yaml:"poll_interval"`
-	Mode               string      `yaml:"mode"`
 	Conditions         *Conditions `yaml:"conditions"`
 	Proposal           *Proposal   `yaml:"proposal"`
 	Gnokey             *Gnokey     `yaml:"gnokey"`
@@ -204,7 +201,6 @@ type Runtime struct {
 	GnomonitoringChain string
 	PollInterval       time.Duration
 	VotePollInterval   time.Duration
-	Mode               string
 	Conditions         Conditions
 	Proposal           Proposal
 	Gnokey             Gnokey
@@ -279,12 +275,10 @@ func (c *Config) applyDefaults() {
 	if c.Gnokey.GasWanted == 0 {
 		c.Gnokey.GasWanted = 20_000_000
 	}
-	setIfEmpty(&c.Proposal.Mode, "dry-run")
 	setIfEmpty(&c.Proposal.Cooldown, "720h")
 	setIfEmpty(&c.Proposal.RejectedBackoff, "720h")
 	setIfEmpty(&c.Proposal.Submit, "run")
 	setIfEmpty(&c.Proposal.RunScriptTemplate, DefaultEjectScript)
-	setIfEmpty(&c.Proposal.OutputDir, "./data/proposals")
 	setIfEmpty(&c.VoteTracking.VotePollInterval, "5m")
 	setIfEmpty(&c.VoteTracking.GovdaoRealm, "gno.land/r/gov/dao")
 	setIfEmpty(&c.VoteTracking.StatusSource, "rpc")
@@ -324,7 +318,7 @@ func (c *Config) validate() error {
 }
 
 // Runtime resolves the effective settings for a chain (global merged with the
-// per-chain overrides), validating durations, mode, and required fields.
+// per-chain overrides), validating durations and required fields.
 func (c *Config) Runtime(chainID string) (Runtime, error) {
 	ch, ok := c.Chains[chainID]
 	if !ok {
@@ -353,14 +347,6 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		return Runtime{}, fmt.Errorf("vote_poll_interval: %w", err)
 	}
 
-	mode := c.Proposal.Mode
-	if ch.Mode != "" {
-		mode = ch.Mode
-	}
-	if mode != "dry-run" && mode != "broadcast" {
-		return Runtime{}, fmt.Errorf("mode %q is invalid (want \"dry-run\" or \"broadcast\")", mode)
-	}
-
 	cond := c.Conditions
 	if ch.Conditions != nil {
 		cond = *ch.Conditions
@@ -386,8 +372,8 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 	if ch.Gnokey != nil {
 		gk = gk.mergedWith(*ch.Gnokey)
 	}
-	if mode == "broadcast" && gk.KeyName == "" {
-		return Runtime{}, fmt.Errorf("gnokey.key_name is required when mode is broadcast")
+	if gk.KeyName == "" {
+		return Runtime{}, fmt.Errorf("gnokey.key_name is required")
 	}
 
 	return Runtime{
@@ -398,7 +384,6 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		GnomonitoringChain: ch.GnomonitoringChain,
 		PollInterval:       poll,
 		VotePollInterval:   votePoll,
-		Mode:               mode,
 		Conditions:         cond,
 		Proposal:           prop,
 		Gnokey:             gk,
