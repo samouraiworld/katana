@@ -3,9 +3,8 @@
 // health conditions, produces a GovDAO proposal to eject it from the valset —
 // then follows the vote outcome and notifies on the result.
 //
-// Behaviour is entirely config-driven (config.yaml); per-chain run mode
-// (dry-run vs broadcast) is set there, not via CLI flags. The only flag is the
-// config path.
+// Behaviour is entirely config-driven (config.yaml); katana always signs and
+// broadcasts ejection proposals. The only flag is the config path.
 package main
 
 import (
@@ -19,6 +18,7 @@ import (
 
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/daemon"
+	"github.com/samouraiworld/katana/internal/keybase"
 	"github.com/samouraiworld/katana/internal/store"
 )
 
@@ -46,6 +46,17 @@ func main() {
 	// Cancel the root context on SIGINT/SIGTERM for graceful shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Provision signing keys from any configured mnemonic before broadcasting.
+	for _, id := range cfg.EnabledChains() {
+		rt, err := cfg.Runtime(id)
+		if err != nil {
+			fatal("chain %q: %v", id, err)
+		}
+		if err := keybase.Ensure(ctx, rt.Gnokey, nil); err != nil {
+			fatal("keybase: %v", err)
+		}
+	}
 
 	d := daemon.New(cfg, st, logger)
 	if err := d.Run(ctx); err != nil {
