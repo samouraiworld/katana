@@ -97,13 +97,27 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 // produce builds and either writes (dry-run) or broadcasts a proposal, records
 // it, and notifies on a successful broadcast.
 func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, reason string) {
+	// A valset ejection is keyed by the operator address, but metrics are keyed
+	// by the signing address. Resolve it for broadcasts; a missing mapping is
+	// fatal for the broadcast (we would eject an unknown operator).
+	operator := addr
+	if rt.Mode == "broadcast" {
+		if op, ok := d.resolverFor(rt).OperatorFor(ctx, addr); ok {
+			operator = op
+		} else {
+			d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, addr)
+			return
+		}
+	}
+
 	built := proposal.Build(proposal.Target{
-		ChainKey: rt.Key,
-		ChainID:  rt.ChainID,
-		RPC:      rt.RPCEndpoint,
-		Moniker:  moniker,
-		Address:  addr,
-		Reason:   reason,
+		ChainKey:        rt.Key,
+		ChainID:         rt.ChainID,
+		RPC:             rt.RPCEndpoint,
+		Moniker:         moniker,
+		Address:         addr,
+		OperatorAddress: operator,
+		Reason:          reason,
 	}, rt.Proposal, rt.Gnokey)
 
 	rec := store.ProposalRecord{

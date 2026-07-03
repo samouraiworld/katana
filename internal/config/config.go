@@ -37,6 +37,9 @@ type Config struct {
 	Storage    Storage                 `yaml:"storage"`
 	Web        Web                     `yaml:"web"`
 	Chains     map[string]*ChainConfig `yaml:"chains"`
+	// ValopersRealm is the realm used to resolve a validator's operator address
+	// from its signing address (needed for broadcast ejection).
+	ValopersRealm string `yaml:"valopers_realm"`
 }
 
 // Gnomonitoring points katana at a running gnomonitoring REST API.
@@ -288,6 +291,7 @@ func (c *Config) applyDefaults() {
 	setIfEmpty(&c.Storage.Driver, "none")
 	setIfEmpty(&c.Storage.SQLitePath, "./data/katana.db")
 	setIfEmpty(&c.Web.Listen, ":8990")
+	setIfEmpty(&c.ValopersRealm, "gno.land/r/gnops/valopers")
 }
 
 func (c *Config) validate() error {

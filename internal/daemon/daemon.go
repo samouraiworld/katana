@@ -16,6 +16,7 @@ import (
 	"github.com/samouraiworld/katana/internal/gnomonitoring"
 	"github.com/samouraiworld/katana/internal/notify"
 	"github.com/samouraiworld/katana/internal/store"
+	"github.com/samouraiworld/katana/internal/valopers"
 )
 
 // Daemon owns the shared dependencies and drives the per-chain workers.
@@ -26,18 +27,34 @@ type Daemon struct {
 	notifier *notify.Notifier
 	logger   *log.Logger
 	now      func() time.Time
+
+	resolversMu sync.Mutex
+	resolvers   map[string]*valopers.Resolver // chain key → operator resolver
 }
 
 // New builds a Daemon from the loaded config and an open store.
 func New(cfg *config.Config, st store.Store, logger *log.Logger) *Daemon {
 	return &Daemon{
-		cfg:      cfg,
-		st:       st,
-		gnomon:   gnomonitoring.New(cfg.Gnomonitoring),
-		notifier: notify.New(cfg.Notifications),
-		logger:   logger,
-		now:      time.Now,
+		cfg:       cfg,
+		st:        st,
+		gnomon:    gnomonitoring.New(cfg.Gnomonitoring),
+		notifier:  notify.New(cfg.Notifications),
+		logger:    logger,
+		now:       time.Now,
+		resolvers: map[string]*valopers.Resolver{},
 	}
+}
+
+// resolverFor lazily builds and caches the operator resolver for a chain.
+func (d *Daemon) resolverFor(rt config.Runtime) *valopers.Resolver {
+	d.resolversMu.Lock()
+	defer d.resolversMu.Unlock()
+	if r, ok := d.resolvers[rt.Key]; ok {
+		return r
+	}
+	r := valopers.New(rt.RPCEndpoint, d.cfg.ValopersRealm, 10*time.Minute)
+	d.resolvers[rt.Key] = r
+	return r
 }
 
 // Run starts every worker and blocks until ctx is cancelled, then waits for the
