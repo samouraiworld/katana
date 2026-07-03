@@ -111,6 +111,15 @@ func TestExceptionsUnion(t *testing.T) {
 	}
 }
 
+func TestGnokeyMnemonicEnvOverride(t *testing.T) {
+	t.Setenv("KATANA_GNOKEY_MNEMONIC", "word1 word2 word3")
+	c := &Config{}
+	c.applyEnvOverrides()
+	if c.Gnokey.Mnemonic != "word1 word2 word3" {
+		t.Fatalf("mnemonic = %q, want the env value", c.Gnokey.Mnemonic)
+	}
+}
+
 func TestValidationErrors(t *testing.T) {
 	cases := map[string]string{
 		"missing gnokey key_name": `

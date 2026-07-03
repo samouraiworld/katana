@@ -63,6 +63,7 @@ type Gnokey struct {
 	Password  string `yaml:"password"`
 	GasFee    string `yaml:"gas_fee"`
 	GasWanted int64  `yaml:"gas_wanted"`
+	Mnemonic  string `yaml:"mnemonic"`
 }
 
 // mergedWith returns g with any non-zero field of o applied on top.
@@ -87,6 +88,9 @@ func (g Gnokey) mergedWith(o Gnokey) Gnokey {
 	}
 	if o.GasWanted != 0 {
 		g.GasWanted = o.GasWanted
+	}
+	if o.Mnemonic != "" {
+		g.Mnemonic = o.Mnemonic
 	}
 	return g
 }
@@ -255,6 +259,7 @@ func (c *Config) applyEnvOverrides() {
 	setStr(&c.Gnokey.Address, "KATANA_GNOKEY_ADDRESS")
 	setStr(&c.Gnokey.Home, "KATANA_GNOKEY_HOME")
 	setStr(&c.Gnokey.Password, "KATANA_GNOKEY_PASSWORD")
+	setStr(&c.Gnokey.Mnemonic, "KATANA_GNOKEY_MNEMONIC")
 	setStr(&c.Notifications.Discord.WebhookURL, "KATANA_DISCORD_WEBHOOK")
 	setStr(&c.Notifications.Slack.WebhookURL, "KATANA_SLACK_WEBHOOK")
 	setStr(&c.Notifications.Telegram.BotToken, "KATANA_TELEGRAM_TOKEN")
