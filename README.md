@@ -36,8 +36,8 @@ independent tickers:
 3. Skip exceptions and validators blocked by the lifecycle gate (pending /
    accepted / cooldown / rejection backoff).
 4. Confirm the target is in the live consensus valset.
-5. **dry-run** → write a JSON proposal artifact, or **broadcast** → sign & submit
-   via `gnokey`, capture the on-chain proposal id, and send a notification.
+5. Sign & broadcast via `gnokey`, capture the on-chain proposal id, and send a
+   notification.
 
 **Vote worker** (every `vote_poll_interval`): polls the GovDAO status of each
 pending proposal katana broadcast, and on resolution notifies + updates state:
@@ -62,7 +62,7 @@ A validator becomes eligible when the **enabled** conditions hold, combined with
 > **Two different "interval" notions.** `poll_interval` is how often katana
 > *runs*; `conditions.*.interval` is the *window over which a metric is counted*.
 
-All thresholds, windows, mode, wallet and timers are configurable in
+All thresholds, windows, wallet and timers are configurable in
 `config.yaml` and overridable per chain.
 
 ## Exceptions
@@ -90,14 +90,14 @@ katana notifies every enabled channel (Discord, Slack, Telegram). Example:
 > A proposal for validator `Sam` (`g1abc…`) on `betanet` has been sent to remove
 > it from the valset.
 
-Nothing is sent for dry-run runs or errors.
+Nothing is sent on errors.
 
 ## Requirements
 
 - Go 1.23+
 - A reachable gnomonitoring backend.
-- For `broadcast` mode only: the `gnokey` binary and a keybase holding the
-  proposing key.
+- The `gnokey` binary and a keybase (or mnemonic) holding the proposing key —
+  katana always signs and broadcasts.
 
 ## Build & run
 
@@ -109,8 +109,8 @@ cp config.yaml.example config.yaml   # then edit it
 ./katana --config config.yaml        # runs until Ctrl-C / SIGTERM
 ```
 
-The only flag is `--config`. Run mode (dry-run vs broadcast), chains, wallet,
-notifications and timers all live in `config.yaml`.
+The only flag is `--config`. Chains, wallet, notifications and timers all live
+in `config.yaml`.
 
 ### Docker
 
@@ -119,8 +119,8 @@ docker compose up --build -d     # long-running; restart: unless-stopped
 docker compose logs -f katana
 ```
 
-The SQLite database and proposals persist in the `katana-data` volume; point
-`storage.sqlite_path` and `proposal.output_dir` under `/app/data`.
+The SQLite database persists in the `katana-data` volume; point
+`storage.sqlite_path` under `/app/data`.
 
 ## Configuration
 
@@ -137,6 +137,7 @@ Secrets/per-deployment values can be overridden from the environment:
 | `KATANA_GNOKEY_ADDRESS`    | `gnokey.address`                |
 | `KATANA_GNOKEY_HOME`       | `gnokey.home`                   |
 | `KATANA_GNOKEY_PASSWORD`   | `gnokey.password`               |
+| `KATANA_GNOKEY_MNEMONIC`   | `gnokey.mnemonic`               |
 | `KATANA_DISCORD_WEBHOOK`   | `notifications.discord.webhook_url` |
 | `KATANA_SLACK_WEBHOOK`     | `notifications.slack.webhook_url`   |
 | `KATANA_TELEGRAM_TOKEN`    | `notifications.telegram.bot_token`  |
@@ -144,7 +145,7 @@ Secrets/per-deployment values can be overridden from the environment:
 
 > **Ejection realm.** `proposal.realm_pkg_path` / `function` / `args` are
 > configurable because the valset-ejection entrypoint differs between networks.
-> Verify them against each chain before enabling `broadcast` — the local devnet
+> Verify them against each chain before broadcasting — the local devnet
 > (below) is the place to confirm them.
 
 ## Health
@@ -169,6 +170,10 @@ For a wired-up stack (Postgres + gnomonitoring + katana) against that devnet, us
 [`docker-compose.e2e.yml`](docker-compose.e2e.yml) — see
 [`deploy/e2e/README.md`](deploy/e2e/README.md).
 
+> **Data volumes are broadcast-only.** The SQLite schema no longer has the old
+> dry-run/artifact columns; a `katana-data` (or `e2e-katana-data`) volume
+> created before this refactor must be wiped, not reused.
+
 ## Project layout
 
 ```
@@ -180,7 +185,7 @@ internal/gnoland/      gno.land RPC (consensus valset safety check)
 internal/govdao/       GovDAO proposal id extraction + status render
 internal/rules/        eligibility evaluation
 internal/lifecycle/    proposal state-machine gate (cooldown/backoff/cap)
-internal/proposal/     proposal rendering, dry-run output, gnokey broadcast
+internal/proposal/     proposal rendering + gnokey broadcast
 internal/notify/       Discord / Slack / Telegram senders
 internal/store/        SQLite history (evaluations, proposals, notifications)
 gnoland-test/          local devnet for preprod/e2e
@@ -188,10 +193,15 @@ gnoland-test/          local devnet for preprod/e2e
 
 ## Safety
 
-- `dry-run` is the default mode; on-chain effects require `mode: broadcast`.
+- katana is broadcast-only: every eligible validator results in a signed,
+  on-chain GovDAO proposal. `gnokey` is embedded in the container image
+  (pinned by the `GNO_REF` build-arg); the signing key is provisioned from a
+  mnemonic at startup (`gnokey.mnemonic` / `KATANA_GNOKEY_MNEMONIC`) or from a
+  pre-provisioned keybase.
 - The lifecycle gate prevents proposal spam in the continuous loop.
 - katana verifies valset membership before proposing.
-- No key material is stored by katana; signing is delegated to `gnokey`.
+- No key material is stored by katana outside the keybase; signing is
+  delegated to `gnokey`.
 - `config.yaml`, `data/` and `*.db` are git-ignored.
 
 ## License

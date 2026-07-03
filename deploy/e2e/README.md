@@ -19,6 +19,10 @@ katana ships `gnokey` inside its image and imports a signing key from a
 mnemonic into an in-container keybase (`/app/data/keybase`) at startup — there
 is no host-run path anymore.
 
+**Data volume:** the SQLite schema is broadcast-only (no `mode`/`artifact`
+columns). If `e2e-katana-data` was created by a pre-refactor katana, wipe it
+(`docker volume rm katana_e2e-katana-data` or similar) rather than reusing it.
+
 ## Steps
 
 1. **Start the devnet** (creates the shared network):
