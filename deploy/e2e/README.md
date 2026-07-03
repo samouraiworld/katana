@@ -2,7 +2,8 @@
 
 [`docker-compose.e2e.yml`](../../docker-compose.e2e.yml) runs **Postgres +
 gnomonitoring + katana** wired to the local gno.land devnet, so you can watch
-katana detect a bad validator and produce an ejection proposal end-to-end.
+katana detect a bad validator, broadcast a real GovDAO ejection proposal, and
+follow it through to acceptance/rejection — end-to-end, in-container.
 
 The devnet is a separate layer (it is built locally, not pulled). The three
 layers share the devnet's Docker network `gnoland-test_default`.
@@ -11,8 +12,12 @@ layers share the devnet's Docker network `gnoland-test_default`.
 gnoland-test/ (layer 1)          docker-compose.e2e.yml (layer 2)
   validator / 2 / 3      ◄─────    gnomonitoring (chain=local) ──► REST :8989
   tx-indexer, gnoweb               postgres
-  (network gnoland-test_default)   katana (dry-run) ──► /health :8990, proposals
+  (network gnoland-test_default)   katana (broadcast) ──► /health :8990, gnokey
 ```
+
+katana ships `gnokey` inside its image and imports a signing key from a
+mnemonic into an in-container keybase (`/app/data/keybase`) at startup — there
+is no host-run path anymore.
 
 ## Steps
 
@@ -31,36 +36,55 @@ gnoland-test/ (layer 1)          docker-compose.e2e.yml (layer 2)
    make scenario2        # stop it → it misses blocks
    ```
 
-3. **Start the e2e stack** (from the repo root):
+3. **Configure katana for broadcast** (from the repo root):
+
+   ```bash
+   cp deploy/e2e/katana.config.yaml.example deploy/e2e/katana.config.yaml
+   ```
+
+   Edit `deploy/e2e/katana.config.yaml` and set `gnokey.mnemonic` to a
+   throwaway devnet test mnemonic (or leave it empty and pass
+   `KATANA_GNOKEY_MNEMONIC` via the environment instead). The signing key's
+   address **must** be funded in the devnet genesis and be a GovDAO member, or
+   the broadcast will succeed but no proposal will be created.
+
+   Export the required secrets/build settings:
+
+   ```bash
+   export KATANA_GNOKEY_PASSWORD=<keybase password>
+   export KATANA_DISCORD_WEBHOOK=<discord webhook url>   # optional, notifications only
+   export GNO_REF=master                                  # pin to the gno revision the devnet was built from
+   ```
+
+4. **Start the e2e stack**:
 
    ```bash
    docker compose -f docker-compose.e2e.yml up --build
    ```
 
-4. **Observe**
+5. **Observe**
    - gnomonitoring ingests `chain=local` and, after a while,
      `curl -s 'http://localhost:8989/missing_block?chain=local&period=current_week' | jq`
      lists validator4's missed blocks;
-   - katana logs `ELIGIBLE …` and writes a dry-run proposal into the
-     `e2e-katana-data` volume (`/app/data/proposals`), whose JSON contains the
-     exact `gnokey maketx run` command and the ejection `.gno` script;
+   - katana logs `ELIGIBLE …`, signs and broadcasts a GovDAO ejection proposal
+     via the in-container `gnokey`, then polls for the vote outcome;
    - `curl -s http://localhost:8990/health` returns `ok`.
 
 ## Config
 
 - gnomonitoring: [`gnomonitoring.config.yaml`](gnomonitoring.config.yaml) —
   points at the devnet by service name, Postgres on the `postgres` service.
-- katana: [`katana.config.yaml`](katana.config.yaml) — dry-run, `missed_blocks`
-  only (public endpoint, no admin token).
+- katana: `katana.config.yaml` (git-ignored, copied from
+  [`katana.config.yaml.example`](katana.config.yaml.example)) — broadcast-only,
+  `missed_blocks` only (public endpoint, no admin token).
 
 ## Going further
 
 - **critical_alerts:** enable it in the katana config and set
   `gnomonitoring.api_token` (Clerk) — the alerts endpoint is admin-protected.
-- **Real broadcast + GovDAO vote:** the katana image has no `gnokey`, so the
-  in-container run stays dry-run. To exercise the on-chain path, run katana **on
-  the host** with the devnet keybase — see
-  [`../../gnoland-test/KATANA-E2E.md`](../../gnoland-test/KATANA-E2E.md).
+- **Pinning gno:** `GNO_REF` must match the gno revision the devnet
+  (`gnoland-test/GNO_REPO_PATH`) was built from, or the ejection `.gno` script
+  broadcast by `gnokey maketx run` may not match the on-chain realm ABI.
 
 ## Notes
 
