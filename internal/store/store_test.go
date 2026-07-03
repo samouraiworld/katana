@@ -27,7 +27,7 @@ func TestSQLiteLifecycle(t *testing.T) {
 	// Record a broadcast proposal (pending).
 	id, err := st.RecordProposal(ctx, ProposalRecord{
 		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
-		Moniker: "bad", Mode: "broadcast", Status: StatusPending, OnchainID: "3",
+		Moniker: "bad", Status: StatusPending, OnchainID: "3",
 		Args: []string{"g1bad"},
 	})
 	if err != nil {
