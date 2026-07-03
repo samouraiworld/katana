@@ -56,12 +56,12 @@ func TestGate(t *testing.T) {
 			wantAllow:  false,
 		},
 		{
-			name:      "dry-run within cooldown is blocked",
+			name:      "empty-status within cooldown is blocked",
 			last:      &store.ProposalRecord{Status: "", CreatedAt: now.Add(-1 * time.Hour)},
 			wantAllow: false,
 		},
 		{
-			name:      "dry-run after cooldown is allowed",
+			name:      "empty-status after cooldown is allowed",
 			last:      &store.ProposalRecord{Status: "", CreatedAt: now.Add(-800 * time.Hour)},
 			wantAllow: true,
 		},
