@@ -47,8 +47,14 @@ func New(rpcURL, realm string) *Client {
 type abciQueryResponse struct {
 	Result struct {
 		Response struct {
-			Value string `json:"value"` // base64 of the rendered bytes
-			Log   string `json:"log"`
+			// gno's RPC abci_query nests the result under ResponseBase.Data
+			// (base64 of the rendered bytes), not a flat "value" field.
+			ResponseBase struct {
+				Data  string `json:"Data"`
+				Error *struct {
+					Message string `json:"message"`
+				} `json:"Error"`
+			} `json:"ResponseBase"`
 		} `json:"response"`
 	} `json:"result"`
 	Error *struct {
@@ -75,7 +81,10 @@ func (c *Client) Status(ctx context.Context, proposalID string) (string, error) 
 	if body.Error != nil {
 		return Unknown, fmt.Errorf("RPC error: %s", body.Error.Message)
 	}
-	raw, err := base64.StdEncoding.DecodeString(body.Result.Response.Value)
+	if e := body.Result.Response.ResponseBase.Error; e != nil {
+		return Unknown, fmt.Errorf("abci error: %s", e.Message)
+	}
+	raw, err := base64.StdEncoding.DecodeString(body.Result.Response.ResponseBase.Data)
 	if err != nil {
 		return Unknown, fmt.Errorf("decoding render: %w", err)
 	}

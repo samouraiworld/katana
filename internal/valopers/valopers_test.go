@@ -32,7 +32,8 @@ func fakeRPC(t *testing.T) *httptest.Server {
 		}
 		val := base64.StdEncoding.EncodeToString([]byte(render))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"result":{"response":{"value":"` + val + `"}}}`))
+		// gno's RPC abci_query nests the render under ResponseBase.Data (base64).
+		_, _ = w.Write([]byte(`{"result":{"response":{"ResponseBase":{"Data":"` + val + `","Error":null}}}}`))
 	}))
 }
 

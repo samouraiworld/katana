@@ -138,7 +138,14 @@ func (r *Resolver) render(ctx context.Context, arg string) (string, error) {
 	var body struct {
 		Result struct {
 			Response struct {
-				Value string `json:"value"`
+				// gno's RPC abci_query nests the result under ResponseBase.Data
+				// (base64), not a flat "value" field.
+				ResponseBase struct {
+					Data  string `json:"Data"`
+					Error *struct {
+						Message string `json:"message"`
+					} `json:"Error"`
+				} `json:"ResponseBase"`
 			} `json:"response"`
 		} `json:"result"`
 		Error *struct {
@@ -164,7 +171,10 @@ func (r *Resolver) render(ctx context.Context, arg string) (string, error) {
 	if body.Error != nil {
 		return "", fmt.Errorf("RPC error: %s", body.Error.Message)
 	}
-	raw, err := base64.StdEncoding.DecodeString(body.Result.Response.Value)
+	if e := body.Result.Response.ResponseBase.Error; e != nil {
+		return "", fmt.Errorf("abci error: %s", e.Message)
+	}
+	raw, err := base64.StdEncoding.DecodeString(body.Result.Response.ResponseBase.Data)
 	if err != nil {
 		return "", err
 	}
