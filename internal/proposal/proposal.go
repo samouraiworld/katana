@@ -124,6 +124,9 @@ func (b Built) commonArgs(gk config.Gnokey) []string {
 		"-broadcast",
 		"-chainid", b.Target.ChainID,
 		"-remote", b.Target.RPC,
+		// Read the keybase password from stdin, not the TTY (katana execs gnokey
+		// with no controlling terminal); Broadcast feeds the password on stdin.
+		"-insecure-password-stdin",
 	}
 	if gk.Home != "" {
 		args = append(args, "-home", gk.Home)
@@ -156,9 +159,9 @@ func (b Built) Broadcast(ctx context.Context, gk config.Gnokey) (string, error) 
 	}
 
 	cmd := exec.CommandContext(ctx, gk.Bin, args...)
-	if gk.Password != "" {
-		cmd.Stdin = strings.NewReader(gk.Password + "\n")
-	}
+	// Always provide stdin: -insecure-password-stdin makes gnokey read the
+	// password (possibly empty) from stdin rather than prompting on a TTY.
+	cmd.Stdin = strings.NewReader(gk.Password + "\n")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

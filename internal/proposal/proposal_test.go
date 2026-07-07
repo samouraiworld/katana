@@ -45,6 +45,11 @@ func TestBuildRunMode(t *testing.T) {
 	if !strings.HasPrefix(joined, "maketx run") || !strings.HasSuffix(joined, "dev /tmp/x.gno") {
 		t.Errorf("unexpected run args: %v", args)
 	}
+	// gnokey must read the password from stdin, not a TTY (katana execs it with
+	// no controlling terminal); otherwise it fails with "inappropriate ioctl".
+	if !strings.Contains(joined, "-insecure-password-stdin") {
+		t.Errorf("run args missing -insecure-password-stdin: %v", args)
+	}
 }
 
 func TestBuildCallMode(t *testing.T) {
