@@ -131,10 +131,16 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		rec.Status = store.StatusPending
 		rec.OnchainID = govdao.ExtractProposalID(out)
 	}
-	id, _ := d.st.RecordProposal(ctx, rec)
+	id, recErr := d.st.RecordProposal(ctx, rec)
 	if err != nil {
 		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, addr, err)
 		return
+	}
+	if recErr != nil {
+		// The proposal is already on-chain but we failed to persist it: the
+		// lifecycle gate has no record and will re-broadcast an identical
+		// ejection next cycle. Surface this loudly rather than silently spam.
+		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, addr, recErr)
 	}
 	d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
 	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID)

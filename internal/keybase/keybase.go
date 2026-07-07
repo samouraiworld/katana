@@ -76,9 +76,12 @@ func homeArgs(gk config.Gnokey, sub ...string) []string {
 	return args
 }
 
-// hasKey reports whether gnokey's `list` output contains a key named name as a
-// whole word (avoids matching a substring of another key or an address).
+// hasKey reports whether gnokey's `list` output contains a key named name.
+// gnokey prints each entry as `<index>. <name> (<type>) - addr: ...`, so the
+// name is never at column 0; we match the numbered prefix followed by the name
+// as a whole token (mirrors gnoland-test/Makefile's `grep " <name> ("`). This
+// avoids matching a substring of another key or an address.
 func hasKey(listOutput, name string) bool {
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\b`)
+	re := regexp.MustCompile(`(?m)^\s*\d+\.\s+` + regexp.QuoteMeta(name) + `\s+\(`)
 	return re.MatchString(listOutput)
 }

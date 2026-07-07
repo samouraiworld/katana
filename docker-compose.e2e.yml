@@ -57,9 +57,9 @@ services:
     restart: unless-stopped
     depends_on:
       - gnomonitoring
-    environment:
-      KATANA_GNOKEY_PASSWORD: ${KATANA_GNOKEY_PASSWORD:?set the keybase password}
-      KATANA_DISCORD_WEBHOOK: ${KATANA_DISCORD_WEBHOOK:-}
+    # environment:
+    #   KATANA_GNOKEY_PASSWORD: ${KATANA_GNOKEY_PASSWORD:?set the keybase password}
+    #   KATANA_DISCORD_WEBHOOK: ${KATANA_DISCORD_WEBHOOK:-}
     volumes:
       - ./deploy/e2e/katana.config.yaml:/app/config.yaml:ro
       - e2e-katana-data:/app/data

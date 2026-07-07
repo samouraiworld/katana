@@ -194,4 +194,3 @@ func goInner(s string) string {
 	q := strconv.Quote(s)
 	return q[1 : len(q)-1]
 }
-

@@ -22,12 +22,8 @@ import (
 	"time"
 )
 
-var (
-	// listRe matches `[Moniker](/r/gnops/valopers:operatorAddr)` in the list render.
-	listRe = regexp.MustCompile(`\[\s*([^\]]+?)\s*]\(/r/gnops/valopers:([a-z0-9]+)\)`)
-	// signingRe matches `Signing Address: g1...` in a profile render.
-	signingRe = regexp.MustCompile(`Signing Address:\s*(g1[a-z0-9]+)`)
-)
+// signingRe matches `Signing Address: g1...` in a profile render (realm-independent).
+var signingRe = regexp.MustCompile(`Signing Address:\s*(g1[a-z0-9]+)`)
 
 // Resolver caches a signing→operator map, refreshed on a TTL.
 type Resolver struct {
@@ -35,6 +31,7 @@ type Resolver struct {
 	realm  string
 	ttl    time.Duration
 	http   *http.Client
+	listRe *regexp.Regexp // matches `[Moniker](<realm-path>:operatorAddr)` in the list render
 
 	mu        sync.Mutex
 	bySigning map[string]string // signing address → operator address
@@ -43,11 +40,19 @@ type Resolver struct {
 
 // New builds a Resolver for the given RPC endpoint and valopers realm path.
 func New(rpcURL, realm string, ttl time.Duration) *Resolver {
+	// Render links use the realm's on-chain path (domain stripped), e.g.
+	// `gno.land/r/gnops/valopers` → `/r/gnops/valopers`. Derive the list regex
+	// from realm so a configured (non-default) valopers realm still matches.
+	linkPath := realm
+	if i := strings.Index(realm, "/"); i >= 0 {
+		linkPath = realm[i:]
+	}
 	return &Resolver{
 		rpcURL:    strings.TrimRight(rpcURL, "/"),
 		realm:     realm,
 		ttl:       ttl,
 		http:      &http.Client{Timeout: 15 * time.Second},
+		listRe:    regexp.MustCompile(`\[\s*([^\]]+?)\s*]\(` + regexp.QuoteMeta(linkPath) + `:([a-z0-9]+)\)`),
 		bySigning: map[string]string{},
 	}
 }
@@ -97,19 +102,27 @@ func (r *Resolver) refresh(ctx context.Context) error {
 }
 
 // listOperators pages through the valopers list and returns operator addresses.
+// It stops when a page yields no *new* operators — which covers both a normal
+// empty trailing page and a realm that ignores ?page and returns the full list
+// on every page (otherwise the loop would refetch it 50 times).
 func (r *Resolver) listOperators(ctx context.Context) ([]string, error) {
 	var ops []string
+	seen := map[string]bool{}
 	for page := 1; page <= 50; page++ {
 		md, err := r.render(ctx, fmt.Sprintf("?page=%d", page))
 		if err != nil {
 			return nil, err
 		}
-		matches := listRe.FindAllStringSubmatch(md, -1)
-		if len(matches) == 0 {
-			break
+		added := 0
+		for _, m := range r.listRe.FindAllStringSubmatch(md, -1) {
+			if op := m[2]; !seen[op] {
+				seen[op] = true
+				ops = append(ops, op)
+				added++
+			}
 		}
-		for _, m := range matches {
-			ops = append(ops, m[2])
+		if added == 0 {
+			break
 		}
 	}
 	return ops, nil

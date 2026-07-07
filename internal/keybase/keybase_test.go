@@ -52,7 +52,8 @@ func TestEnsureSkipsWhenKeyPresent(t *testing.T) {
 	sawAdd := false
 	run := func(ctx context.Context, bin, stdin string, args ...string) (string, error) {
 		if args[0] == "list" {
-			return "dev (address: g1...)\n", nil // key present
+			// Real gnokey list format: numbered, `<idx>. <name> (<type>) - addr:`.
+			return "0. dev (local) - addr: g1avu0ucdcks3ypgvfxa0e4a7q0la838xvm4adu7\n", nil // key present
 		}
 		if args[0] == "add" {
 			sawAdd = true
