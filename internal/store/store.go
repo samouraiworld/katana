@@ -44,17 +44,15 @@ type ProposalRecord struct {
 	Address   string
 	Moniker   string
 	Reason    string
-	Mode      string // dry-run | broadcast
 	Title     string
 	RealmPath string
 	Function  string
 	Args      []string
-	Artifact  string // dry-run file path
 	Output    string // gnokey output / error text
 	Success   bool
 	// Broadcast-only lifecycle fields.
 	OnchainID  string    // GovDAO proposal id
-	Status     string    // pending | accepted | rejected ("" for dry-run)
+	Status     string    // pending | accepted | rejected ("" until broadcast succeeds)
 	ResolvedAt time.Time // zero until accepted/rejected
 }
 

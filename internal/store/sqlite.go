@@ -54,12 +54,10 @@ CREATE TABLE IF NOT EXISTS proposals (
 	address             TEXT    NOT NULL,
 	moniker             TEXT    NOT NULL,
 	reason              TEXT    NOT NULL,
-	mode                TEXT    NOT NULL,
 	title               TEXT    NOT NULL,
 	realm_path          TEXT    NOT NULL,
 	function            TEXT    NOT NULL,
 	args                TEXT    NOT NULL,
-	artifact            TEXT    NOT NULL,
 	output              TEXT    NOT NULL,
 	success             INTEGER NOT NULL,
 	onchain_proposal_id TEXT    NOT NULL DEFAULT '',
@@ -107,10 +105,10 @@ func (s *SQLite) RecordProposal(ctx context.Context, r ProposalRecord) (int64, e
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO proposals
-		 (created_at, chain, chain_id, address, moniker, reason, mode, title, realm_path, function, args, artifact, output, success, onchain_proposal_id, status, resolved_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		fmtTime(r.CreatedAt), r.Chain, r.ChainID, r.Address, r.Moniker,
-		r.Reason, r.Mode, r.Title, r.RealmPath, r.Function, string(args), r.Artifact, r.Output,
+		r.Reason, r.Title, r.RealmPath, r.Function, string(args), r.Output,
 		boolInt(r.Success), r.OnchainID, r.Status, fmtTime(r.ResolvedAt),
 	)
 	if err != nil {
@@ -143,7 +141,7 @@ func (s *SQLite) RecordNotification(ctx context.Context, r NotifRecord) error {
 	return err
 }
 
-const proposalCols = `id, created_at, chain, chain_id, address, moniker, reason, mode, title, realm_path, function, args, artifact, output, success, onchain_proposal_id, status, resolved_at`
+const proposalCols = `id, created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at`
 
 func scanProposal(rows *sql.Rows) (ProposalRecord, error) {
 	var (
@@ -154,8 +152,8 @@ func scanProposal(rows *sql.Rows) (ProposalRecord, error) {
 		resolvedAt string
 	)
 	if err := rows.Scan(&r.ID, &created, &r.Chain, &r.ChainID, &r.Address, &r.Moniker,
-		&r.Reason, &r.Mode, &r.Title, &r.RealmPath, &r.Function, &argsJSON,
-		&r.Artifact, &r.Output, &success, &r.OnchainID, &r.Status, &resolvedAt); err != nil {
+		&r.Reason, &r.Title, &r.RealmPath, &r.Function, &argsJSON,
+		&r.Output, &success, &r.OnchainID, &r.Status, &resolvedAt); err != nil {
 		return r, err
 	}
 	r.CreatedAt, _ = parseTime(created)

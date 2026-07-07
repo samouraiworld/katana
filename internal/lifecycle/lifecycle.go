@@ -61,8 +61,9 @@ func Gate(last *store.ProposalRecord, rejections int, p Params) Decision {
 		return allow()
 
 	default:
-		// Dry-run (no on-chain status) or any other state: apply the cooldown
-		// floor from the last proposal's creation time.
+		// Failed broadcast or a proposal not yet promoted to an on-chain status:
+		// apply the cooldown floor from the last proposal's creation time so a
+		// failing broadcast is not retried every poll interval.
 		if until := last.CreatedAt.Add(p.Cooldown); p.Now.Before(until) {
 			return deny("cooldown until %s", until.UTC().Format(time.RFC3339))
 		}

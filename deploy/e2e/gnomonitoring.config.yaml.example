@@ -1,0 +1,36 @@
+# gnomonitoring config template for the e2e stack (docker-compose.e2e.yml).
+#
+# Copy to gnomonitoring.config.yaml (git-ignored) and fill in your secrets.
+# It points gnomonitoring at the local devnet (chain "local") by service name
+# over the shared external network `gnoland-test_default`.
+
+backend_port: "8989"
+metrics_port: 8888
+dev_mode: true
+allow_origin: "http://localhost:3000"
+
+# Only needed for admin-protected endpoints (e.g. /admin/alerts). The e2e katana
+# config uses only the public /missing_block endpoint, so a placeholder is fine.
+clerk_secret_key: "sk_test_placeholder_change_me"
+
+token_telegram_validator: ""
+token_telegram_govdao: ""
+
+database:
+  host: "postgres"
+  port: 5432
+  user: "gnomonitoring"
+  password: "gnomonitoring" # must match POSTGRES_PASSWORD in the compose
+  dbname: "gnomonitoring"
+  sslmode: "disable"
+
+default_chain: "local"        # must be a key under chains:
+chains:
+  local:
+    rpc_endpoints:
+      - "http://validator:26657"
+    graphqls:
+      - "http://tx-indexer:8546/graphql/query"
+    gnowebs:
+      - "http://gnoweb:8888"
+    enabled: true

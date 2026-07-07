@@ -27,7 +27,7 @@ DEV_CHAIN    := dev
         stop-val1 stop-val2 stop-val3 stop-val4 \
         start-val1 start-val2 start-val3 start-val4 \
         scenario1 scenario2 scenario2-restart scenario3 scenario3-restart \
-        scenario4 scenario4-restart scenario5 scenario-mute
+        scenario4 scenario4-restart scenario5 scenario-mute add-key
 
 help:
 	@echo "Chain lifecycle:"
@@ -59,6 +59,66 @@ help:
 	@echo "  make scenario4-restart - restart all validators"
 	@echo "  make scenario5         - GovDAO proposal voted NO (rejected-status path; fresh chain)"
 	@echo "  make scenario-mute     - keep validator4 down to exercise the resend dedup"
+	@echo ""
+	@echo "katana signing key (broadcast e2e):"
+	@echo "  make add-key NAME=<key> [MNEMONIC=\"24 words\"]"
+	@echo "                         - import a key + fund it from dev + add it as a GovDAO"
+	@echo "                           member (no genesis reinit). Put the printed MNEMONIC"
+	@echo "                           into katana's gnokey.mnemonic."
+
+# add-key: provision a katana-usable signing key on the LIVE devnet, WITHOUT a
+# genesis reinit. Creating a GovDAO proposal requires membership (r/gov/dao
+# PreCreateProposal panics for non-members), so this: (1) imports a key from a
+# mnemonic — generated if MNEMONIC is not passed — into the dev keybase; (2)
+# funds it from dev; (3) adds it as a T1 GovDAO member through an AddMember
+# proposal that dev creates, votes YES on, and executes. (This devnet's GovDAO
+# is initialized with only the T1 tier, so impl.AddMember — which targets T3 —
+# is unusable; the proposal route via impl.NewAddMemberRequest is.)
+# Put the printed MNEMONIC into katana's gnokey.mnemonic and set gnokey.key_name
+# to NAME: katana imports it into its own keybase at startup (internal/keybase),
+# so no keybase volume mount is needed. Requires the devnet running (make up).
+#
+#   make add-key NAME=katana                 # generate a fresh mnemonic + print it
+#   make add-key NAME=katana MNEMONIC="..."  # use a mnemonic you supply
+add-key:
+	@test -n "$(NAME)" || { echo "usage: make add-key NAME=<key> [MNEMONIC=\"24 words\"]"; exit 1; }
+	@set -e; \
+	MN="$(MNEMONIC)"; \
+	if gnokey list -home "$(DEV_HOME)" 2>/dev/null | grep -q " $(NAME) ("; then \
+	  echo ">>> [1/3] key '$(NAME)' already in the keybase — skipping import (reusing it)"; \
+	else \
+	  if [ -z "$$MN" ]; then \
+	    MN=$$(gnokey generate); \
+	    echo ">>> generated mnemonic for '$(NAME)' — SAVE THIS (katana gnokey.mnemonic):"; \
+	    echo "    $$MN"; \
+	  fi; \
+	  echo ">>> [1/3] importing key '$(NAME)' into $(DEV_HOME)"; \
+	  printf '%s\n%s\n%s\n' "$$MN" "$(DEV_PASS)" "$(DEV_PASS)" \
+	    | gnokey add --recover --insecure-password-stdin -home "$(DEV_HOME)" "$(NAME)"; \
+	fi; \
+	NEWADDR=$$(gnokey list -home "$(DEV_HOME)" | sed -n 's/.* $(NAME) (.*addr: \(g1[a-z0-9]*\).*/\1/p' | head -1); \
+	test -n "$$NEWADDR" || { echo "!! could not resolve address for '$(NAME)'"; exit 1; }; \
+	echo ">>> [2/3] funding $$NEWADDR from dev"; \
+	echo "$(DEV_PASS)" | gnokey maketx send -send 100000000ugnot -to "$$NEWADDR" \
+	  -gas-fee 1000000ugnot -gas-wanted 5000000 -broadcast -chainid dev -remote $(RPC) \
+	  -home "$(DEV_HOME)" -insecure-password-stdin dev; \
+	echo ">>> [3/3] ensuring $$NEWADDR is a GovDAO member"; \
+	if gnokey query vm/qrender -remote $(RPC) -data 'gno.land/r/gov/dao/v3/memberstore:members' 2>/dev/null | grep -q "$$NEWADDR"; then \
+	  echo "    already a GovDAO member — skipping"; \
+	else \
+	  echo "    proposing $$NEWADDR as a T1 member (dev creates the proposal, votes YES, executes)"; \
+	  SCRIPT=$$(mktemp --suffix=.gno); \
+	  printf 'package main\n\nimport (\n\t"gno.land/r/gov/dao"\n\t"gno.land/r/gov/dao/v3/impl"\n)\n\nfunc main(cur realm) {\n\tpr := impl.NewAddMemberRequest(cross(cur), address("%s"), "T1", "katana e2e signer")\n\tdao.MustCreateProposal(cross(cur), pr)\n}\n' "$$NEWADDR" > "$$SCRIPT"; \
+	  OUT=$$(echo "$(DEV_PASS)" | gnokey maketx run -gas-fee 1000000ugnot -gas-wanted 100000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev "$$SCRIPT" 2>&1); \
+	  rm -f "$$SCRIPT"; \
+	  echo "$$OUT" | grep -q '"type":"ProposalCreated"' || { echo "!! add-member proposal failed:"; echo "$$OUT" | tail -20; exit 1; }; \
+	  PID=$$(echo "$$OUT" | grep -oE '"key":"id","value":"[0-9]+"' | grep -oE '[0-9]+' | head -1); \
+	  echo "    proposal #$$PID created — voting YES + executing as dev"; \
+	  echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func MustVoteOnProposalSimple -args "$$PID" -args YES -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev; \
+	  echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func ExecuteProposal -args "$$PID" -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev; \
+	fi; \
+	echo ">>> done: '$(NAME)' = $$NEWADDR is funded + GovDAO member."; \
+	echo ">>> in katana config: gnokey.key_name=$(NAME), gnokey.mnemonic=<the phrase above>."
 
 # Guard: the generated .env (P2P seeds) and genesis.json are required for the
 # chain to form. docker-compose has no default for SEEDS_*, so a missing .env

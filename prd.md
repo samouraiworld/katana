@@ -1,5 +1,5 @@
 # katana — Product Requirements Document (PRD)
-
+idée # retirer tu voting power systeme de freeze 
 Status: **draft for validation** · Owner: Samourai · Last updated: 2026-07-02
 
 This document defines the target behaviour of katana. It is the single source of
@@ -31,8 +31,8 @@ records it, and sends a notification to Discord / Telegram / Slack.
 - **G4** — Support multiple networks (testnet / betanet / mainnet …), each
   independently enabled/disabled from `config.yaml`. `[EXISTS]`
 - **G5** — Protect specific validators via an exceptions list. `[EXISTS]`
-- **G6** — Produce a proposal per eligible validator, either as a reviewable
-  dry-run artifact or by broadcasting on-chain via gnokey. `[EXISTS]`
+- **G6** — Produce and broadcast a proposal on-chain via gnokey for every
+  eligible validator. `[EXISTS]`
 - **G7** — Send a notification (Discord, Telegram, Slack) whenever a proposal is
   produced/submitted. `[TO BUILD]`
 - **G8** — Never spam duplicate proposals for the same validator (dedup /
@@ -47,15 +47,16 @@ records it, and sends a notification to Discord / Telegram / Slack.
   of scope here.
 - Computing validator metrics from raw chain data inside katana (gnomonitoring
   remains the metrics source).
-- Managing keys/mnemonics inside katana. Signing is delegated to the external
-  `gnokey` binary + keybase.
+- Implementing signing logic inside katana. Signing is delegated to the
+  embedded `gnokey` binary + keybase; katana only provisions the keybase entry
+  from a configured mnemonic at startup (§6.6b), it never signs itself.
 - Voting on proposals or tracking their outcome after submission.
 
 ## 4. Users
 
 - **Validator-set operators / GovDAO members** who want under-performing
-  validators surfaced and proposed for ejection automatically, with a human in
-  the loop (dry-run) or fully automated (broadcast).
+  validators surfaced and proposed for ejection automatically, fully automated
+  end-to-end (katana always broadcasts on-chain).
 
 ## 5. System overview
 
@@ -83,7 +84,7 @@ submitted). Each loops on its own ticker.
 3. Build the candidate set (union of observed addresses).
 4. For each candidate: evaluate conditions → check exceptions → **lifecycle gate**
    (skip if a proposal is pending / accepted / within cooldown or rejection
-   backoff) → valset safety check → build proposal → dry-run **or** broadcast →
+   backoff) → valset safety check → build proposal → broadcast via gnokey →
    notify *proposal sent* → persist evaluation + proposal.
 5. Sleep until next tick.
 
@@ -155,8 +156,10 @@ submitted). Each loops on its own ticker.
   (case-insensitive) or moniker. Global list ∪ per-chain list.
 
 ### 6.6 Proposal generation & submission `[EXISTS]`
-- **FR-6.1** Dry-run (default): write a JSON artifact + the exact gnokey command.
-- **FR-6.2** Broadcast (`--broadcast`): sign & submit via gnokey.
+- **FR-6.1** katana **always broadcasts**: build the proposal, then sign &
+  submit it on-chain via gnokey. There is no dry-run mode and no artifact-only
+  output — every eligible, non-suppressed validator results in a real
+  broadcast attempt.
 - **FR-6.3** Before proposing, confirm the target is in the live consensus valset
   (skippable with `--skip-valset-check`).
 - **FR-6.4** Realm path / function / args are configurable (per chain).
@@ -168,10 +171,21 @@ submitted). Each loops on its own ticker.
   - `gnokey.password` — unlocks the key for signing. **Secret**: overridable via
     `KATANA_GNOKEY_PASSWORD`; strongly recommended to keep it out of the file in
     production.
-  - The wallet is only used on the broadcast path; dry-run never reads it.
-- **FR-6.6** Run mode (`dry-run` vs `broadcast`) is set in `config.yaml`
-  (`proposal.mode`), **not** a CLI flag, since katana runs as a permanent
-  backend. *(decision D9)* `[CHANGE]`
+  - The wallet is used on every cycle: katana has no other run path.
+- **FR-6.6** katana is **broadcast-only**; there is no run-mode setting and no
+  CLI flag to select it, since katana runs as a permanent backend and always
+  submits on-chain. *(decision D9 — superseded: dry-run removed.)* `[CHANGE]`
+- **FR-6.6b** The signing key is provisioned into the gnokey keybase from a
+  configured **mnemonic** (`gnokey.mnemonic`, env `KATANA_GNOKEY_MNEMONIC`) at
+  startup: `internal/keybase.Ensure` imports the derived key under
+  `gnokey.key_name` if it is not already present, and is a no-op otherwise
+  (idempotent). In production the keybase is typically **pre-provisioned**
+  (mounted volume / already-imported key) and no mnemonic is configured, so
+  `Ensure` is a no-op and katana relies on the existing key. `gnokey` itself
+  ships **inside the katana container image**, built from
+  `github.com/gnolang/gno/gno.land/cmd/gnokey` and pinned by the `GNO_REF`
+  build-arg (see `Dockerfile`), so no separate gnokey install is required at
+  deploy time.
 - **FR-6.7** **Per-chain wallet.** The proposing wallet (address, key name,
   password, home, gas) is defined globally under `gnokey:` and can be
   **overridden per chain**. Rationale: a key is only a GovDAO member on the
@@ -235,12 +249,12 @@ katana tracks a per-`(chain, validator)` state machine, derived from the
 - **FR-VT.4** On **accepted**, katana may additionally confirm the validator has
   actually left the consensus valset (RPC `/validators`) before declaring it
   removed.
-- **FR-VT.5** Vote tracking only applies when `proposal.mode: broadcast`
-  (dry-run produces no on-chain proposal to follow).
+- **FR-VT.5** Vote tracking always applies: every produced proposal is a real
+  on-chain broadcast, so every one has a GovDAO id to follow.
 
 ### 6.9 Notifications `[TO BUILD]`
 
-Notifications never fire for dry-run runs or errors; they follow the on-chain
+Notifications never fire on a failed/errored broadcast; they follow the on-chain
 lifecycle. Three events, all in English (decision D3):
 
 - **FR-8.1** *Proposal sent* — after a **successful broadcast**:
@@ -288,12 +302,16 @@ gnomonitoring:
   discover_chains: true                 # [NEW] validate config against /info only; URLs stay in chains.* (D8)
 
 # [NEW] Global proposing wallet. Overridable per chain (see chains.* below).
+# gnokey ships inside the katana image, pinned by the Dockerfile's GNO_REF
+# build-arg — no separate install needed at deploy time.
 gnokey:
   bin: "gnokey"
   key_name: ""                          # keybase key name
   address: ""                           # [NEW] proposing wallet address g1... (env: KATANA_GNOKEY_ADDRESS)
   home: ""
   password: ""                          # [NEW-emphasis] secret (env: KATANA_GNOKEY_PASSWORD)
+  mnemonic: ""                          # [NEW] provisions the key at startup if absent (env: KATANA_GNOKEY_MNEMONIC);
+                                         # leave empty when the keybase is already pre-provisioned (production)
   gas_fee: "1000000ugnot"
   gas_wanted: 20000000
 
@@ -311,9 +329,9 @@ conditions:
 exceptions:
   - "g1protected..."
 
-# [NEW] Proposal creation + lifecycle.
+# [NEW] Proposal creation + lifecycle. katana is broadcast-only: every produced
+# proposal is signed and submitted on-chain via gnokey (no dry-run/mode field).
 proposal:
-  mode: dry-run                    # [NEW] dry-run | broadcast (D9, per-chain overridable)
   cooldown: 720h                   # [NEW] min interval between two proposals for the same validator (D1)
   rejected_backoff: 720h           # [NEW] wait after a GovDAO rejection before re-proposing (D11, per-chain overridable)
   max_rejections: 2                # [NEW] stop after N GovDAO rejections; 0 = unlimited (D12, per-chain overridable)
@@ -325,7 +343,6 @@ proposal:
     Automated ejection proposal generated by katana.
     Validator: {moniker} ({address})
     Reason: {reason}
-  output_dir: "./data/proposals"
 
 # [NEW] Vote tracking — follows the GovDAO outcome of broadcast proposals.
 vote_tracking:
@@ -370,7 +387,6 @@ chains:
     gnomonitoring_chain: "gnoland1"
     enabled: true
     poll_interval: 2m              # [NEW] per-chain cadence override (D7)
-    mode: broadcast                # [NEW] per-chain run mode override (D9)
     # [NEW] optional per-chain wallet override (decision D10).
     # Any field omitted falls back to the global gnokey block.
     gnokey:
@@ -396,10 +412,11 @@ chains:
 
 - `evaluations(id, created_at, chain, address, moniker, missed_blocks,
   critical_alerts, eligible, excepted, reason)` — one row per candidate per cycle.
-- `proposals(id, created_at, chain, chain_id, address, moniker, reason, mode,
-  title, realm_path, function, args, artifact, output, success,
-  onchain_proposal_id, status, resolved_at)` — one row per produced proposal.
-  `[EXTEND]` `onchain_proposal_id` (GovDAO id, broadcast only), `status`
+- `proposals(id, created_at, chain, chain_id, address, moniker, reason,
+  title, realm_path, function, args, output, success,
+  onchain_proposal_id, status, resolved_at)` — one row per produced (broadcast)
+  proposal. `[EXTEND]` `onchain_proposal_id` (GovDAO id, captured after every
+  successful broadcast), `status`
   (`pending` | `accepted` | `rejected`), `resolved_at`. Source of truth for the
   lifecycle gate (cooldown, rejection backoff, rejection count) per
   `(chain, address)`.
@@ -419,8 +436,14 @@ chains:
 
 ## 10. Security & safety
 
-- Dry-run is the default; on-chain effects only behind `--broadcast`.
-- No key material stored by katana; gnokey owns signing.
+- katana is **broadcast-only**: there is no dry-run/preview mode, so every
+  eligible validator that clears the lifecycle gate and valset check is
+  actually proposed on-chain.
+- No key material stored by katana; gnokey owns signing. The signing key
+  itself lives in the gnokey keybase — either provisioned from a mnemonic
+  katana passes to `gnokey add` at startup, or already present in a
+  pre-provisioned keybase in production (katana never keeps the mnemonic or
+  private key beyond that one-time import).
 - `config.yaml`, `data/`, `*.db` are git-ignored; secrets overridable via env.
 - Valset safety check before every proposal.
 - Cooldown prevents accidental proposal spam in a continuous loop.
@@ -455,9 +478,9 @@ RPC, GovDAO, gnokey, or network access.
 ### 12.2 Per-package test matrix (TR)
 
 - **TR-config** — load / defaults / validate; env-override precedence; per-chain
-  overrides (conditions, proposal, gnokey, mode, poll_interval); exceptions union
+  overrides (conditions, proposal, gnokey, poll_interval); exceptions union
   + address/moniker matching; rejects invalid values (bad `storage.driver`, bad
-  durations, missing required fields on an enabled chain, unknown `default`/mode).
+  durations, missing required fields on an enabled chain, unknown `default`).
 - **TR-rules** — each condition on/off; strict `>` boundary cases; `require_all`
   AND vs OR; zero enabled conditions → not eligible; reason strings.
 - **TR-lifecycle** — state machine `none→pending→accepted`,
@@ -471,8 +494,8 @@ RPC, GovDAO, gnokey, or network access.
 - **TR-votetrack** — extract proposal id from `ProposalCreated` event attrs; map
   `vm/qrender` output to `accepted` / `pending` / `rejected` incl. unknown.
 - **TR-proposal** — template placeholder rendering; gnokey argument-vector
-  assembly; `DryRun` writes the artifact; `Broadcast` via fake runner (success,
-  failure, password on stdin) + on-chain id capture.
+  assembly; `Broadcast` via fake runner (success, failure, password on stdin) +
+  on-chain id capture.
 - **TR-notifications** — English message formatting per event (sent / accepted /
   rejected); per-channel dispatch (Discord / Slack / Telegram) via httptest;
   best-effort (a failure never propagates); emitted only on successful broadcast.
@@ -517,8 +540,8 @@ supermajority alone). This is where katana is exercised as it will run in prod.
   for it under `chain=local`.
 - **PP-3 katana config.** A `local` chain: `rpc_endpoint: http://localhost:26658`,
   `chain_id: dev`, `gnomonitoring_chain: local`, `gnoweb_url: http://localhost:8890`,
-  `mode: broadcast`, wallet = the `dev` gnokey account, conditions tuned so
-  `validator4` becomes eligible quickly.
+  wallet = the `dev` gnokey account (katana always broadcasts, so no run-mode
+  setting is needed), conditions tuned so `validator4` becomes eligible quickly.
 - **PP-4 Assert the full flow.** katana detects `validator4` eligible → broadcasts
   the ejection proposal → captures the `ProposalCreated` id → the vote-watcher
   follows it. Then, driving the `dev` GovDAO vote:
@@ -550,7 +573,7 @@ supermajority alone). This is where katana is exercised as it will run in prod.
 | Area | Today | Target |
 |------|-------|--------|
 | Execution | One-shot CLI; loop delegated to Docker `KATANA_INTERVAL`/cron | Native daemon, per-chain workers, `poll_interval` in config |
-| Run mode | `--broadcast` CLI flag | `proposal.mode` in config (no CLI flag) |
+| Run mode | `--broadcast` CLI flag (opt-in) | Always broadcast, no flag/mode — the daemon signs & submits every eligible proposal |
 | Notifications | None | Discord / Telegram / Slack on **sent / accepted / rejected** |
 | Dedup | None (would re-propose each cycle) | Lifecycle state machine (pending/accepted/rejected + cooldown/backoff) |
 | Vote tracking | None | Vote-watcher worker follows GovDAO outcome per proposal |
@@ -563,7 +586,7 @@ supermajority alone). This is where katana is exercised as it will run in prod.
 | Chain enable | `enabled:` per chain | Unchanged |
 | Conditions / windows | In config, per chain | Unchanged |
 | Metrics source | gnomonitoring API | Unchanged |
-| Proposal build/broadcast | gnokey, dry-run/broadcast | Unchanged |
+| Proposal build/broadcast | gnokey, dry-run or broadcast | gnokey, **broadcast-only**; gnokey embedded in the image (`GNO_REF`), key provisioned from a mnemonic at startup |
 | Storage | SQLite history | Unchanged (+ used for cooldown, + notifications table) |
 
 ## 14. Decisions
@@ -585,8 +608,11 @@ supermajority alone). This is where katana is exercised as it will run in prod.
 - **D8 — Chain discovery.** ✅ RPC + gnoweb URLs live in `chains.*` in config;
   `/info` is used only to **validate** them at startup (warn on mismatch), not to
   populate. (`gnoweb_url` added per chain.)
-- **D9 — Run mode.** ✅ `proposal.mode` in config (`dry-run` | `broadcast`),
-  global default overridable per chain. Default `dry-run`.
+- **D9 — Run mode.** ✅ **Superseded: katana is broadcast-only.** There is no
+  `proposal.mode` / dry-run setting; every eligible proposal is signed and
+  submitted on-chain via gnokey. The signing key is either provisioned from a
+  configured mnemonic at startup (`internal/keybase`) or already present in a
+  pre-provisioned keybase in production.
 - **D10 — Per-chain wallet.** ✅ Global `gnokey` + optional per-chain override.
 
 ### Resolved — GovDAO vote tracking
@@ -609,7 +635,8 @@ All decisions are now settled; the PRD is ready to implement.
 ## 15. Milestones (once validated)
 
 1. **M1 — Daemon core:** per-chain workers, `poll_interval`, graceful shutdown;
-   remove Docker sleep loop; `proposal.mode` in config.
+   remove Docker sleep loop; katana broadcasts every proposal (no run-mode
+   setting).
 2. **M2 — Cooldown:** dedup from SQLite history.
 3. **M3 — Vote tracking + lifecycle:** capture on-chain proposal id, vote-watcher
    worker, lifecycle state machine (pending/accepted/rejected, cooldown +
@@ -643,8 +670,11 @@ All decisions are now settled; the PRD is ready to implement.
   accepted / rejected, driving whether a new proposal may be created.
 - **Vote watcher** — the worker that polls GovDAO for the outcome of katana's
   broadcast proposals.
-- **Dry-run** — produce the proposal artifact without signing/broadcasting.
-- **Broadcast** — sign and submit the proposal on-chain via gnokey.
+- **Broadcast** — sign and submit the proposal on-chain via gnokey; katana's
+  only mode of operation (no dry-run/preview mode exists).
+- **Keybase provisioning** — importing the signing key derived from a
+  configured mnemonic into the gnokey keybase at startup (`internal/keybase`);
+  idempotent, and a no-op when the keybase is already pre-provisioned.
 
 ### Appendix B — References
 

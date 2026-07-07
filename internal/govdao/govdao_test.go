@@ -1,6 +1,34 @@
 package govdao
 
-import "testing"
+import (
+	"context"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+// TestStatusParsesResponseBaseData guards the RPC-parsing seam: gno's abci_query
+// nests the render under result.response.ResponseBase.Data (base64), not a flat
+// "value" field. Reading the wrong field yields an empty render → classify →
+// Unknown, which silently keeps every proposal pending forever.
+func TestStatusParsesResponseBaseData(t *testing.T) {
+	render := "## Prop #1\n### Stats\n- **PROPOSAL HAS BEEN ACCEPTED**\n"
+	data := base64.StdEncoding.EncodeToString([]byte(render))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"response":{"ResponseBase":{"Data":"` + data + `","Error":null}}}}`))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "gno.land/r/gov/dao").Status(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got != Accepted {
+		t.Fatalf("Status = %q, want %q", got, Accepted)
+	}
+}
 
 func TestClassify(t *testing.T) {
 	tests := []struct {

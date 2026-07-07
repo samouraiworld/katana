@@ -1,5 +1,5 @@
-// Package proposal builds a valset-ejection GovDAO proposal and either writes it
-// out for manual review (dry-run) or signs and broadcasts it with gnokey.
+// Package proposal builds a valset-ejection GovDAO proposal and signs and
+// broadcasts it with gnokey.
 //
 // Two submission methods are supported (proposal.submit):
 //
@@ -15,14 +15,11 @@ package proposal
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/samouraiworld/katana/internal/config"
 )
@@ -127,57 +124,14 @@ func (b Built) commonArgs(gk config.Gnokey) []string {
 		"-broadcast",
 		"-chainid", b.Target.ChainID,
 		"-remote", b.Target.RPC,
+		// Read the keybase password from stdin, not the TTY (katana execs gnokey
+		// with no controlling terminal); Broadcast feeds the password on stdin.
+		"-insecure-password-stdin",
 	}
 	if gk.Home != "" {
 		args = append(args, "-home", gk.Home)
 	}
 	return append(args, gk.KeyName)
-}
-
-// DryRun writes the proposal artifact (and, in run mode, the .gno script) into
-// the output directory and returns the artifact path.
-func (b Built) DryRun(outputDir string, gk config.Gnokey) (string, error) {
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return "", fmt.Errorf("creating output dir: %w", err)
-	}
-	base := fmt.Sprintf("proposal-%s-%s-%d", b.Target.ChainKey, safe(b.Target.Address), time.Now().Unix())
-
-	var gnokeyArgs []string
-	artifact := map[string]any{
-		"generated_at": time.Now().UTC().Format(time.RFC3339),
-		"chain":        b.Target.ChainKey,
-		"chain_id":     b.Target.ChainID,
-		"validator":    map[string]string{"moniker": b.Target.Moniker, "address": b.Target.Address, "operator": b.Target.OperatorAddress},
-		"reason":       b.Target.Reason,
-		"title":        b.Title,
-		"description":  b.Description,
-		"submit":       b.Submit,
-	}
-
-	if b.Submit == "run" {
-		scriptPath := filepath.Join(outputDir, base+".gno")
-		if err := os.WriteFile(scriptPath, []byte(b.Script), 0o644); err != nil {
-			return "", fmt.Errorf("writing script: %w", err)
-		}
-		gnokeyArgs = b.runArgs(gk, scriptPath)
-		artifact["script"] = scriptPath
-	} else {
-		gnokeyArgs = b.callArgs(gk)
-		artifact["realm"] = b.RealmPath
-		artifact["function"] = b.Function
-		artifact["args"] = b.Args
-	}
-	artifact["gnokey_command"] = "gnokey " + shellJoin(gnokeyArgs)
-
-	data, err := json.MarshalIndent(artifact, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshaling proposal: %w", err)
-	}
-	path := filepath.Join(outputDir, base+".json")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", fmt.Errorf("writing proposal: %w", err)
-	}
-	return path, nil
 }
 
 // Broadcast signs and submits the proposal via gnokey. In run mode it writes the
@@ -205,9 +159,9 @@ func (b Built) Broadcast(ctx context.Context, gk config.Gnokey) (string, error) 
 	}
 
 	cmd := exec.CommandContext(ctx, gk.Bin, args...)
-	if gk.Password != "" {
-		cmd.Stdin = strings.NewReader(gk.Password + "\n")
-	}
+	// Always provide stdin: -insecure-password-stdin makes gnokey read the
+	// password (possibly empty) from stdin rather than prompting on a TTY.
+	cmd.Stdin = strings.NewReader(gk.Password + "\n")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -239,31 +193,4 @@ func cloneVars(v map[string]string) map[string]string {
 func goInner(s string) string {
 	q := strconv.Quote(s)
 	return q[1 : len(q)-1]
-}
-
-func shellJoin(args []string) string {
-	parts := make([]string, len(args))
-	for i, a := range args {
-		if a == "" || strings.ContainsAny(a, " \t\n\"'\\") {
-			parts[i] = strconv.Quote(a)
-		} else {
-			parts[i] = a
-		}
-	}
-	return strings.Join(parts, " ")
-}
-
-func safe(s string) string {
-	s = strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		default:
-			return '-'
-		}
-	}, s)
-	if len(s) > 16 {
-		s = s[:16]
-	}
-	return s
 }

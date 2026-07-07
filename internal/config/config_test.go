@@ -21,7 +21,6 @@ conditions:
     max: 3
     interval: 168h
 proposal:
-  mode: dry-run
   cooldown: 720h
   rejected_backoff: 240h
 exceptions:
@@ -38,7 +37,6 @@ chains:
     gnomonitoring_chain: "gnoland1"
     enabled: true
     poll_interval: 2m
-    mode: broadcast
     gnokey:
       key_name: "betanet-key"
     exceptions:
@@ -68,9 +66,6 @@ func TestLoadAndRuntime(t *testing.T) {
 	if rt.PollInterval != 5*time.Minute {
 		t.Errorf("test poll_interval = %s, want 5m", rt.PollInterval)
 	}
-	if rt.Mode != "dry-run" {
-		t.Errorf("test mode = %s, want dry-run", rt.Mode)
-	}
 	if rt.Gnokey.KeyName != "global-key" {
 		t.Errorf("test key = %s, want global-key", rt.Gnokey.KeyName)
 	}
@@ -82,9 +77,6 @@ func TestLoadAndRuntime(t *testing.T) {
 	}
 	if rt2.PollInterval != 2*time.Minute {
 		t.Errorf("betanet poll_interval = %s, want 2m", rt2.PollInterval)
-	}
-	if rt2.Mode != "broadcast" {
-		t.Errorf("betanet mode = %s, want broadcast", rt2.Mode)
 	}
 	if rt2.Gnokey.KeyName != "betanet-key" {
 		t.Errorf("betanet key = %s, want betanet-key", rt2.Gnokey.KeyName)
@@ -119,17 +111,19 @@ func TestExceptionsUnion(t *testing.T) {
 	}
 }
 
+func TestGnokeyMnemonicEnvOverride(t *testing.T) {
+	t.Setenv("KATANA_GNOKEY_MNEMONIC", "word1 word2 word3")
+	c := &Config{}
+	c.applyEnvOverrides()
+	if c.Gnokey.Mnemonic != "word1 word2 word3" {
+		t.Fatalf("mnemonic = %q, want the env value", c.Gnokey.Mnemonic)
+	}
+}
+
 func TestValidationErrors(t *testing.T) {
 	cases := map[string]string{
-		"bad mode": `
+		"missing gnokey key_name": `
 gnomonitoring: {base_url: "x"}
-proposal: {mode: nonsense}
-chains:
-  c: {rpc_endpoint: "r", chain_id: "d", gnomonitoring_chain: "l", enabled: true}
-`,
-		"broadcast without key": `
-gnomonitoring: {base_url: "x"}
-proposal: {mode: broadcast}
 chains:
   c: {rpc_endpoint: "r", chain_id: "d", gnomonitoring_chain: "l", enabled: true}
 `,

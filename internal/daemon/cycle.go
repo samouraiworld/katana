@@ -94,16 +94,28 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	}
 }
 
-// produce builds and either writes (dry-run) or broadcasts a proposal, records
-// it, and notifies on a successful broadcast.
+// produce builds, signs, and broadcasts an ejection proposal, records it, and
+// notifies on a successful broadcast.
 func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, reason string) {
+	// A valset ejection is keyed by the operator address, but metrics are keyed
+	// by the signing address. A missing mapping is fatal for the broadcast (we
+	// would eject an unknown operator).
+	operator := addr
+	if op, ok := d.resolverFor(rt).OperatorFor(ctx, addr); ok {
+		operator = op
+	} else {
+		d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, addr)
+		return
+	}
+
 	built := proposal.Build(proposal.Target{
-		ChainKey: rt.Key,
-		ChainID:  rt.ChainID,
-		RPC:      rt.RPCEndpoint,
-		Moniker:  moniker,
-		Address:  addr,
-		Reason:   reason,
+		ChainKey:        rt.Key,
+		ChainID:         rt.ChainID,
+		RPC:             rt.RPCEndpoint,
+		Moniker:         moniker,
+		Address:         addr,
+		OperatorAddress: operator,
+		Reason:          reason,
 	}, rt.Proposal, rt.Gnokey)
 
 	rec := store.ProposalRecord{
@@ -112,35 +124,26 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		RealmPath: built.RealmPath, Function: built.Function, Args: built.Args,
 	}
 
-	if rt.Mode == "broadcast" {
-		rec.Mode = "broadcast"
-		out, err := built.Broadcast(ctx, rt.Gnokey)
-		rec.Output = out
-		rec.Success = err == nil
-		if err == nil {
-			rec.Status = store.StatusPending
-			rec.OnchainID = govdao.ExtractProposalID(out)
-		}
-		id, _ := d.st.RecordProposal(ctx, rec)
-		if err != nil {
-			d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, addr, err)
-			return
-		}
-		d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
-		d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID)
-		return
-	}
-
-	rec.Mode = "dry-run"
-	path, err := built.DryRun(rt.Proposal.OutputDir, rt.Gnokey)
-	rec.Artifact = path
+	out, err := built.Broadcast(ctx, rt.Gnokey)
+	rec.Output = out
 	rec.Success = err == nil
-	_, _ = d.st.RecordProposal(ctx, rec)
+	if err == nil {
+		rec.Status = store.StatusPending
+		rec.OnchainID = govdao.ExtractProposalID(out)
+	}
+	id, recErr := d.st.RecordProposal(ctx, rec)
 	if err != nil {
-		d.logger.Printf("[%s][eval] dry-run write failed for %s: %v", rt.Key, addr, err)
+		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, addr, err)
 		return
 	}
-	d.logger.Printf("[%s][eval] proposal written: %s", rt.Key, path)
+	if recErr != nil {
+		// The proposal is already on-chain but we failed to persist it: the
+		// lifecycle gate has no record and will re-broadcast an identical
+		// ejection next cycle. Surface this loudly rather than silently spam.
+		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, addr, recErr)
+	}
+	d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
+	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID)
 }
 
 // voteCycle polls the GovDAO outcome of this chain's pending proposals.
