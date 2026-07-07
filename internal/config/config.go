@@ -213,8 +213,13 @@ type Runtime struct {
 // DefaultEjectScript is the gno.land valset-ejection script used in "run"
 // submission mode. It routes through r/sys/validators/v3 with Power=0 (removal)
 // and creates the GovDAO proposal. Placeholders: {operator_address} {title}
-// {description}. Confirmed against gno.land examples (r/sys/validators/v3 —
-// direct MsgCall is unsupported, so a crossing script is required).
+// {description}. Direct MsgCall is unsupported (the v3 builder is non-crossing),
+// so a crossing script is required.
+//
+// CONFIRMED end-to-end on the gnoland-test devnet (PP-5): a proposal built from
+// this script, once accepted and executed, emits ValidatorRemoved from
+// r/sys/validators/v3 and drops the operator from the consensus valset (RPC
+// /validators). Confirmed via `make accept-govdao` in gnoland-test (see issue #2).
 const DefaultEjectScript = `package main
 
 import (
