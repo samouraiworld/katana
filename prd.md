@@ -560,6 +560,12 @@ supermajority alone). This is where katana is exercised as it will run in prod.
     **`gnokey maketx run` script** (MsgRun), **not** a `maketx call` (MsgCall).
     → katana gained a `proposal.submit: run|call` mode; `run` (default) uses the
     built-in `DefaultEjectScript`.
+  - **Confirmed end-to-end on the gnoland-test devnet (2026-07-07).** A katana
+    `run`-mode proposal (GovDAO #2, "Eject validator samourai-crew-4") was driven
+    to acceptance via `make accept-govdao ID=2`; execution emitted
+    `ValidatorRemoved` (op `g1ps3…`, signingAddr `g1g646…`) from
+    `r/sys/validators/v3`, and RPC `/validators` dropped from 4 to 3 validators
+    (the target removed). The run-mode entrypoint is now pinned/confirmed.
   - It needs the validator's **operator address**, whereas gnomonitoring keys
     metrics by the **signing/consensus address**. **Remaining gap:** katana must
     resolve signing → operator via the valopers realm (as gnomonitoring's
