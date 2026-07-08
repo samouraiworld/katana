@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,12 +69,12 @@ func TestDispatchDisabled(t *testing.T) {
 	}
 }
 
-func TestMessageWouldEjectIncludesCode(t *testing.T) {
+func TestMessageWouldEjectIncludesCommand(t *testing.T) {
 	msg := Message(EventWouldEject, Info{
-		Chain:        "local",
-		Moniker:      "val4",
-		Address:      "g1abc",
-		ProposalCode: "package main\nfunc main() { /* eject */ }",
+		Chain:         "local",
+		Moniker:       "val4",
+		Address:       "g1abc",
+		GnokeyCommand: "printf … | gnokey maketx run … ./eject-val4.gno",
 	})
 	if !strings.Contains(msg, "val4") || !strings.Contains(msg, "g1abc") {
 		t.Errorf("missing validator identity: %q", msg)
@@ -81,7 +82,41 @@ func TestMessageWouldEjectIncludesCode(t *testing.T) {
 	if !strings.Contains(msg, "disabled") {
 		t.Errorf("observe message should say sending is disabled: %q", msg)
 	}
-	if !strings.Contains(msg, "```") || !strings.Contains(msg, "eject") {
-		t.Errorf("observe message should embed the proposal code: %q", msg)
+	if !strings.Contains(msg, "gnokey maketx run") {
+		t.Errorf("observe message should embed the gnokey command: %q", msg)
+	}
+}
+
+func TestDispatchWouldEjectAttachesFile(t *testing.T) {
+	var gotContentType, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	n := New(config.Notifications{
+		Enabled: true,
+		Discord: config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
+	})
+	res := n.Dispatch(context.Background(), EventWouldEject, Info{
+		Chain: "local", Moniker: "val4", Address: "g1abc",
+		ProposalFilename: "eject-val4.gno",
+		ProposalCode:     "package main // eject",
+		GnokeyCommand:    "gnokey maketx run ... ./eject-val4.gno",
+	})
+	if len(res) != 1 || !res[0].OK {
+		t.Fatalf("expected 1 ok result, got %+v", res)
+	}
+	if !strings.HasPrefix(gotContentType, "multipart/form-data") {
+		t.Errorf("expected multipart upload, got content-type %q", gotContentType)
+	}
+	if !strings.Contains(gotBody, "eject-val4.gno") || !strings.Contains(gotBody, "package main // eject") {
+		t.Errorf("multipart body missing the attached script:\n%s", gotBody)
+	}
+	if !strings.Contains(gotBody, "gnokey maketx run") {
+		t.Errorf("multipart body missing the command in payload_json:\n%s", gotBody)
 	}
 }
