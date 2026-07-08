@@ -125,6 +125,10 @@ func (c CriticalCond) Duration() (time.Duration, error) {
 // Proposal describes the on-chain GovDAO ejection entrypoint plus the lifecycle
 // timers. The timers have global defaults, overridable per chain.
 type Proposal struct {
+	// Enabled toggles on-chain broadcasting for this scope. nil/absent means
+	// enabled (the broadcast-first default). false = observe-only: katana still
+	// evaluates and notifies, but does not sign/broadcast the proposal on-chain.
+	Enabled         *bool  `yaml:"enabled"`
 	Cooldown        string `yaml:"cooldown"`
 	RejectedBackoff string `yaml:"rejected_backoff"`
 	MaxRejections   int    `yaml:"max_rejections"`
@@ -140,6 +144,12 @@ type Proposal struct {
 
 	TitleTemplate       string `yaml:"title_template"`
 	DescriptionTemplate string `yaml:"description_template"`
+}
+
+// BroadcastEnabled reports whether katana should sign & broadcast proposals for
+// this scope. Absent (nil) means enabled — the broadcast-first default.
+func (p Proposal) BroadcastEnabled() bool {
+	return p.Enabled == nil || *p.Enabled
 }
 
 // VoteTracking configures the vote-watcher worker.
@@ -371,6 +381,17 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 	if ch.Proposal != nil {
 		prop = *ch.Proposal
 	}
+	// Resolve broadcasting: default true, set by global proposal.enabled, then
+	// overridden by the per-chain proposal.enabled when present. After this,
+	// prop.Enabled is always non-nil (BroadcastEnabled reads it directly).
+	broadcast := true
+	if c.Proposal.Enabled != nil {
+		broadcast = *c.Proposal.Enabled
+	}
+	if ch.Proposal != nil && ch.Proposal.Enabled != nil {
+		broadcast = *ch.Proposal.Enabled
+	}
+	prop.Enabled = &broadcast
 	if _, err := parseDur(prop.Cooldown); err != nil {
 		return Runtime{}, fmt.Errorf("proposal.cooldown: %w", err)
 	}

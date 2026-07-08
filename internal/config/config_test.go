@@ -147,3 +147,58 @@ chains:
 		})
 	}
 }
+
+func TestProposalEnabledDefaultsTrue(t *testing.T) {
+	c, err := Load(writeConfig(t, validYAML)) // validYAML sets no proposal.enabled
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+	if !rt.Proposal.BroadcastEnabled() {
+		t.Fatal("proposal.enabled should default to true when unset")
+	}
+}
+
+func TestProposalEnabledPerChainOverride(t *testing.T) {
+	const yaml = `
+gnomonitoring:
+  base_url: "http://localhost:8989"
+gnokey:
+  key_name: "k"
+  password: "p"
+proposal:
+  enabled: true
+  cooldown: 720h
+  rejected_backoff: 720h
+chains:
+  armed:
+    rpc_endpoint: "http://x:26657"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+  observe:
+    rpc_endpoint: "http://y:26657"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+    proposal:
+      enabled: false
+      cooldown: 720h
+      rejected_backoff: 720h
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	armed, _ := c.Runtime("armed")
+	if !armed.Proposal.BroadcastEnabled() {
+		t.Error("armed chain should have broadcasting enabled")
+	}
+	observe, _ := c.Runtime("observe")
+	if observe.Proposal.BroadcastEnabled() {
+		t.Error("observe chain should have broadcasting disabled")
+	}
+}
