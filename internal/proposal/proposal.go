@@ -134,6 +134,41 @@ func (b Built) commonArgs(gk config.Gnokey) []string {
 	return append(args, gk.KeyName)
 }
 
+// Command renders a copy-pasteable gnokey command an operator can run to
+// broadcast this proposal manually (used in observe-mode notifications).
+// scriptName is the local path of the .gno file the operator downloads (run
+// mode; ignored in call mode). The keybase password is piped via stdin
+// (-insecure-password-stdin), never embedded in the command text.
+func (b Built) Command(gk config.Gnokey, scriptName string) string {
+	var args []string
+	if b.Submit == "run" {
+		args = b.runArgs(gk, scriptName)
+	} else {
+		args = b.callArgs(gk)
+	}
+	bin := gk.Bin
+	if bin == "" {
+		bin = "gnokey"
+	}
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shellArg(a)
+	}
+	return `printf '%s\n' "$KEYBASE_PASSWORD" | ` + bin + " " + strings.Join(quoted, " ")
+}
+
+// shellArg single-quotes a when it contains characters the shell would
+// interpret, so the rendered Command is safe to copy-paste.
+func shellArg(a string) string {
+	if a == "" {
+		return "''"
+	}
+	if strings.ContainsAny(a, " \t\n\"'\\$`(){}[]<>|&;*?#~!") {
+		return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return a
+}
+
 // Broadcast signs and submits the proposal via gnokey. In run mode it writes the
 // script to a temp file first. The combined gnokey output is returned.
 func (b Built) Broadcast(ctx context.Context, gk config.Gnokey) (string, error) {
