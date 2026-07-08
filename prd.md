@@ -172,9 +172,15 @@ submitted). Each loops on its own ticker.
     `KATANA_GNOKEY_PASSWORD`; strongly recommended to keep it out of the file in
     production.
   - The wallet is used on every cycle: katana has no other run path.
-- **FR-6.6** katana is **broadcast-only**; there is no run-mode setting and no
-  CLI flag to select it, since katana runs as a permanent backend and always
-  submits on-chain. *(decision D9 — superseded: dry-run removed.)* `[CHANGE]`
+- **FR-6.6** katana broadcasts on-chain by default. There is no dry-run/artifact
+  mode and no CLI flag to select behaviour. *(decision D9 — dry-run removed.)*
+  `[CHANGE]`
+- **FR-6.6a** `proposal.enabled` (default `true`, overridable per chain) is an
+  **observe toggle**: when `false`, katana still evaluates candidates and sends a
+  notification (a `would_eject` message that embeds the proposal code that *would*
+  be submitted), records the proposal row so the lifecycle cooldown gate prevents
+  re-notification, but does **not** sign/broadcast on-chain. This is an arm/observe
+  switch for safe rollout, not a return of dry-run.
 - **FR-6.6b** The signing key is provisioned into the gnokey keybase from a
   configured **mnemonic** (`gnokey.mnemonic`, env `KATANA_GNOKEY_MNEMONIC`) at
   startup: `internal/keybase.Ensure` imports the derived key under
