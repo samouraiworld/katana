@@ -23,9 +23,10 @@ import (
 type Event string
 
 const (
-	EventSent     Event = "sent"
-	EventAccepted Event = "accepted"
-	EventRejected Event = "rejected"
+	EventSent       Event = "sent"
+	EventAccepted   Event = "accepted"
+	EventRejected   Event = "rejected"
+	EventWouldEject Event = "would_eject"
 )
 
 // Info carries the fields a message may reference.
@@ -36,6 +37,7 @@ type Info struct {
 	GnowebURL       string
 	ProposalID      string
 	RejectedBackoff time.Duration
+	ProposalCode    string // .gno script or call expression, for observe (would_eject) notifications
 }
 
 func (i Info) display() string {
@@ -66,6 +68,13 @@ func Message(event Event, in Info) string {
 	case EventRejected:
 		msg = fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
 			in.display(), in.Address, in.Chain, in.RejectedBackoff)
+	case EventWouldEject:
+		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for ejection, but proposal sending is disabled — no on-chain proposal was submitted.",
+			in.display(), in.Address, in.Chain)
+		if in.ProposalCode != "" {
+			msg += "\nProposal that would be submitted:\n```\n" + truncate(in.ProposalCode, 1500) + "\n```"
+		}
+		return msg
 	default:
 		msg = fmt.Sprintf("katana event %q for validator %s (%s) on %s.", event, in.display(), in.Address, in.Chain)
 	}
@@ -164,4 +173,14 @@ func host(rawURL string) string {
 		return u.Host
 	}
 	return ""
+}
+
+// truncate caps s to n runes, appending an ellipsis marker when cut, so a long
+// proposal script cannot overflow a channel's message-size limit (Discord 2000).
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "\n… (truncated)"
 }

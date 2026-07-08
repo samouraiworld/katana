@@ -67,3 +67,21 @@ func TestDispatchDisabled(t *testing.T) {
 		t.Fatalf("expected nil results when disabled, got %+v", got)
 	}
 }
+
+func TestMessageWouldEjectIncludesCode(t *testing.T) {
+	msg := Message(EventWouldEject, Info{
+		Chain:        "local",
+		Moniker:      "val4",
+		Address:      "g1abc",
+		ProposalCode: "package main\nfunc main() { /* eject */ }",
+	})
+	if !strings.Contains(msg, "val4") || !strings.Contains(msg, "g1abc") {
+		t.Errorf("missing validator identity: %q", msg)
+	}
+	if !strings.Contains(msg, "disabled") {
+		t.Errorf("observe message should say sending is disabled: %q", msg)
+	}
+	if !strings.Contains(msg, "```") || !strings.Contains(msg, "eject") {
+		t.Errorf("observe message should embed the proposal code: %q", msg)
+	}
+}
