@@ -121,29 +121,33 @@ add-key:
 	echo ">>> in katana config: gnokey.key_name=$(NAME), gnokey.mnemonic=<the phrase above>."
 
 # accept-govdao: drive a GovDAO proposal to acceptance on the devnet by voting
-# YES as `dev` (the founding member) and executing it. katana only PROPOSES
-# (it never votes), so this is the test-harness step that confirms a proposal's
-# end-to-end effect — e.g. that an accepted validator-ejection actually removes
-# the validator from the consensus valset (RPC /validators). Requires the devnet
-# running and the dev keybase (.gnokey-dev, created by bootstrap.sh/add-key).
+# YES with every T1 member in the dev keybase (dev + katana), then executing it.
+# katana only PROPOSES in production (it never votes); this test-harness step is
+# what confirms a proposal's end-to-end effect — e.g. that an accepted
+# validator-ejection removes the validator from the consensus valset.
 #
-# Assumes dev's single YES reaches acceptance — true for this devnet (dev is the
-# founding member; katana is the only other T1 member). If more GovDAO members
-# are added, dev's vote alone may not meet quorum and ExecuteProposal will fail
-# with "not accepted" — add the missing YES votes first. Not idempotent: a second
-# run fails on the already-cast vote (fails loud, no execute).
+# BOTH members must vote YES: a single YES is only 2/3 (66.66%), which does NOT
+# exceed the supermajority, so ExecuteProposal would fail with "didn't reach
+# supermajority yet". Each vote is best-effort (a member that already voted is
+# skipped); ExecuteProposal is strict and fails loud if the proposal is still not
+# accepted (e.g. new GovDAO members added without their YES). Requires the devnet
+# running and .gnokey-dev (bootstrap.sh / add-key).
 #   make accept-govdao ID=2
 accept-govdao:
 	@test -n "$(ID)" || { echo "usage: make accept-govdao ID=<proposal-id>"; exit 1; }
-	@echo ">>> [1/2] voting YES on proposal #$(ID) as dev"
-	@echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func MustVoteOnProposalSimple \
-	  -args "$(ID)" -args YES -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast \
-	  -chainid $(DEV_CHAIN) -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev
-	@echo ">>> [2/2] executing proposal #$(ID) as dev"
-	@echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func ExecuteProposal \
+	@set -e; \
+	for M in dev katana; do \
+	  echo ">>> voting YES on proposal #$(ID) as $$M"; \
+	  echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func MustVoteOnProposalSimple \
+	    -args "$(ID)" -args YES -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast \
+	    -chainid $(DEV_CHAIN) -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin $$M \
+	    || echo "    ($$M vote skipped: already voted or not a member)"; \
+	done; \
+	echo ">>> executing proposal #$(ID) as dev"; \
+	echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func ExecuteProposal \
 	  -args "$(ID)" -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast \
-	  -chainid $(DEV_CHAIN) -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev
-	@echo ">>> done: proposal #$(ID) voted YES + executed by dev."
+	  -chainid $(DEV_CHAIN) -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev; \
+	echo ">>> done: proposal #$(ID) accepted + executed."
 
 # Guard: the generated .env (P2P seeds) and genesis.json are required for the
 # chain to form. docker-compose has no default for SEEDS_*, so a missing .env
