@@ -177,10 +177,13 @@ submitted). Each loops on its own ticker.
   `[CHANGE]`
 - **FR-6.6a** `proposal.enabled` (default `true`, overridable per chain) is an
   **observe toggle**: when `false`, katana still evaluates candidates and sends a
-  notification (a `would_eject` message that embeds the proposal code that *would*
-  be submitted), records the proposal row so the lifecycle cooldown gate prevents
-  re-notification, but does **not** sign/broadcast on-chain. This is an arm/observe
-  switch for safe rollout, not a return of dry-run.
+  `would_eject` notification, records the proposal row so the lifecycle cooldown
+  gate prevents re-notification, but does **not** sign/broadcast on-chain. The
+  notification is a **manual-approval hand-off**: it attaches the ejection script
+  as a downloadable `.gno` file (Discord/Telegram; Slack falls back to inline
+  code) and includes the ready-to-run `gnokey` command (password piped, never
+  embedded), so an operator can review and broadcast it themselves. This is an
+  arm/observe switch for safe rollout, not a return of dry-run.
 - **FR-6.6b** The signing key is provisioned into the gnokey keybase from a
   configured **mnemonic** (`gnokey.mnemonic`, env `KATANA_GNOKEY_MNEMONIC`) at
   startup: `internal/keybase.Ensure` imports the derived key under

@@ -67,9 +67,10 @@ exceptions:
 # ── Proposal creation + lifecycle ─────────────────────────────────────────────
 proposal:
   # enabled: true broadcasts on-chain (default). Set false for observe-only:
-  # katana still evaluates and NOTIFIES (the notification includes the proposal
-  # code that would be submitted) but does not sign/broadcast. Not a dry-run/
-  # artifact mode. Overridable per chain via chains.<name>.proposal.enabled.
+  # katana still evaluates and NOTIFIES but does not sign/broadcast. The observe
+  # notification attaches the ejection .gno script (Discord/Telegram) and gives
+  # the ready-to-run gnokey command, so an operator can broadcast it by hand. Not
+  # a dry-run/artifact mode. Overridable per chain via chains.<name>.proposal.enabled.
   enabled: true
   cooldown: 720h                      # min interval between two proposals for the same validator (30d)
   rejected_backoff: 720h              # wait after a GovDAO rejection before re-proposing (30d)
