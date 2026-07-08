@@ -143,8 +143,10 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		if recErr != nil {
 			d.logger.Printf("[%s][eval] recording observe proposal failed for %s: %v", rt.Key, addr, recErr)
 		}
+		filename := ejectFilename(disp(moniker, addr))
+		command := built.Command(rt.Gnokey, filename)
 		d.logger.Printf("[%s][eval] OBSERVE (sending disabled) would eject %s", rt.Key, disp(moniker, addr))
-		d.dispatch(ctx, notify.EventWouldEject, rt, id, addr, moniker, "", code)
+		d.dispatch(ctx, notify.EventWouldEject, rt, id, addr, moniker, "", observePayload{code: code, filename: filename, command: command})
 		return
 	}
 
@@ -167,7 +169,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, addr, recErr)
 	}
 	d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
-	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID, "")
+	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID, observePayload{})
 }
 
 // voteCycle polls the GovDAO outcome of this chain's pending proposals.
@@ -196,11 +198,11 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) {
 		case govdao.Accepted:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusAccepted, d.now())
 			d.logger.Printf("[%s][vote] proposal %s ACCEPTED — %s removed from valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, p.Address, p.Moniker, p.OnchainID, "")
+			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, p.Address, p.Moniker, p.OnchainID, observePayload{})
 		case govdao.Rejected:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusRejected, d.now())
 			d.logger.Printf("[%s][vote] proposal %s REJECTED — %s kept in valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventRejected, rt, p.ID, p.Address, p.Moniker, p.OnchainID, "")
+			d.dispatch(ctx, notify.EventRejected, rt, p.ID, p.Address, p.Moniker, p.OnchainID, observePayload{})
 		default:
 			// pending / unknown: leave as pending, retry next tick.
 		}
@@ -236,18 +238,27 @@ func (d *Daemon) fetchMetrics(ctx context.Context, rt config.Runtime) (missed ma
 }
 
 // dispatch sends a notification and records each channel result.
-func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, addr, moniker, onchainID, code string) {
+// observePayload carries the extra fields a would_eject (observe) notification
+// needs: the proposal script, the filename it is attached under, and the
+// ready-to-run gnokey command. Zero value = not an observe notification.
+type observePayload struct {
+	code, filename, command string
+}
+
+func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, addr, moniker, onchainID string, obs observePayload) {
 	if !d.notifier.Enabled() {
 		return
 	}
 	results := d.notifier.Dispatch(ctx, event, notify.Info{
-		Chain:           rt.Key,
-		Moniker:         moniker,
-		Address:         addr,
-		GnowebURL:       rt.GnowebURL,
-		ProposalID:      onchainID,
-		RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
-		ProposalCode:    code,
+		Chain:            rt.Key,
+		Moniker:          moniker,
+		Address:          addr,
+		GnowebURL:        rt.GnowebURL,
+		ProposalID:       onchainID,
+		RejectedBackoff:  rt.Proposal.RejectedBackoffDur(),
+		ProposalCode:     obs.code,
+		ProposalFilename: obs.filename,
+		GnokeyCommand:    obs.command,
 	})
 	for _, r := range results {
 		status := "ok"
@@ -268,4 +279,21 @@ func disp(moniker, addr string) string {
 		return moniker
 	}
 	return addr
+}
+
+// ejectFilename builds a safe .gno filename for the attached ejection script,
+// replacing any character outside [A-Za-z0-9-_] so it is a valid attachment name.
+func ejectFilename(name string) string {
+	var b strings.Builder
+	b.WriteString("eject-")
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	b.WriteString(".gno")
+	return b.String()
 }
