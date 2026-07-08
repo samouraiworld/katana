@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/gnoland"
@@ -118,10 +120,32 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		Reason:          reason,
 	}, rt.Proposal, rt.Gnokey)
 
+	// Human-readable representation of what would be submitted, for logs and the
+	// observe (would_eject) notification.
+	code := built.Script
+	if built.Submit == "call" {
+		code = fmt.Sprintf("%s.%s(%s)", built.RealmPath, built.Function, strings.Join(built.Args, ", "))
+	}
+
 	rec := store.ProposalRecord{
 		CreatedAt: d.now(), Chain: rt.Key, ChainID: rt.ChainID, Address: addr,
 		Moniker: moniker, Reason: reason, Title: built.Title,
 		RealmPath: built.RealmPath, Function: built.Function, Args: built.Args,
+	}
+
+	if !rt.Proposal.BroadcastEnabled() {
+		// Observe-only: record what would be sent (Status stays "" so the
+		// lifecycle gate applies the cooldown floor and we don't re-notify every
+		// poll), then notify with the proposal code. No gnokey broadcast.
+		rec.Output = code
+		rec.Success = false
+		id, recErr := d.st.RecordProposal(ctx, rec)
+		if recErr != nil {
+			d.logger.Printf("[%s][eval] recording observe proposal failed for %s: %v", rt.Key, addr, recErr)
+		}
+		d.logger.Printf("[%s][eval] OBSERVE (sending disabled) would eject %s", rt.Key, disp(moniker, addr))
+		d.dispatch(ctx, notify.EventWouldEject, rt, id, addr, moniker, "", code)
+		return
 	}
 
 	out, err := built.Broadcast(ctx, rt.Gnokey)
@@ -143,7 +167,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, addr, recErr)
 	}
 	d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
-	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID)
+	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID, "")
 }
 
 // voteCycle polls the GovDAO outcome of this chain's pending proposals.
@@ -172,11 +196,11 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) {
 		case govdao.Accepted:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusAccepted, d.now())
 			d.logger.Printf("[%s][vote] proposal %s ACCEPTED — %s removed from valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, p.Address, p.Moniker, p.OnchainID)
+			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, p.Address, p.Moniker, p.OnchainID, "")
 		case govdao.Rejected:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusRejected, d.now())
 			d.logger.Printf("[%s][vote] proposal %s REJECTED — %s kept in valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventRejected, rt, p.ID, p.Address, p.Moniker, p.OnchainID)
+			d.dispatch(ctx, notify.EventRejected, rt, p.ID, p.Address, p.Moniker, p.OnchainID, "")
 		default:
 			// pending / unknown: leave as pending, retry next tick.
 		}
@@ -212,7 +236,7 @@ func (d *Daemon) fetchMetrics(ctx context.Context, rt config.Runtime) (missed ma
 }
 
 // dispatch sends a notification and records each channel result.
-func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, addr, moniker, onchainID string) {
+func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, addr, moniker, onchainID, code string) {
 	if !d.notifier.Enabled() {
 		return
 	}
@@ -223,6 +247,7 @@ func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Run
 		GnowebURL:       rt.GnowebURL,
 		ProposalID:      onchainID,
 		RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
+		ProposalCode:    code,
 	})
 	for _, r := range results {
 		status := "ok"
