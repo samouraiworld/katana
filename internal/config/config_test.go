@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,6 +27,8 @@ proposal:
   rejected_backoff: 240h
 exceptions:
   - "g1protected"
+storage:
+  driver: sqlite
 chains:
   test:
     rpc_endpoint: "http://localhost:26658"
@@ -139,6 +143,35 @@ func TestGnokeyMnemonicEnvOverride(t *testing.T) {
 	c.applyEnvOverrides()
 	if c.Gnokey.Mnemonic != "word1 word2 word3" {
 		t.Fatalf("mnemonic = %q, want the env value", c.Gnokey.Mnemonic)
+	}
+}
+
+func TestStorageNoneRequiresDryRunOnlyChains(t *testing.T) {
+	const base = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+chains:
+  armed:
+    rpc_endpoint: "r"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    %s
+`
+	// A broadcast-capable chain must not run on the Noop store: without
+	// lifecycle history it would re-broadcast the same ejection every cycle.
+	_, err := Load(writeConfig(t, fmt.Sprintf(base, "")))
+	if err == nil {
+		t.Fatal("expected fail-start with driver none + broadcast-capable chain")
+	}
+	if !strings.Contains(err.Error(), "sqlite") || !strings.Contains(err.Error(), "armed") {
+		t.Fatalf("error should point the operator at sqlite and name the chain, got: %v", err)
+	}
+
+	// A dry-run-only config may run without persistence.
+	if _, err := Load(writeConfig(t, fmt.Sprintf(base, "dry_run: true"))); err != nil {
+		t.Fatalf("dry-run-only config with driver none should load, got: %v", err)
 	}
 }
 

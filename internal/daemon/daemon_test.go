@@ -224,6 +224,24 @@ func (f *fixture) runtime(t *testing.T) config.Runtime {
 	return rt
 }
 
+func TestStorageWarning(t *testing.T) {
+	cfg := &config.Config{
+		Storage: config.Storage{Driver: "none"},
+		Chains: map[string]*config.ChainConfig{
+			"test": {Enabled: true, DryRun: true},
+		},
+	}
+	w := storageWarning(cfg)
+	if w == "" || !strings.Contains(w, "sqlite") {
+		t.Fatalf("want a warning pointing at sqlite for driver none + dry-run chains, got %q", w)
+	}
+
+	cfg.Storage.Driver = "sqlite"
+	if w := storageWarning(cfg); w != "" {
+		t.Fatalf("no warning expected with sqlite storage, got %q", w)
+	}
+}
+
 func TestEvalCycleBroadcasts(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, "dev", nil)

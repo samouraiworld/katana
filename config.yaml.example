@@ -117,6 +117,10 @@ notifications:
     chat_id: ""                       # env: KATANA_TELEGRAM_CHAT_ID
 
 # ── Storage ───────────────────────────────────────────────────────────────────
+# sqlite is REQUIRED whenever any enabled chain may broadcast (dry_run false):
+# katana refuses to start otherwise, because driver "none" keeps no lifecycle
+# history and would re-broadcast the same ejection every cycle. Dry-run-only
+# setups may use "none" (rehearsal dedup degrades; a startup warning is logged).
 storage:
   driver: sqlite                      # none | sqlite
   sqlite_path: "./data/katana.db"

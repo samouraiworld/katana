@@ -69,6 +69,9 @@ func (d *Daemon) resolverFor(rt config.Runtime) *valopers.Resolver {
 func (d *Daemon) Run(ctx context.Context) error {
 	chains := d.cfg.EnabledChains()
 	d.logger.Printf("katana daemon starting — chains=%v storage=%s", chains, d.cfg.Storage.Driver)
+	if w := storageWarning(d.cfg); w != "" {
+		d.logger.Print(w)
+	}
 
 	var wg sync.WaitGroup
 
@@ -111,6 +114,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	wg.Wait()
 	d.logger.Printf("all workers stopped")
 	return nil
+}
+
+// storageWarning describes the degradation of running without persistence, or
+// returns "" when none applies. Config validation already refuses to start a
+// broadcast-capable chain on the Noop store, so this only concerns
+// dry-run-only configurations.
+func storageWarning(cfg *config.Config) string {
+	if cfg.Storage.Driver != "none" {
+		return ""
+	}
+	return "WARNING: storage.driver \"none\" keeps no history: dry-run dedup state is lost every cycle, so the same rehearsal will be re-logged and re-notified on every poll; configure storage.driver: sqlite (required before any chain is armed)"
 }
 
 // runWorker runs cycle immediately, then on every tick, until ctx is cancelled.

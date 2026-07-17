@@ -318,6 +318,15 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("storage.driver %q is invalid (want \"none\" or \"sqlite\")", c.Storage.Driver)
 	}
+	// The Noop store keeps no lifecycle history, so a broadcast-capable chain
+	// running on it would re-broadcast the same ejection every cycle. Refuse to
+	// start rather than spam GovDAO. Dry-run-only configs may still run without
+	// persistence (with degraded rehearsal dedup — warned at startup).
+	if c.Storage.Driver == "none" {
+		if armed := c.BroadcastCapableChains(); len(armed) > 0 {
+			return fmt.Errorf("storage.driver %q (the default) cannot be used while chains %v are broadcast-capable: without persistence the lifecycle gate keeps no history and katana would re-broadcast the same ejection every cycle; set storage.driver: sqlite (or dry_run: true on every enabled chain)", c.Storage.Driver, armed)
+		}
+	}
 	if _, err := parseDur(c.PollInterval); err != nil {
 		return fmt.Errorf("poll_interval: %w", err)
 	}
@@ -417,6 +426,19 @@ func (c *Config) EnabledChains() []string {
 	ids := make([]string, 0, len(c.Chains))
 	for id, ch := range c.Chains {
 		if ch.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// BroadcastCapableChains returns the IDs of all enabled chains that may sign
+// and broadcast (i.e. not in dry_run), sorted alphabetically.
+func (c *Config) BroadcastCapableChains() []string {
+	ids := make([]string, 0, len(c.Chains))
+	for id, ch := range c.Chains {
+		if ch.Enabled && !ch.DryRun {
 			ids = append(ids, id)
 		}
 	}

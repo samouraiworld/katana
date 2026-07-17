@@ -83,6 +83,13 @@ Because katana runs continuously, a per-`(chain, validator)` state machine
 - `proposal.cooldown` (default `720h` = 30d) is a floor between any two proposals
   for the same validator.
 
+Because this gate is what stands between katana and proposal spam, katana
+**refuses to start** when any broadcast-capable chain (`dry_run: false`) is
+configured with `storage.driver: none` — the no-op store keeps no history, so
+every cycle would re-broadcast the same ejection. Configure
+`storage.driver: sqlite`. Dry-run-only configurations may run with `none`
+(a startup warning describes the degraded rehearsal dedup).
+
 ## Rehearsal / dry-run
 
 Set `dry_run: true` on a chain to rehearse katana against a live network
