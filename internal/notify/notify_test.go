@@ -33,6 +33,13 @@ func TestMessage(t *testing.T) {
 		t.Errorf("unexpected rejected message")
 	}
 
+	// Dry-run messages are unmistakably labeled and say nothing went on-chain.
+	dry := Message(EventDryRun, in)
+	if !strings.HasPrefix(dry, "[DRY-RUN]") || !strings.Contains(dry, "Sam (g1abc)") ||
+		!strings.Contains(dry, "nothing was broadcast") {
+		t.Errorf("unexpected dry-run message: %q", dry)
+	}
+
 	// Moniker falls back to address when empty, and no link without gnoweb.
 	bare := Message(EventSent, Info{Chain: "c", Address: "g1x"})
 	if !strings.Contains(bare, "g1x (g1x)") || strings.Contains(bare, "/r/gov/dao:") {

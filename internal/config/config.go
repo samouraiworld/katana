@@ -183,16 +183,20 @@ type Web struct {
 
 // ChainConfig describes a single gno.land network with optional overrides.
 type ChainConfig struct {
-	RPCEndpoint        string      `yaml:"rpc_endpoint"`
-	GnowebURL          string      `yaml:"gnoweb_url"`
-	ChainID            string      `yaml:"chain_id"`
-	GnomonitoringChain string      `yaml:"gnomonitoring_chain"`
-	Enabled            bool        `yaml:"enabled"`
-	PollInterval       string      `yaml:"poll_interval"`
-	Conditions         *Conditions `yaml:"conditions"`
-	Proposal           *Proposal   `yaml:"proposal"`
-	Gnokey             *Gnokey     `yaml:"gnokey"`
-	Exceptions         []string    `yaml:"exceptions"`
+	RPCEndpoint        string `yaml:"rpc_endpoint"`
+	GnowebURL          string `yaml:"gnoweb_url"`
+	ChainID            string `yaml:"chain_id"`
+	GnomonitoringChain string `yaml:"gnomonitoring_chain"`
+	Enabled            bool   `yaml:"enabled"`
+	// DryRun runs the full evaluation pipeline for this chain but never signs
+	// or broadcasts: the would-be proposal is logged and notified instead.
+	// Meant for rehearsing katana against a live network before arming it.
+	DryRun       bool        `yaml:"dry_run"`
+	PollInterval string      `yaml:"poll_interval"`
+	Conditions   *Conditions `yaml:"conditions"`
+	Proposal     *Proposal   `yaml:"proposal"`
+	Gnokey       *Gnokey     `yaml:"gnokey"`
+	Exceptions   []string    `yaml:"exceptions"`
 }
 
 // Runtime is the fully-resolved settings for one chain, global defaults merged
@@ -203,6 +207,7 @@ type Runtime struct {
 	GnowebURL          string
 	ChainID            string
 	GnomonitoringChain string
+	DryRun             bool
 	PollInterval       time.Duration
 	VotePollInterval   time.Duration
 	Conditions         Conditions
@@ -313,6 +318,15 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("storage.driver %q is invalid (want \"none\" or \"sqlite\")", c.Storage.Driver)
 	}
+	// The Noop store keeps no lifecycle history, so a broadcast-capable chain
+	// running on it would re-broadcast the same ejection every cycle. Refuse to
+	// start rather than spam GovDAO. Dry-run-only configs may still run without
+	// persistence (with degraded rehearsal dedup — warned at startup).
+	if c.Storage.Driver == "none" {
+		if armed := c.BroadcastCapableChains(); len(armed) > 0 {
+			return fmt.Errorf("storage.driver %q (the default) cannot be used while chains %v are broadcast-capable: without persistence the lifecycle gate keeps no history and katana would re-broadcast the same ejection every cycle; set storage.driver: sqlite (or dry_run: true on every enabled chain)", c.Storage.Driver, armed)
+		}
+	}
 	if _, err := parseDur(c.PollInterval); err != nil {
 		return fmt.Errorf("poll_interval: %w", err)
 	}
@@ -392,6 +406,7 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		GnowebURL:          ch.GnowebURL,
 		ChainID:            ch.ChainID,
 		GnomonitoringChain: ch.GnomonitoringChain,
+		DryRun:             ch.DryRun,
 		PollInterval:       poll,
 		VotePollInterval:   votePoll,
 		Conditions:         cond,
@@ -411,6 +426,19 @@ func (c *Config) EnabledChains() []string {
 	ids := make([]string, 0, len(c.Chains))
 	for id, ch := range c.Chains {
 		if ch.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// BroadcastCapableChains returns the IDs of all enabled chains that may sign
+// and broadcast (i.e. not in dry_run), sorted alphabetically.
+func (c *Config) BroadcastCapableChains() []string {
+	ids := make([]string, 0, len(c.Chains))
+	for id, ch := range c.Chains {
+		if ch.Enabled && !ch.DryRun {
 			ids = append(ids, id)
 		}
 	}

@@ -16,6 +16,14 @@ import (
 // evalCycle runs one evaluation pass for a chain: fetch metrics, evaluate every
 // candidate, and produce a proposal for each eligible, non-suppressed validator.
 func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
+	// Chain-identity assert (also runs on the worker's first cycle at startup):
+	// skip the whole cycle before any state is written when the node no longer
+	// reports the configured chain id.
+	gno := gnoland.New(rt.RPCEndpoint)
+	if !d.assertChainID(ctx, gno, rt) {
+		return
+	}
+
 	cond := rt.Conditions
 	missed, monikers, critical, err := d.fetchMetrics(ctx, rt)
 	if err != nil {
@@ -31,7 +39,6 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		candidates[a] = struct{}{}
 	}
 
-	var gno *gnoland.Client
 	produced := 0
 	for addr := range candidates {
 		moniker := monikers[addr]
@@ -60,22 +67,31 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		}
 
 		// Lifecycle gate: don't re-propose while pending/accepted/within backoff.
-		last, _ := d.st.LastProposal(ctx, rt.Key, addr)
-		rejections, _ := d.st.RejectionCount(ctx, rt.Key, addr)
-		if dec := lifecycle.Gate(last, rejections, lifecycle.Params{
+		params := lifecycle.Params{
 			Cooldown:        rt.Proposal.CooldownDur(),
 			RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
 			MaxRejections:   rt.Proposal.MaxRejections,
 			Now:             d.now(),
-		}); !dec.Allow {
+		}
+		last, _ := d.st.LastProposal(ctx, rt.Key, addr)
+		rejections, _ := d.st.RejectionCount(ctx, rt.Key, addr)
+		if dec := lifecycle.Gate(last, rejections, params); !dec.Allow {
 			d.logger.Printf("[%s][eval] SUPPRESS %s: %s", rt.Key, disp(moniker, addr), dec.Reason)
 			continue
 		}
 
-		// Safety: confirm the validator is in the live consensus valset.
-		if gno == nil {
-			gno = gnoland.New(rt.RPCEndpoint)
+		// Dry-run dedup: a rehearsal recorded within the cooldown window (via
+		// Gate's default branch) suppresses another one, so dry-run cycles do
+		// not re-log/re-notify the same would-be proposal every poll.
+		if rt.DryRun {
+			lastDry, _ := d.st.LastDryRun(ctx, rt.Key, addr)
+			if dec := lifecycle.Gate(lastDry, 0, params); !dec.Allow {
+				d.logger.Printf("[%s][eval] SUPPRESS dry-run for %s: %s", rt.Key, disp(moniker, addr), dec.Reason)
+				continue
+			}
 		}
+
+		// Safety: confirm the validator is in the live consensus valset.
 		if inSet, err := gno.IsValidator(ctx, addr); err != nil {
 			d.logger.Printf("[%s][eval] valset check failed for %s: %v (skipping)", rt.Key, addr, err)
 			continue
@@ -85,7 +101,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		}
 
 		d.logger.Printf("[%s][eval] ELIGIBLE %s: %s", rt.Key, disp(moniker, addr), eval.Reason())
-		d.produce(ctx, rt, addr, moniker, eval.Reason())
+		d.produce(ctx, rt, gno, addr, moniker, eval.Reason())
 		produced++
 	}
 
@@ -94,9 +110,10 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	}
 }
 
-// produce builds, signs, and broadcasts an ejection proposal, records it, and
-// notifies on a successful broadcast.
-func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, reason string) {
+// produce builds an ejection proposal, then either broadcasts it (signing via
+// gnokey, recording it, notifying on success) or — on a dry_run chain — logs
+// and notifies the complete would-be proposal without touching the chain.
+func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, addr, moniker, reason string) {
 	// A valset ejection is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
 	// would eject an unknown operator).
@@ -124,7 +141,18 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		RealmPath: built.RealmPath, Function: built.Function, Args: built.Args,
 	}
 
-	out, err := built.Broadcast(ctx, rt.Gnokey)
+	// Re-assert chain identity immediately before acting: a genesis reset can
+	// land mid-cycle, after the check that opened this pass.
+	if !d.assertChainID(ctx, gno, rt) {
+		return
+	}
+
+	if rt.DryRun {
+		d.dryRun(ctx, rt, built, rec, operator)
+		return
+	}
+
+	out, err := d.broadcast(ctx, built, rt.Gnokey)
 	rec.Output = out
 	rec.Success = err == nil
 	if err == nil {
@@ -144,6 +172,40 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 	}
 	d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
 	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID)
+}
+
+// dryRun records, logs, and notifies the proposal a dry_run chain would have
+// broadcast. The record carries store.StatusDryRun, which every real-lifecycle
+// query ignores, so the rehearsal never blocks a real proposal later.
+func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.Built, rec store.ProposalRecord, operator string) {
+	rec.Status = store.StatusDryRun
+	rec.Success = true
+	rec.Output = "[DRY-RUN] broadcast skipped (dry_run enabled)"
+	id, recErr := d.st.RecordProposal(ctx, rec)
+	if recErr != nil {
+		d.logger.Printf("[%s][eval] recording dry-run proposal failed for %s: %v — expect this rehearsal to repeat next cycle", rt.Key, rec.Address, recErr)
+	}
+	d.logger.Printf("[%s][eval] WARN [DRY-RUN] would broadcast valset-ejection proposal: validator=%q addr=%s operator=%s chain_id=%s conditions=%q title=%q description=%q",
+		rt.Key, rec.Moniker, rec.Address, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
+	d.dispatch(ctx, notify.EventDryRun, rt, id, rec.Address, rec.Moniker, "")
+}
+
+// assertChainID confirms the node behind rt.RPCEndpoint still reports the
+// configured chain_id. After a genesis reset the endpoint stays up but the
+// network id changes; broadcasting would only produce signature-failure noise
+// (or, with a reused id, transactions on the wrong chain). Fails closed: an
+// unreachable /status also skips.
+func (d *Daemon) assertChainID(ctx context.Context, gno *gnoland.Client, rt config.Runtime) bool {
+	network, err := gno.Network(ctx)
+	if err != nil {
+		d.logger.Printf("[%s][eval] chain-id check failed: %v — skipping", rt.Key, err)
+		return false
+	}
+	if network != rt.ChainID {
+		d.logger.Printf("[%s][eval] ERROR configured chain_id %q but node reports %q — skipping; likely genesis reset (update the chain's chain_id once confirmed)", rt.Key, rt.ChainID, network)
+		return false
+	}
+	return true
 }
 
 // voteCycle polls the GovDAO outcome of this chain's pending proposals.
