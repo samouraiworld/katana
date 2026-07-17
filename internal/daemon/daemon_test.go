@@ -310,6 +310,47 @@ func TestDryRunRepeatedCyclesDoNotSpam(t *testing.T) {
 	}
 }
 
+func TestChainIDMismatchSkipsCycle(t *testing.T) {
+	ctx := context.Background()
+	// The node reports a different network id than the configured chain_id
+	// ("dev") — the situation after a testnet genesis reset.
+	f := newFixture(t, "test999", nil)
+
+	f.d.evalCycle(ctx, f.runtime(t))
+
+	logs := f.logs.String()
+	if !strings.Contains(logs, `configured chain_id "dev" but node reports "test999"`) {
+		t.Fatalf("logs missing the chain-id mismatch error:\n%s", logs)
+	}
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 on chain-id mismatch", got)
+	}
+	if n := len(f.notifs.all()); n != 0 {
+		t.Fatalf("notifications = %d, want 0 on chain-id mismatch", n)
+	}
+	// The cycle is skipped cleanly: no state of any kind is written.
+	if n := f.st.evalCount(); n != 0 {
+		t.Fatalf("evaluation records = %d, want 0 (cycle must be skipped before state writes)", n)
+	}
+	if props, _ := f.st.ListProposals(ctx, 10); len(props) != 0 {
+		t.Fatalf("proposals = %+v, want none", props)
+	}
+}
+
+func TestChainIDMismatchSkipsDryRunToo(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "test999", func(c *config.Config) { c.Chains["test"].DryRun = true })
+
+	f.d.evalCycle(ctx, f.runtime(t))
+
+	if strings.Contains(f.logs.String(), "[DRY-RUN] would broadcast") {
+		t.Fatalf("dry-run proposal logged despite chain-id mismatch:\n%s", f.logs.String())
+	}
+	if n := len(f.notifs.all()); n != 0 {
+		t.Fatalf("notifications = %d, want 0 on chain-id mismatch", n)
+	}
+}
+
 func TestDryRunRecordDoesNotBlockRealProposal(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, "dev", func(c *config.Config) { c.Chains["test"].DryRun = true })

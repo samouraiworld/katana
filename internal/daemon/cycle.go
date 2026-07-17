@@ -16,6 +16,14 @@ import (
 // evalCycle runs one evaluation pass for a chain: fetch metrics, evaluate every
 // candidate, and produce a proposal for each eligible, non-suppressed validator.
 func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
+	// Chain-identity assert (also runs on the worker's first cycle at startup):
+	// skip the whole cycle before any state is written when the node no longer
+	// reports the configured chain id.
+	gno := gnoland.New(rt.RPCEndpoint)
+	if !d.assertChainID(ctx, gno, rt) {
+		return
+	}
+
 	cond := rt.Conditions
 	missed, monikers, critical, err := d.fetchMetrics(ctx, rt)
 	if err != nil {
@@ -31,7 +39,6 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		candidates[a] = struct{}{}
 	}
 
-	var gno *gnoland.Client
 	produced := 0
 	for addr := range candidates {
 		moniker := monikers[addr]
@@ -85,9 +92,6 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		}
 
 		// Safety: confirm the validator is in the live consensus valset.
-		if gno == nil {
-			gno = gnoland.New(rt.RPCEndpoint)
-		}
 		if inSet, err := gno.IsValidator(ctx, addr); err != nil {
 			d.logger.Printf("[%s][eval] valset check failed for %s: %v (skipping)", rt.Key, addr, err)
 			continue
@@ -97,7 +101,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		}
 
 		d.logger.Printf("[%s][eval] ELIGIBLE %s: %s", rt.Key, disp(moniker, addr), eval.Reason())
-		d.produce(ctx, rt, addr, moniker, eval.Reason())
+		d.produce(ctx, rt, gno, addr, moniker, eval.Reason())
 		produced++
 	}
 
@@ -109,7 +113,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 // produce builds an ejection proposal, then either broadcasts it (signing via
 // gnokey, recording it, notifying on success) or — on a dry_run chain — logs
 // and notifies the complete would-be proposal without touching the chain.
-func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, reason string) {
+func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, addr, moniker, reason string) {
 	// A valset ejection is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
 	// would eject an unknown operator).
@@ -135,6 +139,12 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, addr, moniker, 
 		CreatedAt: d.now(), Chain: rt.Key, ChainID: rt.ChainID, Address: addr,
 		Moniker: moniker, Reason: reason, Title: built.Title,
 		RealmPath: built.RealmPath, Function: built.Function, Args: built.Args,
+	}
+
+	// Re-assert chain identity immediately before acting: a genesis reset can
+	// land mid-cycle, after the check that opened this pass.
+	if !d.assertChainID(ctx, gno, rt) {
+		return
 	}
 
 	if rt.DryRun {
@@ -178,6 +188,24 @@ func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.B
 	d.logger.Printf("[%s][eval] WARN [DRY-RUN] would broadcast valset-ejection proposal: validator=%q addr=%s operator=%s chain_id=%s conditions=%q title=%q description=%q",
 		rt.Key, rec.Moniker, rec.Address, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
 	d.dispatch(ctx, notify.EventDryRun, rt, id, rec.Address, rec.Moniker, "")
+}
+
+// assertChainID confirms the node behind rt.RPCEndpoint still reports the
+// configured chain_id. After a genesis reset the endpoint stays up but the
+// network id changes; broadcasting would only produce signature-failure noise
+// (or, with a reused id, transactions on the wrong chain). Fails closed: an
+// unreachable /status also skips.
+func (d *Daemon) assertChainID(ctx context.Context, gno *gnoland.Client, rt config.Runtime) bool {
+	network, err := gno.Network(ctx)
+	if err != nil {
+		d.logger.Printf("[%s][eval] chain-id check failed: %v — skipping", rt.Key, err)
+		return false
+	}
+	if network != rt.ChainID {
+		d.logger.Printf("[%s][eval] ERROR configured chain_id %q but node reports %q — skipping; likely genesis reset (update the chain's chain_id once confirmed)", rt.Key, rt.ChainID, network)
+		return false
+	}
+	return true
 }
 
 // voteCycle polls the GovDAO outcome of this chain's pending proposals.

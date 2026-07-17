@@ -31,14 +31,18 @@ independent tickers:
 ```
 
 **Evaluation worker** (every `poll_interval`):
-1. Pull missed blocks and CRITICAL alert counts per validator from gnomonitoring.
-2. Evaluate each against the configured conditions.
-3. Skip exceptions and validators blocked by the lifecycle gate (pending /
+1. Assert the node still reports the configured `chain_id` (`/status`
+   `node_info.network`); on mismatch — typically a testnet genesis reset —
+   skip the cycle cleanly.
+2. Pull missed blocks and CRITICAL alert counts per validator from gnomonitoring.
+3. Evaluate each against the configured conditions.
+4. Skip exceptions and validators blocked by the lifecycle gate (pending /
    accepted / cooldown / rejection backoff).
-4. Confirm the target is in the live consensus valset.
-5. Sign & broadcast via `gnokey`, capture the on-chain proposal id, and send a
-   notification — or, on a `dry_run: true` chain, log + notify the would-be
-   proposal without broadcasting (see [Rehearsal / dry-run](#rehearsal--dry-run)).
+5. Confirm the target is in the live consensus valset.
+6. Re-assert the chain id, then sign & broadcast via `gnokey`, capture the
+   on-chain proposal id, and send a notification — or, on a `dry_run: true`
+   chain, log + notify the would-be proposal without broadcasting (see
+   [Rehearsal / dry-run](#rehearsal--dry-run)).
 
 **Vote worker** (every `vote_poll_interval`): polls the GovDAO status of each
 pending proposal katana broadcast, and on resolution notifies + updates state:
@@ -226,6 +230,10 @@ gnoland-test/          local devnet for preprod/e2e
   pre-provisioned keybase.
 - The lifecycle gate prevents proposal spam in the continuous loop.
 - katana verifies valset membership before proposing.
+- katana asserts the node's reported chain id against the configured
+  `chain_id` at every cycle start and again immediately before any broadcast
+  (dry-run included), and skips cleanly on mismatch — a genesis reset cannot
+  produce signature-failure noise or wrong-chain transactions.
 - No key material is stored by katana outside the keybase; signing is
   delegated to `gnokey`.
 - `config.yaml`, `data/` and `*.db` are git-ignored.

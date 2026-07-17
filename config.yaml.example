@@ -132,7 +132,10 @@ web:
   listen: ":8990"
 
 # ── Chains ────────────────────────────────────────────────────────────────────
-# chain_id            = gno.land chain id used for signing (gnokey -chainid)
+# chain_id            = gno.land chain id used for signing (gnokey -chainid).
+#                       Asserted against the node's /status network id at every
+#                       cycle and immediately before any broadcast; a mismatch
+#                       (genesis reset) skips the cycle cleanly.
 # gnomonitoring_chain = the chain key gnomonitoring exposes via ?chain=
 # dry_run             = rehearsal mode (default false): run the full pipeline
 #                       but log + notify the would-be proposal instead of
