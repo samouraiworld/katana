@@ -183,16 +183,20 @@ type Web struct {
 
 // ChainConfig describes a single gno.land network with optional overrides.
 type ChainConfig struct {
-	RPCEndpoint        string      `yaml:"rpc_endpoint"`
-	GnowebURL          string      `yaml:"gnoweb_url"`
-	ChainID            string      `yaml:"chain_id"`
-	GnomonitoringChain string      `yaml:"gnomonitoring_chain"`
-	Enabled            bool        `yaml:"enabled"`
-	PollInterval       string      `yaml:"poll_interval"`
-	Conditions         *Conditions `yaml:"conditions"`
-	Proposal           *Proposal   `yaml:"proposal"`
-	Gnokey             *Gnokey     `yaml:"gnokey"`
-	Exceptions         []string    `yaml:"exceptions"`
+	RPCEndpoint        string `yaml:"rpc_endpoint"`
+	GnowebURL          string `yaml:"gnoweb_url"`
+	ChainID            string `yaml:"chain_id"`
+	GnomonitoringChain string `yaml:"gnomonitoring_chain"`
+	Enabled            bool   `yaml:"enabled"`
+	// DryRun runs the full evaluation pipeline for this chain but never signs
+	// or broadcasts: the would-be proposal is logged and notified instead.
+	// Meant for rehearsing katana against a live network before arming it.
+	DryRun       bool        `yaml:"dry_run"`
+	PollInterval string      `yaml:"poll_interval"`
+	Conditions   *Conditions `yaml:"conditions"`
+	Proposal     *Proposal   `yaml:"proposal"`
+	Gnokey       *Gnokey     `yaml:"gnokey"`
+	Exceptions   []string    `yaml:"exceptions"`
 }
 
 // Runtime is the fully-resolved settings for one chain, global defaults merged
@@ -203,6 +207,7 @@ type Runtime struct {
 	GnowebURL          string
 	ChainID            string
 	GnomonitoringChain string
+	DryRun             bool
 	PollInterval       time.Duration
 	VotePollInterval   time.Duration
 	Conditions         Conditions
@@ -392,6 +397,7 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		GnowebURL:          ch.GnowebURL,
 		ChainID:            ch.ChainID,
 		GnomonitoringChain: ch.GnomonitoringChain,
+		DryRun:             ch.DryRun,
 		PollInterval:       poll,
 		VotePollInterval:   votePoll,
 		Conditions:         cond,

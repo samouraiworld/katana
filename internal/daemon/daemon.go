@@ -15,6 +15,7 @@ import (
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/gnomonitoring"
 	"github.com/samouraiworld/katana/internal/notify"
+	"github.com/samouraiworld/katana/internal/proposal"
 	"github.com/samouraiworld/katana/internal/store"
 	"github.com/samouraiworld/katana/internal/valopers"
 )
@@ -27,6 +28,9 @@ type Daemon struct {
 	notifier *notify.Notifier
 	logger   *log.Logger
 	now      func() time.Time
+	// broadcast signs and submits a built proposal via gnokey. It is a field so
+	// tests can substitute a double; production uses proposal.Built.Broadcast.
+	broadcast func(ctx context.Context, b proposal.Built, gk config.Gnokey) (string, error)
 
 	resolversMu sync.Mutex
 	resolvers   map[string]*valopers.Resolver // chain key → operator resolver
@@ -35,12 +39,15 @@ type Daemon struct {
 // New builds a Daemon from the loaded config and an open store.
 func New(cfg *config.Config, st store.Store, logger *log.Logger) *Daemon {
 	return &Daemon{
-		cfg:       cfg,
-		st:        st,
-		gnomon:    gnomonitoring.New(cfg.Gnomonitoring),
-		notifier:  notify.New(cfg.Notifications),
-		logger:    logger,
-		now:       time.Now,
+		cfg:      cfg,
+		st:       st,
+		gnomon:   gnomonitoring.New(cfg.Gnomonitoring),
+		notifier: notify.New(cfg.Notifications),
+		logger:   logger,
+		now:      time.Now,
+		broadcast: func(ctx context.Context, b proposal.Built, gk config.Gnokey) (string, error) {
+			return b.Broadcast(ctx, gk)
+		},
 		resolvers: map[string]*valopers.Resolver{},
 	}
 }

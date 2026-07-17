@@ -4,10 +4,11 @@
 # usually passed as environment variables. A few secrets/per-deployment values
 # can be overridden from the environment (annotated `env:` below).
 #
-# katana is BROADCAST-ONLY: every eligible validator results in a signed,
-# broadcast GovDAO proposal — there is no dry-run mode. gnokey ships inside the
-# container image (pinned by the GNO_REF build-arg); the signing key is
-# provisioned from a mnemonic at startup, or from a pre-provisioned keybase.
+# katana BROADCASTS BY DEFAULT: every eligible validator results in a signed,
+# broadcast GovDAO proposal, unless the chain sets `dry_run: true` (rehearsal
+# mode: log + notify the would-be proposal, never broadcast). gnokey ships
+# inside the container image (pinned by the GNO_REF build-arg); the signing key
+# is provisioned from a mnemonic at startup, or from a pre-provisioned keybase.
 #
 # Copy this file to config.yaml and adjust it.
 
@@ -129,6 +130,9 @@ web:
 # ── Chains ────────────────────────────────────────────────────────────────────
 # chain_id            = gno.land chain id used for signing (gnokey -chainid)
 # gnomonitoring_chain = the chain key gnomonitoring exposes via ?chain=
+# dry_run             = rehearsal mode (default false): run the full pipeline
+#                       but log + notify the would-be proposal instead of
+#                       signing/broadcasting. Use it to onboard a new chain.
 # A chain may override: poll_interval, conditions, proposal, gnokey (field
 # merge), and add exceptions.
 chains:
@@ -138,6 +142,7 @@ chains:
     chain_id: "test6"
     gnomonitoring_chain: "test6"
     enabled: true
+    # dry_run: true                   # uncomment to rehearse without broadcasting
 
   betanet:
     rpc_endpoint: "https://rpc.betanet.testnets.gno.land"

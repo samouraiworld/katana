@@ -26,6 +26,9 @@ const (
 	EventSent     Event = "sent"
 	EventAccepted Event = "accepted"
 	EventRejected Event = "rejected"
+	// EventDryRun announces a proposal that WOULD have been sent by a dry_run
+	// chain; nothing was signed or broadcast.
+	EventDryRun Event = "dry-run"
 )
 
 // Info carries the fields a message may reference.
@@ -66,6 +69,9 @@ func Message(event Event, in Info) string {
 	case EventRejected:
 		msg = fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
 			in.display(), in.Address, in.Chain, in.RejectedBackoff)
+	case EventDryRun:
+		msg = fmt.Sprintf("[DRY-RUN] katana would send a proposal to remove validator %s (%s) on %s from the valset — dry_run is enabled, nothing was broadcast.",
+			in.display(), in.Address, in.Chain)
 	default:
 		msg = fmt.Sprintf("katana event %q for validator %s (%s) on %s.", event, in.display(), in.Address, in.Chain)
 	}

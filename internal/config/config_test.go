@@ -37,6 +37,7 @@ chains:
     gnomonitoring_chain: "gnoland1"
     enabled: true
     poll_interval: 2m
+    dry_run: true
     gnokey:
       key_name: "betanet-key"
     exceptions:
@@ -86,6 +87,27 @@ func TestLoadAndRuntime(t *testing.T) {
 	}
 	if rt2.Proposal.RejectedBackoffDur() != 240*time.Hour {
 		t.Errorf("betanet backoff = %s, want 240h", rt2.Proposal.RejectedBackoffDur())
+	}
+}
+
+func TestDryRunResolution(t *testing.T) {
+	c, err := Load(writeConfig(t, validYAML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime(test): %v", err)
+	}
+	if rt.DryRun {
+		t.Error("test chain dry_run = true, want default false")
+	}
+	rt2, err := c.Runtime("betanet")
+	if err != nil {
+		t.Fatalf("Runtime(betanet): %v", err)
+	}
+	if !rt2.DryRun {
+		t.Error("betanet dry_run = false, want true from per-chain config")
 	}
 }
 

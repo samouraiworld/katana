@@ -37,7 +37,8 @@ independent tickers:
    accepted / cooldown / rejection backoff).
 4. Confirm the target is in the live consensus valset.
 5. Sign & broadcast via `gnokey`, capture the on-chain proposal id, and send a
-   notification.
+   notification — or, on a `dry_run: true` chain, log + notify the would-be
+   proposal without broadcasting (see [Rehearsal / dry-run](#rehearsal--dry-run)).
 
 **Vote worker** (every `vote_poll_interval`): polls the GovDAO status of each
 pending proposal katana broadcast, and on resolution notifies + updates state:
@@ -81,6 +82,23 @@ Because katana runs continuously, a per-`(chain, validator)` state machine
   after `proposal.max_rejections` (default `2`);
 - `proposal.cooldown` (default `720h` = 30d) is a floor between any two proposals
   for the same validator.
+
+## Rehearsal / dry-run
+
+Set `dry_run: true` on a chain to rehearse katana against a live network
+before arming it. The eval worker runs the **full pipeline** — metrics,
+conditions, exceptions, lifecycle gate, valset membership, operator
+resolution — but instead of signing and broadcasting it:
+
+- logs the complete would-be proposal (validator, operator, triggering
+  conditions, title, description) with a `[DRY-RUN]` prefix;
+- sends the normal notification, clearly labeled `[DRY-RUN]`;
+- records a `dry-run` row in the proposal history so the same rehearsal is not
+  re-logged/re-notified on every poll (the `proposal.cooldown` window applies).
+
+Dry-run records are **excluded from the real lifecycle gate**: disabling
+`dry_run` later lets a real proposal go out immediately. `dry_run` defaults to
+`false` — a plain enabled chain is broadcast-armed.
 
 ## Notifications
 
@@ -193,8 +211,9 @@ gnoland-test/          local devnet for preprod/e2e
 
 ## Safety
 
-- katana is broadcast-only: every eligible validator results in a signed,
-  on-chain GovDAO proposal. `gnokey` is embedded in the container image
+- katana broadcasts by default: every eligible validator on a chain without
+  `dry_run: true` results in a signed, on-chain GovDAO proposal — rehearse
+  with `dry_run` before arming a new chain. `gnokey` is embedded in the container image
   (pinned by the `GNO_REF` build-arg); the signing key is provisioned from a
   mnemonic at startup (`gnokey.mnemonic` / `KATANA_GNOKEY_MNEMONIC`) or from a
   pre-provisioned keybase.
