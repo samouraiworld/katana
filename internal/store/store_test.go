@@ -63,6 +63,49 @@ func TestSQLiteLifecycle(t *testing.T) {
 	}
 }
 
+func TestDryRunRecordsExcludedFromLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	// A dry-run record is persisted…
+	if _, err := st.RecordProposal(ctx, ProposalRecord{
+		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+		Moniker: "bad", Status: StatusDryRun, Success: true,
+	}); err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+
+	// …but is invisible to every real-lifecycle query, so a rehearsal can
+	// never block a later real proposal.
+	if last, err := st.LastProposal(ctx, "local", "g1bad"); err != nil || last != nil {
+		t.Fatalf("LastProposal = %+v, err %v; want nil (dry-run excluded)", last, err)
+	}
+	if pending, _ := st.PendingProposals(ctx, "local"); len(pending) != 0 {
+		t.Fatalf("PendingProposals = %+v; want none", pending)
+	}
+	if n, _ := st.RejectionCount(ctx, "local", "g1bad"); n != 0 {
+		t.Fatalf("RejectionCount = %d, want 0", n)
+	}
+
+	// LastDryRun sees it (the rehearsal dedup path).
+	dry, err := st.LastDryRun(ctx, "local", "g1bad")
+	if err != nil || dry == nil || dry.Status != StatusDryRun {
+		t.Fatalf("LastDryRun = %+v, err %v; want the dry-run record", dry, err)
+	}
+
+	// A later real proposal becomes LastProposal.
+	id, err := st.RecordProposal(ctx, ProposalRecord{
+		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+		Status: StatusPending, Success: true, OnchainID: "9",
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	if last, _ := st.LastProposal(ctx, "local", "g1bad"); last == nil || last.ID != id {
+		t.Fatalf("LastProposal = %+v, want the real record %d", last, id)
+	}
+}
+
 func TestNoopStore(t *testing.T) {
 	ctx := context.Background()
 	st, err := New(config.Storage{Driver: "none"})
@@ -74,5 +117,8 @@ func TestNoopStore(t *testing.T) {
 	}
 	if last, _ := st.LastProposal(ctx, "c", "a"); last != nil {
 		t.Fatalf("Noop LastProposal should be nil")
+	}
+	if dry, _ := st.LastDryRun(ctx, "c", "a"); dry != nil {
+		t.Fatalf("Noop LastDryRun should be nil")
 	}
 }

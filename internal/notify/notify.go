@@ -28,6 +28,9 @@ const (
 	EventAccepted   Event = "accepted"
 	EventRejected   Event = "rejected"
 	EventWouldEject Event = "would_eject"
+	// EventDryRun announces a proposal that WOULD have been sent by a dry_run
+	// chain; nothing was signed or broadcast.
+	EventDryRun Event = "dry-run"
 )
 
 // Info carries the fields a message may reference.
@@ -80,6 +83,9 @@ func Message(event Event, in Info) string {
 			msg += "\nTo broadcast it manually, download the attached script and run:\n```\n" + in.GnokeyCommand + "\n```"
 		}
 		return msg
+	case EventDryRun:
+		msg = fmt.Sprintf("[DRY-RUN] katana would send a proposal to remove validator %s (%s) on %s from the valset — dry_run is enabled, nothing was broadcast.",
+			in.display(), in.Address, in.Chain)
 	default:
 		msg = fmt.Sprintf("katana event %q for validator %s (%s) on %s.", event, in.display(), in.Address, in.Chain)
 	}

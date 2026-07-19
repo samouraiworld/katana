@@ -628,6 +628,9 @@ supermajority alone). This is where katana is exercised as it will run in prod.
   submitted on-chain via gnokey. The signing key is either provisioned from a
   configured mnemonic at startup (`internal/keybase`) or already present in a
   pre-provisioned keybase in production.
+  *Amended: a per-chain `dry_run` rehearsal switch was later reintroduced for
+  onboarding katana on live networks (see README "Rehearsal / dry-run");
+  broadcast remains the default.*
 - **D10 — Per-chain wallet.** ✅ Global `gnokey` + optional per-chain override.
 
 ### Resolved — GovDAO vote tracking

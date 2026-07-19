@@ -31,13 +31,18 @@ independent tickers:
 ```
 
 **Evaluation worker** (every `poll_interval`):
-1. Pull missed blocks and CRITICAL alert counts per validator from gnomonitoring.
-2. Evaluate each against the configured conditions.
-3. Skip exceptions and validators blocked by the lifecycle gate (pending /
+1. Assert the node still reports the configured `chain_id` (`/status`
+   `node_info.network`); on mismatch — typically a testnet genesis reset —
+   skip the cycle cleanly.
+2. Pull missed blocks and CRITICAL alert counts per validator from gnomonitoring.
+3. Evaluate each against the configured conditions.
+4. Skip exceptions and validators blocked by the lifecycle gate (pending /
    accepted / cooldown / rejection backoff).
-4. Confirm the target is in the live consensus valset.
-5. Sign & broadcast via `gnokey`, capture the on-chain proposal id, and send a
-   notification.
+5. Confirm the target is in the live consensus valset.
+6. Re-assert the chain id, then sign & broadcast via `gnokey`, capture the
+   on-chain proposal id, and send a notification — or, on a `dry_run: true`
+   chain, log + notify the would-be proposal without broadcasting (see
+   [Rehearsal / dry-run](#rehearsal--dry-run)).
 
 **Vote worker** (every `vote_poll_interval`): polls the GovDAO status of each
 pending proposal katana broadcast, and on resolution notifies + updates state:
@@ -81,6 +86,30 @@ Because katana runs continuously, a per-`(chain, validator)` state machine
   after `proposal.max_rejections` (default `2`);
 - `proposal.cooldown` (default `720h` = 30d) is a floor between any two proposals
   for the same validator.
+
+Because this gate is what stands between katana and proposal spam, katana
+**refuses to start** when any broadcast-capable chain (`dry_run: false`) is
+configured with `storage.driver: none` — the no-op store keeps no history, so
+every cycle would re-broadcast the same ejection. Configure
+`storage.driver: sqlite`. Dry-run-only configurations may run with `none`
+(a startup warning describes the degraded rehearsal dedup).
+
+## Rehearsal / dry-run
+
+Set `dry_run: true` on a chain to rehearse katana against a live network
+before arming it. The eval worker runs the **full pipeline** — metrics,
+conditions, exceptions, lifecycle gate, valset membership, operator
+resolution — but instead of signing and broadcasting it:
+
+- logs the complete would-be proposal (validator, operator, triggering
+  conditions, title, description) with a `[DRY-RUN]` prefix;
+- sends the normal notification, clearly labeled `[DRY-RUN]`;
+- records a `dry-run` row in the proposal history so the same rehearsal is not
+  re-logged/re-notified on every poll (the `proposal.cooldown` window applies).
+
+Dry-run records are **excluded from the real lifecycle gate**: disabling
+`dry_run` later lets a real proposal go out immediately. `dry_run` defaults to
+`false` — a plain enabled chain is broadcast-armed.
 
 ## Notifications
 
@@ -193,13 +222,18 @@ gnoland-test/          local devnet for preprod/e2e
 
 ## Safety
 
-- katana is broadcast-only: every eligible validator results in a signed,
-  on-chain GovDAO proposal. `gnokey` is embedded in the container image
+- katana broadcasts by default: every eligible validator on a chain without
+  `dry_run: true` results in a signed, on-chain GovDAO proposal — rehearse
+  with `dry_run` before arming a new chain. `gnokey` is embedded in the container image
   (pinned by the `GNO_REF` build-arg); the signing key is provisioned from a
   mnemonic at startup (`gnokey.mnemonic` / `KATANA_GNOKEY_MNEMONIC`) or from a
   pre-provisioned keybase.
 - The lifecycle gate prevents proposal spam in the continuous loop.
 - katana verifies valset membership before proposing.
+- katana asserts the node's reported chain id against the configured
+  `chain_id` at every cycle start and again immediately before any broadcast
+  (dry-run included), and skips cleanly on mismatch — a genesis reset cannot
+  produce signature-failure noise or wrong-chain transactions.
 - No key material is stored by katana outside the keybase; signing is
   delegated to `gnokey`.
 - `config.yaml`, `data/` and `*.db` are git-ignored.
