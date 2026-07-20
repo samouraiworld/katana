@@ -463,9 +463,6 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		if name != ActionEject && name != ActionLowerVP && name != ActionRaiseVP {
 			return Runtime{}, fmt.Errorf("proposal.action_priority: unknown action %q", name)
 		}
-		if _, ok := prop.Actions[name]; !ok {
-			continue
-		}
 		if prop.Submit == "call" && name != ActionEject {
 			return Runtime{}, fmt.Errorf("proposal.submit \"call\" is only supported for the eject action; %q must use \"run\"", name)
 		}

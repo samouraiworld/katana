@@ -213,6 +213,36 @@ chains:
 	}
 }
 
+// TestCallSubmitRejectedForPerChainOverrideWithNoActionsBlock guards against
+// a dead-code guard that used to skip the submit: call / non-eject check
+// whenever prop.Actions had no entry for the action_priority name. A
+// per-chain proposal override is a whole-block replace (bypasses
+// applyDefaults), so a chain config that sets submit/action_priority without
+// a nested actions: block leaves Actions nil/empty; the call-mode check must
+// still apply based on action_priority alone.
+func TestCallSubmitRejectedForPerChainOverrideWithNoActionsBlock(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+chains:
+  test:
+    rpc_endpoint: "http://x"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+    dry_run: true
+    proposal:
+      submit: call
+      action_priority: [lower_vp]
+      cooldown: 720h
+      rejected_backoff: 720h
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error: per-chain submit: call with lower_vp in action_priority and no actions: block must still be rejected")
+	}
+}
+
 func TestLoadAndRuntime(t *testing.T) {
 	c, err := Load(writeConfig(t, validYAML))
 	if err != nil {
