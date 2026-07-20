@@ -15,7 +15,8 @@
 log_level: info                 # env: KATANA_LOG_LEVEL
 
 # Daemon cadence: how often each chain worker re-evaluates its validators.
-# This is the RUN cadence — NOT a condition window (see conditions.* below).
+# This is the RUN cadence — NOT an action window (see proposal.actions.*.window
+# below).
 poll_interval: 5m
 
 # dry_run: true rehearses every chain (or one chain, if set under chains.<name>)
@@ -24,14 +25,17 @@ poll_interval: 5m
 dry_run: false
 
 # ── gnomonitoring REST API ────────────────────────────────────────────────────
-# Source of validator metrics (missed blocks + CRITICAL alerts).
+# katana does not compute validator metrics itself; it reads a computed
+# per-validator health score (0-100) from a running gnomonitoring instance.
 # https://github.com/samouraiworld/gnomonitoring
 gnomonitoring:
   base_url: "http://localhost:8989"   # env: KATANA_GNOMON_BASE_URL
-  api_token: ""                       # env: KATANA_GNOMON_API_TOKEN (admin alerts endpoint)
+  api_token: ""                       # env: KATANA_GNOMON_API_TOKEN — sent as a
+                                       # Bearer token on every request (incl.
+                                       # reports_path) when set; leave empty if
+                                       # the reports endpoint is public
   timeout_seconds: 10
-  missed_blocks_path: "/missing_block"
-  alerts_path: "/admin/alerts"
+  reports_path: "/api/reports/validators"   # per-validator computed health score
   info_path: "/info"                  # chain-discovery endpoint (validation)
   discover_chains: true               # validate config chains against /info at startup
 
@@ -50,53 +54,75 @@ gnokey:
   gas_fee: "1000000ugnot"
   gas_wanted: 20000000
 
-# ── Eligibility conditions ────────────────────────────────────────────────────
-# require_all: true  -> every enabled condition must trigger (AND)
-# require_all: false -> any single enabled condition is enough (OR)
-conditions:
-  require_all: false
-  missed_blocks:
-    enabled: true
-    max: 100                          # eligible when missed blocks over `interval` > max
-    interval: current_week            # CONDITION WINDOW: current_week|current_month|current_year|all_time
-  critical_alerts:
-    enabled: true
-    max: 3                            # eligible when CRITICAL alerts over `interval` > max
-    interval: 168h                    # CONDITION WINDOW: Go duration (168h = 7d)
-
 # ── Exceptions ────────────────────────────────────────────────────────────────
-# Validators never proposed for ejection. Matched by address (recommended) or
-# moniker. Global list ∪ each chain's own list (a chain can only add).
+# Validators never proposed against (eject/lower_vp/raise_vp). Matched by
+# address (recommended) or moniker. Global list ∪ each chain's own list (a
+# chain can only add).
 exceptions:
   - "g1protectedvalidator..."
 
-# ── Proposal creation + lifecycle ─────────────────────────────────────────────
+# ── Score-driven actions ────────────────────────────────────────────────────
+# katana reads gnomonitoring's computed health score (0-100) instead of raw
+# missed-blocks/alert counts. At most one action applies per validator per
+# cycle: action_priority decides which, when more than one action's
+# threshold matches (on its own configured window).
 proposal:
+  action_priority: [eject, lower_vp, raise_vp]
+
+  min_voting_power: 100             # absolute floor; protects a small validator
+                                     # from being driven to ~0 VP by repeated
+                                     # lower_vp instead of a real eject
+  max_voting_power_share: 15        # ceiling as % of the chain's total valset VP
+
   cooldown: 720h                      # min interval between two proposals for the same validator (30d)
   rejected_backoff: 720h              # wait after a GovDAO rejection before re-proposing (30d)
   max_rejections: 2                   # stop after N GovDAO rejections; 0 = unlimited
+  submit: run                         # run (default; required for lower_vp/raise_vp) | call (eject only)
 
-  # Submission method:
-  #   run  -> broadcast a .gno script via `gnokey maketx run` (default; this is
-  #           how gno.land valset ejection works — v3's builder can't be reached
-  #           by a direct MsgCall). The default run_script_template ejects the
-  #           validator (ValoperChange Power=0). Uses {operator_address}.
-  #   call -> a single `gnokey maketx call` to realm_pkg_path.function with args.
-  submit: run
-  # run_script_template: (defaults to the built-in gno.land ejection script;
-  #   override only for a different realm. Placeholders: {operator_address}
-  #   {title} {description}.)
-
-  # call-mode only (unused when submit: run):
-  # realm_pkg_path: "gno.land/r/..."
-  # function: "..."
-  # args: ["{operator_address}"]
-
-  title_template: "Eject validator {moniker} ({address}) from the valset"
-  description_template: |
-    Automated ejection proposal generated by katana.
-    Validator: {moniker} ({address})
-    Reason: {reason}
+  actions:
+    # Thresholds default to gnomonitoring's own tier boundaries (Excellent
+    # >=85 / Good >=60 / Watch >=30 / Critical <30); 60-84 is an intentional
+    # no-action "stability zone".
+    eject:
+      score_below: 30
+      window: current_month           # ACTION WINDOW: last_24h|current_week|current_month|current_year
+      title_template: "Eject validator {moniker} ({address}) from the valset"
+      description_template: |
+        Automated ejection proposal generated by katana.
+        Validator: {moniker} ({address})
+        Score: {score}/100 (tier {tier}) over {window}
+        Reason: {reason}
+    lower_vp:
+      score_below: 60
+      window: current_week
+      # Step = whichever of vp_step_percent_of_self% of the validator's own
+      # current VP or vp_step_percent_of_total% of the chain's total valset
+      # VP has the smaller magnitude — the tighter cap wins for this
+      # validator's size. Recomputed from live data every cycle, so repeated
+      # triggers don't compound.
+      vp_step_percent_of_self: -20
+      vp_step_percent_of_total: -2
+      title_template: "Lower voting power of validator {moniker} ({address})"
+      description_template: |
+        Automated voting-power reduction generated by katana.
+        Validator: {moniker} ({address})
+        Score: {score}/100 (tier {tier}) over {window}
+        Voting power: {current_power} -> {target_power}
+        Reason: {reason}
+    raise_vp:
+      score_at_or_above: 85
+      window: current_year              # longest window: raise_vp is the most
+                                         # governance-sensitive action, requires
+                                         # a sustained track record
+      vp_step_percent_of_self: 20
+      vp_step_percent_of_total: 2
+      title_template: "Raise voting power of validator {moniker} ({address})"
+      description_template: |
+        Automated voting-power increase generated by katana.
+        Validator: {moniker} ({address})
+        Score: {score}/100 (tier {tier}) over {window}
+        Voting power: {current_power} -> {target_power}
+        Reason: {reason}
 
 # ── Vote tracking ─────────────────────────────────────────────────────────────
 # Follows the GovDAO outcome of broadcast proposals.
@@ -147,8 +173,8 @@ web:
 #                       proposal (script attached + gnokey command) instead of
 #                       signing/broadcasting. Use it to onboard a new chain or
 #                       as a standing manual-approval mode.
-# A chain may override: poll_interval, conditions, proposal, gnokey (field
-# merge), and add exceptions.
+# A chain may override: poll_interval, proposal (incl. actions/action_priority/
+# VP bounds — whole-block replace), gnokey (field merge), and add exceptions.
 chains:
   test6:
     rpc_endpoint: "https://rpc.test6.testnets.gno.land"
