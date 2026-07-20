@@ -34,13 +34,6 @@ func TestMessage(t *testing.T) {
 		t.Errorf("unexpected rejected message")
 	}
 
-	// Dry-run messages are unmistakably labeled and say nothing went on-chain.
-	dry := Message(EventDryRun, in)
-	if !strings.HasPrefix(dry, "[DRY-RUN]") || !strings.Contains(dry, "Sam (g1abc)") ||
-		!strings.Contains(dry, "nothing was broadcast") {
-		t.Errorf("unexpected dry-run message: %q", dry)
-	}
-
 	// Moniker falls back to address when empty, and no link without gnoweb.
 	bare := Message(EventSent, Info{Chain: "c", Address: "g1x"})
 	if !strings.Contains(bare, "g1x (g1x)") || strings.Contains(bare, "/r/gov/dao:") {
@@ -86,11 +79,16 @@ func TestMessageWouldEjectIncludesCommand(t *testing.T) {
 	if !strings.Contains(msg, "val4") || !strings.Contains(msg, "g1abc") {
 		t.Errorf("missing validator identity: %q", msg)
 	}
-	if !strings.Contains(msg, "disabled") {
-		t.Errorf("observe message should say sending is disabled: %q", msg)
+	if !strings.Contains(msg, "dry_run is enabled") {
+		t.Errorf("would_eject message should reference dry_run: %q", msg)
 	}
 	if !strings.Contains(msg, "gnokey maketx run") {
-		t.Errorf("observe message should embed the gnokey command: %q", msg)
+		t.Errorf("would_eject message should embed the gnokey command: %q", msg)
+	}
+	// The wording must not unconditionally claim a file was attached — Slack
+	// webhooks can't upload, and fall back to an inline block instead.
+	if !strings.Contains(msg, "attached, or inline") {
+		t.Errorf("would_eject message should describe both delivery paths: %q", msg)
 	}
 }
 

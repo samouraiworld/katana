@@ -27,10 +27,9 @@ const (
 	EventSent       Event = "sent"
 	EventAccepted   Event = "accepted"
 	EventRejected   Event = "rejected"
+	// EventWouldEject announces a proposal a dry_run chain would have sent;
+	// nothing was signed or broadcast.
 	EventWouldEject Event = "would_eject"
-	// EventDryRun announces a proposal that WOULD have been sent by a dry_run
-	// chain; nothing was signed or broadcast.
-	EventDryRun Event = "dry-run"
 )
 
 // Info carries the fields a message may reference.
@@ -77,15 +76,12 @@ func Message(event Event, in Info) string {
 		msg = fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
 			in.display(), in.Address, in.Chain, in.RejectedBackoff)
 	case EventWouldEject:
-		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for ejection, but proposal sending is disabled — no on-chain proposal was submitted.",
+		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for ejection, but dry_run is enabled — nothing was broadcast.",
 			in.display(), in.Address, in.Chain)
 		if in.GnokeyCommand != "" {
-			msg += "\nTo broadcast it manually, download the attached script and run:\n```\n" + in.GnokeyCommand + "\n```"
+			msg += "\nTo broadcast it manually, run:\n```\n" + in.GnokeyCommand + "\n```\nThe ejection script is included with this notification (attached, or inline below if your channel doesn't support attachments)."
 		}
 		return msg
-	case EventDryRun:
-		msg = fmt.Sprintf("[DRY-RUN] katana would send a proposal to remove validator %s (%s) on %s from the valset — dry_run is enabled, nothing was broadcast.",
-			in.display(), in.Address, in.Chain)
 	default:
 		msg = fmt.Sprintf("katana event %q for validator %s (%s) on %s.", event, in.display(), in.Address, in.Chain)
 	}
