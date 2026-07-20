@@ -104,14 +104,53 @@ func TestDryRunResolution(t *testing.T) {
 		t.Fatalf("Runtime(test): %v", err)
 	}
 	if rt.DryRun {
-		t.Error("test chain dry_run = true, want default false")
+		t.Error("test chain dry_run = true, want default false (no global dry_run set)")
 	}
 	rt2, err := c.Runtime("betanet")
 	if err != nil {
 		t.Fatalf("Runtime(betanet): %v", err)
 	}
 	if !rt2.DryRun {
-		t.Error("betanet dry_run = false, want true from per-chain config")
+		t.Error("betanet dry_run = false, want true from per-chain override")
+	}
+}
+
+func TestDryRunGlobalDefaultAndOverride(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+dry_run: true
+storage: {driver: sqlite}
+chains:
+  inherits:
+    rpc_endpoint: "r1"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+  overridden:
+    rpc_endpoint: "r2"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    dry_run: false
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	inherits, err := c.Runtime("inherits")
+	if err != nil {
+		t.Fatalf("Runtime(inherits): %v", err)
+	}
+	if !inherits.DryRun {
+		t.Error("inherits chain should inherit the global dry_run: true")
+	}
+	overridden, err := c.Runtime("overridden")
+	if err != nil {
+		t.Fatalf("Runtime(overridden): %v", err)
+	}
+	if overridden.DryRun {
+		t.Error("overridden chain should keep its own dry_run: false despite the global default")
 	}
 }
 
@@ -200,62 +239,5 @@ chains:
 				t.Fatalf("expected error for %q, got nil", name)
 			}
 		})
-	}
-}
-
-func TestProposalEnabledDefaultsTrue(t *testing.T) {
-	c, err := Load(writeConfig(t, validYAML)) // validYAML sets no proposal.enabled
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	rt, err := c.Runtime("test")
-	if err != nil {
-		t.Fatalf("Runtime: %v", err)
-	}
-	if !rt.Proposal.BroadcastEnabled() {
-		t.Fatal("proposal.enabled should default to true when unset")
-	}
-}
-
-func TestProposalEnabledPerChainOverride(t *testing.T) {
-	const yaml = `
-gnomonitoring:
-  base_url: "http://localhost:8989"
-gnokey:
-  key_name: "k"
-  password: "p"
-proposal:
-  enabled: true
-  cooldown: 720h
-  rejected_backoff: 720h
-storage:
-  driver: sqlite
-chains:
-  armed:
-    rpc_endpoint: "http://x:26657"
-    chain_id: "dev"
-    gnomonitoring_chain: "local"
-    enabled: true
-  observe:
-    rpc_endpoint: "http://y:26657"
-    chain_id: "dev"
-    gnomonitoring_chain: "local"
-    enabled: true
-    proposal:
-      enabled: false
-      cooldown: 720h
-      rejected_backoff: 720h
-`
-	c, err := Load(writeConfig(t, yaml))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	armed, _ := c.Runtime("armed")
-	if !armed.Proposal.BroadcastEnabled() {
-		t.Error("armed chain should have broadcasting enabled")
-	}
-	observe, _ := c.Runtime("observe")
-	if observe.Proposal.BroadcastEnabled() {
-		t.Error("observe chain should have broadcasting disabled")
 	}
 }

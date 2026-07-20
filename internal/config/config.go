@@ -28,6 +28,11 @@ type Config struct {
 	Gnokey        Gnokey        `yaml:"gnokey"` // global proposing wallet
 	Conditions    Conditions    `yaml:"conditions"`
 	Proposal      Proposal      `yaml:"proposal"`
+	// DryRun is the global default for whether chains broadcast: false
+	// (default) broadcasts; true means every enabled chain rehearses instead
+	// (logs + notifies, never signs/broadcasts), unless overridden per chain
+	// via ChainConfig.DryRun.
+	DryRun        bool          `yaml:"dry_run"`
 	VoteTracking  VoteTracking  `yaml:"vote_tracking"`
 	Notifications Notifications `yaml:"notifications"`
 	// Exceptions lists validators that must never be subscribed to an ejection
@@ -125,10 +130,6 @@ func (c CriticalCond) Duration() (time.Duration, error) {
 // Proposal describes the on-chain GovDAO ejection entrypoint plus the lifecycle
 // timers. The timers have global defaults, overridable per chain.
 type Proposal struct {
-	// Enabled toggles on-chain broadcasting for this scope. nil/absent means
-	// enabled (the broadcast-first default). false = observe-only: katana still
-	// evaluates and notifies, but does not sign/broadcast the proposal on-chain.
-	Enabled         *bool  `yaml:"enabled"`
 	Cooldown        string `yaml:"cooldown"`
 	RejectedBackoff string `yaml:"rejected_backoff"`
 	MaxRejections   int    `yaml:"max_rejections"`
@@ -144,12 +145,6 @@ type Proposal struct {
 
 	TitleTemplate       string `yaml:"title_template"`
 	DescriptionTemplate string `yaml:"description_template"`
-}
-
-// BroadcastEnabled reports whether katana should sign & broadcast proposals for
-// this scope. Absent (nil) means enabled — the broadcast-first default.
-func (p Proposal) BroadcastEnabled() bool {
-	return p.Enabled == nil || *p.Enabled
 }
 
 // VoteTracking configures the vote-watcher worker.
@@ -198,10 +193,13 @@ type ChainConfig struct {
 	ChainID            string `yaml:"chain_id"`
 	GnomonitoringChain string `yaml:"gnomonitoring_chain"`
 	Enabled            bool   `yaml:"enabled"`
-	// DryRun runs the full evaluation pipeline for this chain but never signs
-	// or broadcasts: the would-be proposal is logged and notified instead.
-	// Meant for rehearsing katana against a live network before arming it.
-	DryRun       bool        `yaml:"dry_run"`
+	// DryRun overrides the global dry_run default for this chain (nil =
+	// inherit the global value). true runs the full evaluation pipeline but
+	// never signs or broadcasts: the would-be proposal is logged and notified
+	// (with the ejection script and a ready-to-run gnokey command attached)
+	// instead. Meant both for rehearsing katana on a new network and as a
+	// standing manual-approval mode.
+	DryRun       *bool       `yaml:"dry_run"`
 	PollInterval string      `yaml:"poll_interval"`
 	Conditions   *Conditions `yaml:"conditions"`
 	Proposal     *Proposal   `yaml:"proposal"`
@@ -391,21 +389,15 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		}
 	}
 
+	dryRun := c.DryRun
+	if ch.DryRun != nil {
+		dryRun = *ch.DryRun
+	}
+
 	prop := c.Proposal
 	if ch.Proposal != nil {
 		prop = *ch.Proposal
 	}
-	// Resolve broadcasting: default true, set by global proposal.enabled, then
-	// overridden by the per-chain proposal.enabled when present. After this,
-	// prop.Enabled is always non-nil (BroadcastEnabled reads it directly).
-	broadcast := true
-	if c.Proposal.Enabled != nil {
-		broadcast = *c.Proposal.Enabled
-	}
-	if ch.Proposal != nil && ch.Proposal.Enabled != nil {
-		broadcast = *ch.Proposal.Enabled
-	}
-	prop.Enabled = &broadcast
 	if _, err := parseDur(prop.Cooldown); err != nil {
 		return Runtime{}, fmt.Errorf("proposal.cooldown: %w", err)
 	}
@@ -427,7 +419,7 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		GnowebURL:          ch.GnowebURL,
 		ChainID:            ch.ChainID,
 		GnomonitoringChain: ch.GnomonitoringChain,
-		DryRun:             ch.DryRun,
+		DryRun:             dryRun,
 		PollInterval:       poll,
 		VotePollInterval:   votePoll,
 		Conditions:         cond,
@@ -455,11 +447,16 @@ func (c *Config) EnabledChains() []string {
 }
 
 // BroadcastCapableChains returns the IDs of all enabled chains that may sign
-// and broadcast (i.e. not in dry_run), sorted alphabetically.
+// and broadcast (i.e. not in dry_run, resolving the global default and any
+// per-chain override), sorted alphabetically.
 func (c *Config) BroadcastCapableChains() []string {
 	ids := make([]string, 0, len(c.Chains))
 	for id, ch := range c.Chains {
-		if ch.Enabled && !ch.DryRun {
+		dryRun := c.DryRun
+		if ch.DryRun != nil {
+			dryRun = *ch.DryRun
+		}
+		if ch.Enabled && !dryRun {
 			ids = append(ids, id)
 		}
 	}
