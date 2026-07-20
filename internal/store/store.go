@@ -20,11 +20,13 @@ const (
 	StatusPending  = "pending"
 	StatusAccepted = "accepted"
 	StatusRejected = "rejected"
-	// StatusDryRun marks a rehearsal record written by a dry_run chain instead
-	// of a broadcast. Dry-run records are excluded from every real-lifecycle
-	// query (LastProposal, PendingProposals, RejectionCount) so a rehearsal can
-	// never block a real proposal once dry_run is disabled; they are consulted
-	// only through LastDryRun to dedup rehearsal logs/notifications.
+	// StatusDryRun tags a proposal record produced by a dry_run chain instead
+	// of a real broadcast attempt, so store queries and operators can tell a
+	// deliberate non-broadcast apart from a genuine gnokey failure (Success:
+	// false, Status: ""). It counts toward the real lifecycle gate exactly
+	// like any other record: LastProposal/RejectionCount/PendingProposals do
+	// not exclude it, so disabling dry_run does not bypass the cooldown of a
+	// proposal that was already shown to an operator.
 	StatusDryRun = "dry-run"
 )
 
@@ -89,12 +91,9 @@ type Store interface {
 	RecordNotification(ctx context.Context, r NotifRecord) error
 
 	// Lifecycle queries.
-	// LastProposal returns the validator's most recent real proposal; dry-run
-	// records are excluded so a rehearsal never gates a real proposal.
+	// LastProposal returns the validator's most recent proposal record
+	// (broadcast or dry-run) on this chain, or nil.
 	LastProposal(ctx context.Context, chain, address string) (*ProposalRecord, error)
-	// LastDryRun returns the validator's most recent dry-run record, used to
-	// dedup rehearsal logs/notifications across cycles.
-	LastDryRun(ctx context.Context, chain, address string) (*ProposalRecord, error)
 	PendingProposals(ctx context.Context, chain string) ([]ProposalRecord, error)
 	RejectionCount(ctx context.Context, chain, address string) (int, error)
 
@@ -142,9 +141,6 @@ func (Noop) SetOnchainID(context.Context, int64, string) error             { ret
 func (Noop) UpdateStatus(context.Context, int64, string, time.Time) error  { return nil }
 func (Noop) RecordNotification(context.Context, NotifRecord) error         { return nil }
 func (Noop) LastProposal(context.Context, string, string) (*ProposalRecord, error) {
-	return nil, nil
-}
-func (Noop) LastDryRun(context.Context, string, string) (*ProposalRecord, error) {
 	return nil, nil
 }
 func (Noop) PendingProposals(context.Context, string) ([]ProposalRecord, error) { return nil, nil }
