@@ -342,10 +342,23 @@ func Gate(last *store.ProposalRecord, rejections int, p Params) Decision
 - `README.md`: update the conditions section to describe the score-driven
   model; document `action_priority`, the VP bound fields, and the
   non-compounding delta model with a worked example.
-- `prd.md`: this is a significant enough behavior change that it needs its
-  own PRD amendment (new FR numbers for the action model) rather than being
-  silently folded into FR-4 — out of scope for this spec/implementation plan,
-  flagged here so it isn't forgotten.
+- `prd.md`: amend as part of this work, not deferred. Concretely:
+  - §6.4 "Eligibility conditions" (FR-4.1–4.4, `[EXISTS]`) is superseded by a
+    new §6.4b "Score-driven actions" describing the three-action model
+    (eject/lower_vp/raise_vp), `action_priority`, the dual-cap VP delta, and
+    the VP bounds — with its own FR numbers (FR-4b.1 etc.), marked
+    `[TO BUILD]`.
+  - §7's example `config.yaml` block is replaced with the schema from this
+    spec's Config section.
+  - §14 Decisions gains an entry (e.g. D15) recording the score-vs-raw-metrics
+    choice and the dual-cap rationale, mirroring how D1–D14 record prior
+    resolved design questions.
+  - §15 Milestones gains an entry for this work (after M6, or wherever it
+    lands relative to in-flight work at merge time).
+  - The existing eject-specific FRs (§6.6 proposal generation, §6.7 lifecycle
+    gate, §6.9 notifications) get a light pass to say "per-action" where they
+    currently assume ejection is the only outcome, without rewriting their
+    substance (those mechanics are unchanged, just generalized).
 - `CLAUDE.md`: update the "Architecture" and "Conventions" sections once
   implemented (the eject-only description of `internal/rules`/`internal/proposal`
   becomes inaccurate).
