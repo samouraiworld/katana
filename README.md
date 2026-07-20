@@ -96,20 +96,27 @@ every cycle would re-broadcast the same ejection. Configure
 
 ## Rehearsal / dry-run
 
-Set `dry_run: true` on a chain to rehearse katana against a live network
-before arming it. The eval worker runs the **full pipeline** — metrics,
-conditions, exceptions, lifecycle gate, valset membership, operator
+Set `dry_run: true` — globally (the default for every chain) or per chain,
+overriding the global default — to run katana against a live network without
+ever signing or broadcasting. The eval worker runs the **full pipeline** —
+metrics, conditions, exceptions, lifecycle gate, valset membership, operator
 resolution — but instead of signing and broadcasting it:
 
 - logs the complete would-be proposal (validator, operator, triggering
   conditions, title, description) with a `[DRY-RUN]` prefix;
-- sends the normal notification, clearly labeled `[DRY-RUN]`;
+- sends the normal notification with the ejection script attached
+  (Discord/Telegram; Slack falls back to inline code) and a ready-to-run
+  `gnokey` command (password piped, never embedded), so an operator can
+  review and broadcast it by hand;
 - records a `dry-run` row in the proposal history so the same rehearsal is not
-  re-logged/re-notified on every poll (the `proposal.cooldown` window applies).
+  re-logged/re-notified on every poll (the `proposal.cooldown` window
+  applies).
 
-Dry-run records are **excluded from the real lifecycle gate**: disabling
-`dry_run` later lets a real proposal go out immediately. `dry_run` defaults to
-`false` — a plain enabled chain is broadcast-armed.
+Dry-run records count toward the **real lifecycle gate** exactly like a
+broadcast attempt would: disabling `dry_run` does not bypass the cooldown of a
+proposal that was already rehearsed and shown to an operator. Use `dry_run`
+both to onboard a new chain and as a standing manual-approval mode. It
+defaults to `false` — a plain enabled chain is broadcast-armed.
 
 ## Notifications
 
@@ -223,8 +230,9 @@ gnoland-test/          local devnet for preprod/e2e
 ## Safety
 
 - katana broadcasts by default: every eligible validator on a chain without
-  `dry_run: true` results in a signed, on-chain GovDAO proposal — rehearse
-  with `dry_run` before arming a new chain. `gnokey` is embedded in the container image
+  `dry_run: true` results in a signed, on-chain GovDAO proposal — use
+  `dry_run` to rehearse a new chain or as a standing manual-approval mode.
+  `gnokey` is embedded in the container image
   (pinned by the `GNO_REF` build-arg); the signing key is provisioned from a
   mnemonic at startup (`gnokey.mnemonic` / `KATANA_GNOKEY_MNEMONIC`) or from a
   pre-provisioned keybase.

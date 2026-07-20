@@ -172,18 +172,17 @@ submitted). Each loops on its own ticker.
     `KATANA_GNOKEY_PASSWORD`; strongly recommended to keep it out of the file in
     production.
   - The wallet is used on every cycle: katana has no other run path.
-- **FR-6.6** katana broadcasts on-chain by default. There is no dry-run/artifact
-  mode and no CLI flag to select behaviour. *(decision D9 — dry-run removed.)*
-  `[CHANGE]`
-- **FR-6.6a** `proposal.enabled` (default `true`, overridable per chain) is an
-  **observe toggle**: when `false`, katana still evaluates candidates and sends a
-  `would_eject` notification, records the proposal row so the lifecycle cooldown
-  gate prevents re-notification, but does **not** sign/broadcast on-chain. The
-  notification is a **manual-approval hand-off**: it attaches the ejection script
-  as a downloadable `.gno` file (Discord/Telegram; Slack falls back to inline
-  code) and includes the ready-to-run `gnokey` command (password piped, never
-  embedded), so an operator can review and broadcast it themselves. This is an
-  arm/observe switch for safe rollout, not a return of dry-run.
+- **FR-6.6** katana broadcasts on-chain by default. `dry_run` (default `false`,
+  global with per-chain override) is the sole toggle for the opposite: when
+  `true`, katana still evaluates candidates and sends a `would_eject`
+  notification, and records the proposal row (`status: dry-run`) so the real
+  lifecycle cooldown gate prevents re-notification and does not reset once
+  `dry_run` is disabled. The notification is a **manual-approval hand-off**: it
+  attaches the ejection script as a downloadable `.gno` file (Discord/Telegram;
+  Slack falls back to inline code) and includes the ready-to-run `gnokey`
+  command (password piped, never embedded), so an operator can review and
+  broadcast it themselves. Serves both onboarding rehearsal and a standing
+  manual-approval mode. *(decision D9 — see amendment below.)* `[CHANGE]`
 - **FR-6.6b** The signing key is provisioned into the gnokey keybase from a
   configured **mnemonic** (`gnokey.mnemonic`, env `KATANA_GNOKEY_MNEMONIC`) at
   startup: `internal/keybase.Ensure` imports the derived key under
@@ -624,13 +623,15 @@ supermajority alone). This is where katana is exercised as it will run in prod.
   `/info` is used only to **validate** them at startup (warn on mismatch), not to
   populate. (`gnoweb_url` added per chain.)
 - **D9 — Run mode.** ✅ **Superseded: katana is broadcast-only.** There is no
-  `proposal.mode` / dry-run setting; every eligible proposal is signed and
-  submitted on-chain via gnokey. The signing key is either provisioned from a
-  configured mnemonic at startup (`internal/keybase`) or already present in a
-  pre-provisioned keybase in production.
-  *Amended: a per-chain `dry_run` rehearsal switch was later reintroduced for
-  onboarding katana on live networks (see README "Rehearsal / dry-run");
-  broadcast remains the default.*
+  `proposal.mode` setting; every eligible proposal is signed and submitted
+  on-chain via gnokey unless `dry_run` says otherwise. The signing key is
+  either provisioned from a configured mnemonic at startup
+  (`internal/keybase`) or already present in a pre-provisioned keybase in
+  production.
+  *Amended: a `dry_run` toggle (global default + per-chain override) was later
+  reintroduced, covering both onboarding rehearsal and a standing
+  manual-approval mode (see README "Rehearsal / dry-run"); broadcast remains
+  the default.*
 - **D10 — Per-chain wallet.** ✅ Global `gnokey` + optional per-chain override.
 
 ### Resolved — GovDAO vote tracking

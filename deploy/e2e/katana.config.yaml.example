@@ -12,6 +12,7 @@
 
 log_level: info
 poll_interval: 15s
+dry_run: false          # true = observe-only: evaluate + notify (attach .gno script + gnokey command), no broadcast
 
 gnomonitoring:
   base_url: "http://gnomonitoring:8989"
@@ -37,7 +38,6 @@ conditions:
     enabled: false
 
 proposal:
-  enabled: true          # false = observe-only: evaluate + notify (attach .gno script + gnokey command), no broadcast
   submit: run
   cooldown: 1h
   rejected_backoff: 1h
