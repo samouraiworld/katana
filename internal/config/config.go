@@ -452,18 +452,19 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 	if _, err := parseDur(prop.RejectedBackoff); err != nil {
 		return Runtime{}, fmt.Errorf("proposal.rejected_backoff: %w", err)
 	}
-	for _, name := range prop.ActionPriority {
-		if name != ActionEject && name != ActionLowerVP && name != ActionRaiseVP {
-			return Runtime{}, fmt.Errorf("proposal.action_priority: unknown action %q", name)
-		}
-		ac, ok := prop.Actions[name]
-		if !ok {
-			continue
-		}
+	for name, ac := range prop.Actions {
 		switch ac.Window {
 		case "last_24h", "current_week", "current_month", "current_year":
 		default:
 			return Runtime{}, fmt.Errorf("proposal.actions.%s.window: %q is not a known gnomonitoring period", name, ac.Window)
+		}
+	}
+	for _, name := range prop.ActionPriority {
+		if name != ActionEject && name != ActionLowerVP && name != ActionRaiseVP {
+			return Runtime{}, fmt.Errorf("proposal.action_priority: unknown action %q", name)
+		}
+		if _, ok := prop.Actions[name]; !ok {
+			continue
 		}
 		if prop.Submit == "call" && name != ActionEject {
 			return Runtime{}, fmt.Errorf("proposal.submit \"call\" is only supported for the eject action; %q must use \"run\"", name)

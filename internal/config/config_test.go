@@ -189,6 +189,30 @@ chains:
 	}
 }
 
+// TestActionWindowValidatedEvenWhenNotInActionPriority guards against
+// over-scoping the window check to action_priority when the call-mode fix
+// (TestCallSubmitEjectOnlyAllowedWithEjectOnlyPriority) was applied: window
+// validation must still cover every action configured under proposal.actions,
+// not just the ones currently listed in action_priority. Here action_priority
+// is [eject] only, but raise_vp carries a bogus window and must still fail
+// Load/Runtime.
+func TestActionWindowValidatedEvenWhenNotInActionPriority(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  action_priority: [eject]
+  actions:
+    raise_vp: {window: "bogus"}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error: raise_vp.window is invalid even though raise_vp is not in action_priority")
+	}
+}
+
 func TestLoadAndRuntime(t *testing.T) {
 	c, err := Load(writeConfig(t, validYAML))
 	if err != nil {
