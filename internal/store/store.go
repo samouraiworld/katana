@@ -32,15 +32,15 @@ const (
 
 // EvalRecord is one validator evaluated during a cycle.
 type EvalRecord struct {
-	CreatedAt      time.Time
-	Chain          string
-	Address        string
-	Moniker        string
-	MissedBlocks   int
-	CriticalAlerts int
-	Eligible       bool
-	Excepted       bool
-	Reason         string
+	CreatedAt time.Time
+	Chain     string
+	Address   string
+	Moniker   string
+	Score     int
+	Tier      string
+	Eligible  bool
+	Excepted  bool
+	Reason    string
 }
 
 // ProposalRecord is one proposal katana produced, plus its on-chain lifecycle.

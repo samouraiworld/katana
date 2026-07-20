@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -93,6 +94,110 @@ func TestDryRunRecordCountsTowardLifecycle(t *testing.T) {
 	if n, _ := st.RejectionCount(ctx, "local", "g1bad"); n != 0 {
 		t.Fatalf("RejectionCount = %d, want 0", n)
 	}
+}
+
+func TestProposalActionRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	id, err := st.RecordProposal(ctx, ProposalRecord{
+		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1a",
+		Moniker: "a", Status: StatusPending, OnchainID: "1",
+		Action: "lower_vp", CurrentPower: 1000, TargetPower: 600,
+		Args: []string{"g1a"},
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	last, err := st.LastProposal(ctx, "local", "g1a")
+	if err != nil || last == nil {
+		t.Fatalf("LastProposal: %+v, err %v", last, err)
+	}
+	if last.ID != id || last.Action != "lower_vp" || last.CurrentPower != 1000 || last.TargetPower != 600 {
+		t.Fatalf("round-tripped record = %+v, want action=lower_vp current=1000 target=600", last)
+	}
+}
+
+func TestEvaluationScoreTierRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	if err := st.RecordEvaluation(ctx, EvalRecord{
+		CreatedAt: time.Now(), Chain: "local", Address: "g1a", Moniker: "a",
+		Score: 24, Tier: "Critical", Eligible: true, Reason: "score 24/100",
+	}); err != nil {
+		t.Fatalf("RecordEvaluation: %v", err)
+	}
+	// No public read API for evaluations beyond the write path itself; this
+	// asserts RecordEvaluation with the new fields doesn't error against the
+	// migrated schema (the NOT NULL missed_blocks/critical_alerts columns
+	// are the risk: an unmigrated or mis-migrated schema would fail here).
+}
+
+// TestMigrationAddsColumnsToExistingDB simulates a pre-existing database that
+// predates the action/target_power/current_power columns, and asserts
+// opening it through store.New (which runs migrate()) additively adds them
+// without touching existing data.
+func TestMigrationAddsColumnsToExistingDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	const oldSchema = `
+CREATE TABLE proposals (
+	id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+	created_at          TEXT    NOT NULL,
+	chain               TEXT    NOT NULL,
+	chain_id            TEXT    NOT NULL,
+	address             TEXT    NOT NULL,
+	moniker             TEXT    NOT NULL,
+	reason              TEXT    NOT NULL,
+	title               TEXT    NOT NULL,
+	realm_path          TEXT    NOT NULL,
+	function            TEXT    NOT NULL,
+	args                TEXT    NOT NULL,
+	output              TEXT    NOT NULL,
+	success             INTEGER NOT NULL,
+	onchain_proposal_id TEXT    NOT NULL DEFAULT '',
+	status              TEXT    NOT NULL DEFAULT '',
+	resolved_at         TEXT    NOT NULL DEFAULT ''
+);`
+	if _, err := raw.Exec(oldSchema); err != nil {
+		t.Fatalf("seeding old schema: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO proposals (created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success)
+		 VALUES ('2026-01-01T00:00:00Z', 'local', 'dev', 'g1old', 'old', 'r', 't', '', '', '[]', '', 1)`); err != nil {
+		t.Fatalf("seeding old row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("closing raw handle: %v", err)
+	}
+
+	st, err := New(config.Storage{Driver: "sqlite", SQLitePath: path})
+	if err != nil {
+		t.Fatalf("New (migration): %v", err)
+	}
+	defer st.Close()
+
+	last, err := st.LastProposal(context.Background(), "local", "g1old")
+	if err != nil || last == nil {
+		t.Fatalf("LastProposal after migration: %+v, err %v", last, err)
+	}
+	if last.Action != "eject" {
+		t.Fatalf("pre-migration row Action = %q, want default 'eject'", last.Action)
+	}
+	if last.TargetPower != 0 || last.CurrentPower != 0 {
+		t.Fatalf("pre-migration row TargetPower/CurrentPower = %d/%d, want 0/0", last.TargetPower, last.CurrentPower)
+	}
+
+	// Migration must be idempotent: opening it again must not error.
+	st2, err := New(config.Storage{Driver: "sqlite", SQLitePath: path})
+	if err != nil {
+		t.Fatalf("New (second open, idempotency): %v", err)
+	}
+	st2.Close()
 }
 
 func TestNoopStore(t *testing.T) {
