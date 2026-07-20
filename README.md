@@ -126,6 +126,8 @@ katana notifies every enabled channel (Discord, Slack, Telegram). Example:
 > A proposal for validator `Sam` (`g1abc…`) on `betanet` has been sent to remove
 > it from the valset.
 
+Additionally, on `dry_run: true` chains, katana sends a notification with the would-be ejection script and ready-to-run `gnokey` command — see [Rehearsal / dry-run](#rehearsal--dry-run).
+
 Nothing is sent on errors.
 
 ## Requirements
