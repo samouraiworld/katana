@@ -41,6 +41,47 @@ func TestMessage(t *testing.T) {
 	}
 }
 
+func TestMessage_LowerVPSent(t *testing.T) {
+	msg := Message(EventSent, Info{
+		Chain: "test6", Moniker: "bad-node", Address: "g1bad",
+		Action: config.ActionLowerVP, CurrentPower: 1000, TargetPower: 600, VPDeltaPercent: -2.0,
+	})
+	want := "A proposal for validator bad-node (g1bad) on test6 has been sent to lower its voting power from 1000 to 600 (-2.0% of total valset VP)."
+	if msg != want {
+		t.Errorf("Message = %q, want %q", msg, want)
+	}
+}
+
+func TestMessage_RaiseVPAccepted(t *testing.T) {
+	msg := Message(EventAccepted, Info{
+		Chain: "test6", Moniker: "good-node", Address: "g1good",
+		Action: config.ActionRaiseVP, CurrentPower: 1000, TargetPower: 1400,
+	})
+	want := "GovDAO accepted the proposal for validator good-node (g1good) on test6: its voting power has been raised from 1000 to 1400."
+	if msg != want {
+		t.Errorf("Message = %q, want %q", msg, want)
+	}
+}
+
+func TestMessage_LowerVPRejected(t *testing.T) {
+	msg := Message(EventRejected, Info{
+		Chain: "test6", Moniker: "bad-node", Address: "g1bad",
+		Action: config.ActionLowerVP, CurrentPower: 1000, RejectedBackoff: 720 * time.Hour,
+	})
+	want := "GovDAO rejected the proposal for validator bad-node (g1bad) on test6 to lower its voting power: it stays at 1000. A new proposal may be sent after 720h0m0s."
+	if msg != want {
+		t.Errorf("Message = %q, want %q", msg, want)
+	}
+}
+
+func TestMessage_EjectUnchanged(t *testing.T) {
+	msg := Message(EventSent, Info{Chain: "test6", Moniker: "bad-node", Address: "g1bad", Action: config.ActionEject})
+	want := "A proposal for validator bad-node (g1bad) on test6 has been sent to remove it from the valset."
+	if msg != want {
+		t.Errorf("Message = %q, want %q (eject wording must not change)", msg, want)
+	}
+}
+
 func TestDispatchDiscord(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

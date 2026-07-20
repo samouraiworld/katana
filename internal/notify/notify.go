@@ -40,6 +40,14 @@ type Info struct {
 	GnowebURL       string
 	ProposalID      string
 	RejectedBackoff time.Duration
+	// Action is the score-driven action this notification is about: eject |
+	// lower_vp | raise_vp. CurrentPower/TargetPower are 0 for eject.
+	// VPDeltaPercent is the signed % of the chain's total valset VP this
+	// move represents (only used by the "sent" wording).
+	Action         string
+	CurrentPower   int64
+	TargetPower    int64
+	VPDeltaPercent float64
 	// Observe (would_eject) fields: the proposal script/expression, the filename
 	// it is attached under, and the ready-to-run gnokey command to broadcast it.
 	ProposalCode     string
@@ -67,19 +75,16 @@ func Message(event Event, in Info) string {
 	var msg string
 	switch event {
 	case EventSent:
-		msg = fmt.Sprintf("A proposal for validator %s (%s) on %s has been sent to remove it from the valset.",
-			in.display(), in.Address, in.Chain)
+		msg = sentText(in)
 	case EventAccepted:
-		msg = fmt.Sprintf("GovDAO accepted the proposal for validator %s (%s) on %s: it has been removed from the valset.",
-			in.display(), in.Address, in.Chain)
+		msg = acceptedText(in)
 	case EventRejected:
-		msg = fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
-			in.display(), in.Address, in.Chain, in.RejectedBackoff)
+		msg = rejectedText(in)
 	case EventWouldEject:
-		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for ejection, but dry_run is enabled — nothing was broadcast.",
-			in.display(), in.Address, in.Chain)
+		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for %s, but dry_run is enabled — nothing was broadcast.",
+			in.display(), in.Address, in.Chain, actionNoun(in.Action))
 		if in.GnokeyCommand != "" {
-			msg += "\nTo broadcast it manually, run:\n```\n" + in.GnokeyCommand + "\n```\nThe ejection script is included with this notification (attached, or inline below if your channel doesn't support attachments)."
+			msg += "\nTo broadcast it manually, run:\n```\n" + in.GnokeyCommand + "\n```\nThe proposal script is included with this notification (attached, or inline below if your channel doesn't support attachments)."
 		}
 		return msg
 	default:
@@ -89,6 +94,61 @@ func Message(event Event, in Info) string {
 		msg += " " + link
 	}
 	return msg
+}
+
+func isVPAction(action string) bool {
+	return action == config.ActionLowerVP || action == config.ActionRaiseVP
+}
+
+func vpVerb(action string, past bool) string {
+	if action == config.ActionRaiseVP {
+		if past {
+			return "raised"
+		}
+		return "raise"
+	}
+	if past {
+		return "lowered"
+	}
+	return "lower"
+}
+
+func sentText(in Info) string {
+	if isVPAction(in.Action) {
+		return fmt.Sprintf("A proposal for validator %s (%s) on %s has been sent to %s its voting power from %d to %d (%+.1f%% of total valset VP).",
+			in.display(), in.Address, in.Chain, vpVerb(in.Action, false), in.CurrentPower, in.TargetPower, in.VPDeltaPercent)
+	}
+	return fmt.Sprintf("A proposal for validator %s (%s) on %s has been sent to remove it from the valset.",
+		in.display(), in.Address, in.Chain)
+}
+
+func acceptedText(in Info) string {
+	if isVPAction(in.Action) {
+		return fmt.Sprintf("GovDAO accepted the proposal for validator %s (%s) on %s: its voting power has been %s from %d to %d.",
+			in.display(), in.Address, in.Chain, vpVerb(in.Action, true), in.CurrentPower, in.TargetPower)
+	}
+	return fmt.Sprintf("GovDAO accepted the proposal for validator %s (%s) on %s: it has been removed from the valset.",
+		in.display(), in.Address, in.Chain)
+}
+
+func rejectedText(in Info) string {
+	if isVPAction(in.Action) {
+		return fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s to %s its voting power: it stays at %d. A new proposal may be sent after %s.",
+			in.display(), in.Address, in.Chain, vpVerb(in.Action, false), in.CurrentPower, in.RejectedBackoff)
+	}
+	return fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
+		in.display(), in.Address, in.Chain, in.RejectedBackoff)
+}
+
+func actionNoun(action string) string {
+	switch action {
+	case config.ActionLowerVP:
+		return "a voting-power reduction"
+	case config.ActionRaiseVP:
+		return "a voting-power increase"
+	default:
+		return "ejection"
+	}
 }
 
 // Result is the per-channel outcome of a Dispatch.
