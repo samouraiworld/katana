@@ -166,19 +166,9 @@ func scanProposal(rows *sql.Rows) (ProposalRecord, error) {
 }
 
 func (s *SQLite) LastProposal(ctx context.Context, chain, address string) (*ProposalRecord, error) {
-	// Dry-run rehearsal records never participate in the real lifecycle gate.
-	return s.lastWhere(ctx,
-		`chain = ? AND address = ? AND status != ?`, chain, address, StatusDryRun)
-}
-
-func (s *SQLite) LastDryRun(ctx context.Context, chain, address string) (*ProposalRecord, error) {
-	return s.lastWhere(ctx,
-		`chain = ? AND address = ? AND status = ?`, chain, address, StatusDryRun)
-}
-
-func (s *SQLite) lastWhere(ctx context.Context, where string, args ...any) (*ProposalRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+proposalCols+` FROM proposals WHERE `+where+` ORDER BY id DESC LIMIT 1`, args...)
+		`SELECT `+proposalCols+` FROM proposals WHERE chain = ? AND address = ? ORDER BY id DESC LIMIT 1`,
+		chain, address)
 	if err != nil {
 		return nil, err
 	}

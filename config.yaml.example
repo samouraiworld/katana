@@ -18,6 +18,11 @@ log_level: info                 # env: KATANA_LOG_LEVEL
 # This is the RUN cadence — NOT a condition window (see conditions.* below).
 poll_interval: 5m
 
+# dry_run: true rehearses every chain (or one chain, if set under chains.<name>)
+# without ever signing or broadcasting — see "Rehearsal / dry-run" in README.md.
+# Overridable per chain via chains.<name>.dry_run. Defaults to false.
+dry_run: false
+
 # ── gnomonitoring REST API ────────────────────────────────────────────────────
 # Source of validator metrics (missed blocks + CRITICAL alerts).
 # https://github.com/samouraiworld/gnomonitoring
@@ -137,9 +142,11 @@ web:
 #                       cycle and immediately before any broadcast; a mismatch
 #                       (genesis reset) skips the cycle cleanly.
 # gnomonitoring_chain = the chain key gnomonitoring exposes via ?chain=
-# dry_run             = rehearsal mode (default false): run the full pipeline
-#                       but log + notify the would-be proposal instead of
-#                       signing/broadcasting. Use it to onboard a new chain.
+# dry_run             = per-chain override of the root dry_run default: run
+#                       the full pipeline but log + notify the would-be
+#                       proposal (script attached + gnokey command) instead of
+#                       signing/broadcasting. Use it to onboard a new chain or
+#                       as a standing manual-approval mode.
 # A chain may override: poll_interval, conditions, proposal, gnokey (field
 # merge), and add exceptions.
 chains:

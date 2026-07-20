@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/gnoland"
@@ -66,29 +68,21 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 			continue
 		}
 
-		// Lifecycle gate: don't re-propose while pending/accepted/within backoff.
-		params := lifecycle.Params{
+		// Lifecycle gate: don't re-propose while pending/accepted/within
+		// backoff. Dry-run records count here too (LastProposal no longer
+		// excludes them), so a rehearsal already dedups across cycles the
+		// same way a real proposal would, and its cooldown carries over once
+		// dry_run is disabled.
+		last, _ := d.st.LastProposal(ctx, rt.Key, addr)
+		rejections, _ := d.st.RejectionCount(ctx, rt.Key, addr)
+		if dec := lifecycle.Gate(last, rejections, lifecycle.Params{
 			Cooldown:        rt.Proposal.CooldownDur(),
 			RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
 			MaxRejections:   rt.Proposal.MaxRejections,
 			Now:             d.now(),
-		}
-		last, _ := d.st.LastProposal(ctx, rt.Key, addr)
-		rejections, _ := d.st.RejectionCount(ctx, rt.Key, addr)
-		if dec := lifecycle.Gate(last, rejections, params); !dec.Allow {
+		}); !dec.Allow {
 			d.logger.Printf("[%s][eval] SUPPRESS %s: %s", rt.Key, disp(moniker, addr), dec.Reason)
 			continue
-		}
-
-		// Dry-run dedup: a rehearsal recorded within the cooldown window (via
-		// Gate's default branch) suppresses another one, so dry-run cycles do
-		// not re-log/re-notify the same would-be proposal every poll.
-		if rt.DryRun {
-			lastDry, _ := d.st.LastDryRun(ctx, rt.Key, addr)
-			if dec := lifecycle.Gate(lastDry, 0, params); !dec.Allow {
-				d.logger.Printf("[%s][eval] SUPPRESS dry-run for %s: %s", rt.Key, disp(moniker, addr), dec.Reason)
-				continue
-			}
 		}
 
 		// Safety: confirm the validator is in the live consensus valset.
@@ -112,7 +106,8 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 
 // produce builds an ejection proposal, then either broadcasts it (signing via
 // gnokey, recording it, notifying on success) or — on a dry_run chain — logs
-// and notifies the complete would-be proposal without touching the chain.
+// and notifies the complete would-be proposal, with the ejection script and a
+// ready-to-run gnokey command attached, without touching the chain.
 func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, addr, moniker, reason string) {
 	// A valset ejection is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
@@ -148,7 +143,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	}
 
 	if rt.DryRun {
-		d.dryRun(ctx, rt, built, rec, operator)
+		d.dryRun(ctx, rt, built, rec, operator, moniker, addr)
 		return
 	}
 
@@ -171,23 +166,33 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, addr, recErr)
 	}
 	d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
-	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID)
+	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID, observePayload{})
 }
 
 // dryRun records, logs, and notifies the proposal a dry_run chain would have
-// broadcast. The record carries store.StatusDryRun, which every real-lifecycle
-// query ignores, so the rehearsal never blocks a real proposal later.
-func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.Built, rec store.ProposalRecord, operator string) {
+// broadcast: the ejection script/expression, a filename to attach it under,
+// and a ready-to-run gnokey command — the same manual-approval hand-off a
+// broadcast-capable chain's operator would get if sending failed and they had
+// to act by hand. The record carries store.StatusDryRun and counts toward the
+// real lifecycle gate like any other proposal record.
+func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.Built, rec store.ProposalRecord, operator, moniker, addr string) {
+	code := built.Script
+	if built.Submit == "call" {
+		code = fmt.Sprintf("%s.%s(%s)", built.RealmPath, built.Function, strings.Join(built.Args, ", "))
+	}
+	filename := ejectFilename(disp(moniker, addr))
+	command := built.Command(rt.Gnokey, filename)
+
 	rec.Status = store.StatusDryRun
 	rec.Success = true
-	rec.Output = "[DRY-RUN] broadcast skipped (dry_run enabled)"
+	rec.Output = code
 	id, recErr := d.st.RecordProposal(ctx, rec)
 	if recErr != nil {
 		d.logger.Printf("[%s][eval] recording dry-run proposal failed for %s: %v — expect this rehearsal to repeat next cycle", rt.Key, rec.Address, recErr)
 	}
 	d.logger.Printf("[%s][eval] WARN [DRY-RUN] would broadcast valset-ejection proposal: validator=%q addr=%s operator=%s chain_id=%s conditions=%q title=%q description=%q",
-		rt.Key, rec.Moniker, rec.Address, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
-	d.dispatch(ctx, notify.EventDryRun, rt, id, rec.Address, rec.Moniker, "")
+		rt.Key, moniker, addr, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
+	d.dispatch(ctx, notify.EventWouldEject, rt, id, addr, moniker, "", observePayload{code: code, filename: filename, command: command})
 }
 
 // assertChainID confirms the node behind rt.RPCEndpoint still reports the
@@ -234,11 +239,11 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) {
 		case govdao.Accepted:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusAccepted, d.now())
 			d.logger.Printf("[%s][vote] proposal %s ACCEPTED — %s removed from valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, p.Address, p.Moniker, p.OnchainID)
+			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, p.Address, p.Moniker, p.OnchainID, observePayload{})
 		case govdao.Rejected:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusRejected, d.now())
 			d.logger.Printf("[%s][vote] proposal %s REJECTED — %s kept in valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventRejected, rt, p.ID, p.Address, p.Moniker, p.OnchainID)
+			d.dispatch(ctx, notify.EventRejected, rt, p.ID, p.Address, p.Moniker, p.OnchainID, observePayload{})
 		default:
 			// pending / unknown: leave as pending, retry next tick.
 		}
@@ -274,17 +279,27 @@ func (d *Daemon) fetchMetrics(ctx context.Context, rt config.Runtime) (missed ma
 }
 
 // dispatch sends a notification and records each channel result.
-func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, addr, moniker, onchainID string) {
+// observePayload carries the extra fields a would_eject (observe) notification
+// needs: the proposal script, the filename it is attached under, and the
+// ready-to-run gnokey command. Zero value = not an observe notification.
+type observePayload struct {
+	code, filename, command string
+}
+
+func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, addr, moniker, onchainID string, obs observePayload) {
 	if !d.notifier.Enabled() {
 		return
 	}
 	results := d.notifier.Dispatch(ctx, event, notify.Info{
-		Chain:           rt.Key,
-		Moniker:         moniker,
-		Address:         addr,
-		GnowebURL:       rt.GnowebURL,
-		ProposalID:      onchainID,
-		RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
+		Chain:            rt.Key,
+		Moniker:          moniker,
+		Address:          addr,
+		GnowebURL:        rt.GnowebURL,
+		ProposalID:       onchainID,
+		RejectedBackoff:  rt.Proposal.RejectedBackoffDur(),
+		ProposalCode:     obs.code,
+		ProposalFilename: obs.filename,
+		GnokeyCommand:    obs.command,
 	})
 	for _, r := range results {
 		status := "ok"
@@ -305,4 +320,21 @@ func disp(moniker, addr string) string {
 		return moniker
 	}
 	return addr
+}
+
+// ejectFilename builds a safe .gno filename for the attached ejection script,
+// replacing any character outside [A-Za-z0-9-_] so it is a valid attachment name.
+func ejectFilename(name string) string {
+	var b strings.Builder
+	b.WriteString("eject-")
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	b.WriteString(".gno")
+	return b.String()
 }

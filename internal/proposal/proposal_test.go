@@ -76,6 +76,29 @@ func TestBuildCallMode(t *testing.T) {
 	}
 }
 
+func TestCommandRunMode(t *testing.T) {
+	p := config.Proposal{Submit: "run", RunScriptTemplate: config.DefaultEjectScript}
+	gk := config.Gnokey{Bin: "gnokey", KeyName: "dev", GasFee: "1000000ugnot", GasWanted: 20000000, Home: "/app/data/keybase", Password: "s3cret"}
+	b := Build(target(), p, gk)
+
+	cmd := b.Command(gk, "eject-bad-node.gno")
+	for _, want := range []string{
+		"gnokey maketx run", "-remote http://localhost:26658", "-chainid dev",
+		"-insecure-password-stdin", "-home /app/data/keybase", "eject-bad-node.gno",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command missing %q:\n%s", want, cmd)
+		}
+	}
+	// The password must be piped via stdin, never embedded in the command text.
+	if strings.Contains(cmd, "s3cret") {
+		t.Errorf("password must not appear in the command: %s", cmd)
+	}
+	if !strings.Contains(cmd, `"$KEYBASE_PASSWORD"`) {
+		t.Errorf("command should pipe the password from an env var: %s", cmd)
+	}
+}
+
 func TestOperatorFallsBackToAddress(t *testing.T) {
 	tg := target()
 	tg.OperatorAddress = ""

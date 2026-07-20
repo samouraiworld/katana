@@ -12,6 +12,7 @@
 
 log_level: info
 poll_interval: 15s
+dry_run: false          # true = observe-only: evaluate + notify (attach .gno script + gnokey command), no broadcast
 
 gnomonitoring:
   base_url: "http://gnomonitoring:8989"

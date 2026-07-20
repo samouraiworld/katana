@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"time"
@@ -26,9 +27,9 @@ const (
 	EventSent     Event = "sent"
 	EventAccepted Event = "accepted"
 	EventRejected Event = "rejected"
-	// EventDryRun announces a proposal that WOULD have been sent by a dry_run
-	// chain; nothing was signed or broadcast.
-	EventDryRun Event = "dry-run"
+	// EventWouldEject announces a proposal a dry_run chain would have sent;
+	// nothing was signed or broadcast.
+	EventWouldEject Event = "would_eject"
 )
 
 // Info carries the fields a message may reference.
@@ -39,6 +40,11 @@ type Info struct {
 	GnowebURL       string
 	ProposalID      string
 	RejectedBackoff time.Duration
+	// Observe (would_eject) fields: the proposal script/expression, the filename
+	// it is attached under, and the ready-to-run gnokey command to broadcast it.
+	ProposalCode     string
+	ProposalFilename string
+	GnokeyCommand    string
 }
 
 func (i Info) display() string {
@@ -69,9 +75,13 @@ func Message(event Event, in Info) string {
 	case EventRejected:
 		msg = fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
 			in.display(), in.Address, in.Chain, in.RejectedBackoff)
-	case EventDryRun:
-		msg = fmt.Sprintf("[DRY-RUN] katana would send a proposal to remove validator %s (%s) on %s from the valset — dry_run is enabled, nothing was broadcast.",
+	case EventWouldEject:
+		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for ejection, but dry_run is enabled — nothing was broadcast.",
 			in.display(), in.Address, in.Chain)
+		if in.GnokeyCommand != "" {
+			msg += "\nTo broadcast it manually, run:\n```\n" + in.GnokeyCommand + "\n```\nThe ejection script is included with this notification (attached, or inline below if your channel doesn't support attachments)."
+		}
+		return msg
 	default:
 		msg = fmt.Sprintf("katana event %q for validator %s (%s) on %s.", event, in.display(), in.Address, in.Chain)
 	}
@@ -112,25 +122,88 @@ func (n *Notifier) Dispatch(ctx context.Context, event Event, in Info) []Result 
 		return nil
 	}
 	msg := Message(event, in)
+	// Observe notifications ship the proposal as a downloadable file where the
+	// channel supports it (Discord, Telegram); Slack webhooks cannot upload, so
+	// they fall back to the code inline.
+	attach := event == EventWouldEject && in.ProposalCode != "" && in.ProposalFilename != ""
 	var results []Result
 
 	if n.cfg.Discord.Enabled {
-		err := n.postJSON(ctx, n.cfg.Discord.WebhookURL, map[string]string{"content": msg})
+		var err error
+		if attach {
+			payload, _ := json.Marshal(map[string]string{"content": msg})
+			err = n.postMultipart(ctx, n.cfg.Discord.WebhookURL,
+				map[string]string{"payload_json": string(payload)},
+				"files[0]", in.ProposalFilename, in.ProposalCode)
+		} else {
+			err = n.postJSON(ctx, n.cfg.Discord.WebhookURL, map[string]string{"content": msg})
+		}
 		results = append(results, result("discord", host(n.cfg.Discord.WebhookURL), err))
 	}
 	if n.cfg.Slack.Enabled {
-		err := n.postJSON(ctx, n.cfg.Slack.WebhookURL, map[string]string{"text": msg})
+		text := msg
+		if attach {
+			text += "\n```\n" + truncate(in.ProposalCode, 1500) + "\n```"
+		}
+		err := n.postJSON(ctx, n.cfg.Slack.WebhookURL, map[string]string{"text": text})
 		results = append(results, result("slack", host(n.cfg.Slack.WebhookURL), err))
 	}
 	if n.cfg.Telegram.Enabled {
-		endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", n.cfg.Telegram.BotToken)
-		err := n.postJSON(ctx, endpoint, map[string]string{
-			"chat_id": n.cfg.Telegram.ChatID,
-			"text":    msg,
-		})
+		var err error
+		if attach {
+			endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", n.cfg.Telegram.BotToken)
+			err = n.postMultipart(ctx, endpoint,
+				map[string]string{"chat_id": n.cfg.Telegram.ChatID, "caption": msg},
+				"document", in.ProposalFilename, in.ProposalCode)
+		} else {
+			endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", n.cfg.Telegram.BotToken)
+			err = n.postJSON(ctx, endpoint, map[string]string{
+				"chat_id": n.cfg.Telegram.ChatID,
+				"text":    msg,
+			})
+		}
 		results = append(results, result("telegram", n.cfg.Telegram.ChatID, err))
 	}
 	return results
+}
+
+// postMultipart POSTs a multipart/form-data body: the string fields plus one
+// file part (fileField/filename/content). Used for channel file uploads.
+func (n *Notifier) postMultipart(ctx context.Context, endpoint string, fields map[string]string, fileField, filename, content string) error {
+	if endpoint == "" {
+		return fmt.Errorf("empty endpoint")
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if err := w.WriteField(k, v); err != nil {
+			return err
+		}
+	}
+	fw, err := w.CreateFormFile(fileField, filename)
+	if err != nil {
+		return err
+	}
+	if _, err := fw.Write([]byte(content)); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := n.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	return nil
 }
 
 func (n *Notifier) postJSON(ctx context.Context, endpoint string, payload any) error {
@@ -170,4 +243,14 @@ func host(rawURL string) string {
 		return u.Host
 	}
 	return ""
+}
+
+// truncate caps s to n runes, appending an ellipsis marker when cut, so a long
+// proposal script cannot overflow a channel's message-size limit (Discord 2000).
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "\n… (truncated)"
 }

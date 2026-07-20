@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,13 +32,6 @@ func TestMessage(t *testing.T) {
 	}
 	if !strings.Contains(Message(EventRejected, in), "stays in the valset") {
 		t.Errorf("unexpected rejected message")
-	}
-
-	// Dry-run messages are unmistakably labeled and say nothing went on-chain.
-	dry := Message(EventDryRun, in)
-	if !strings.HasPrefix(dry, "[DRY-RUN]") || !strings.Contains(dry, "Sam (g1abc)") ||
-		!strings.Contains(dry, "nothing was broadcast") {
-		t.Errorf("unexpected dry-run message: %q", dry)
 	}
 
 	// Moniker falls back to address when empty, and no link without gnoweb.
@@ -72,5 +66,62 @@ func TestDispatchDisabled(t *testing.T) {
 	n := New(config.Notifications{Enabled: false})
 	if got := n.Dispatch(context.Background(), EventSent, Info{}); got != nil {
 		t.Fatalf("expected nil results when disabled, got %+v", got)
+	}
+}
+
+func TestMessageWouldEjectIncludesCommand(t *testing.T) {
+	msg := Message(EventWouldEject, Info{
+		Chain:         "local",
+		Moniker:       "val4",
+		Address:       "g1abc",
+		GnokeyCommand: "printf … | gnokey maketx run … ./eject-val4.gno",
+	})
+	if !strings.Contains(msg, "val4") || !strings.Contains(msg, "g1abc") {
+		t.Errorf("missing validator identity: %q", msg)
+	}
+	if !strings.Contains(msg, "dry_run is enabled") {
+		t.Errorf("would_eject message should reference dry_run: %q", msg)
+	}
+	if !strings.Contains(msg, "gnokey maketx run") {
+		t.Errorf("would_eject message should embed the gnokey command: %q", msg)
+	}
+	// The wording must not unconditionally claim a file was attached — Slack
+	// webhooks can't upload, and fall back to an inline block instead.
+	if !strings.Contains(msg, "attached, or inline") {
+		t.Errorf("would_eject message should describe both delivery paths: %q", msg)
+	}
+}
+
+func TestDispatchWouldEjectAttachesFile(t *testing.T) {
+	var gotContentType, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	n := New(config.Notifications{
+		Enabled: true,
+		Discord: config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
+	})
+	res := n.Dispatch(context.Background(), EventWouldEject, Info{
+		Chain: "local", Moniker: "val4", Address: "g1abc",
+		ProposalFilename: "eject-val4.gno",
+		ProposalCode:     "package main // eject",
+		GnokeyCommand:    "gnokey maketx run ... ./eject-val4.gno",
+	})
+	if len(res) != 1 || !res[0].OK {
+		t.Fatalf("expected 1 ok result, got %+v", res)
+	}
+	if !strings.HasPrefix(gotContentType, "multipart/form-data") {
+		t.Errorf("expected multipart upload, got content-type %q", gotContentType)
+	}
+	if !strings.Contains(gotBody, "eject-val4.gno") || !strings.Contains(gotBody, "package main // eject") {
+		t.Errorf("multipart body missing the attached script:\n%s", gotBody)
+	}
+	if !strings.Contains(gotBody, "gnokey maketx run") {
+		t.Errorf("multipart body missing the command in payload_json:\n%s", gotBody)
 	}
 }

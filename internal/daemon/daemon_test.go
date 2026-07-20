@@ -14,11 +14,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/proposal"
 	"github.com/samouraiworld/katana/internal/store"
 )
+
+func boolPtr(b bool) *bool { return &b }
 
 // stubChain serves the minimal gno.land RPC surface an eval cycle touches:
 // /status (chain identity), /validators (consensus valset) and /abci_query
@@ -228,7 +231,7 @@ func TestStorageWarning(t *testing.T) {
 	cfg := &config.Config{
 		Storage: config.Storage{Driver: "none"},
 		Chains: map[string]*config.ChainConfig{
-			"test": {Enabled: true, DryRun: true},
+			"test": {Enabled: true, DryRun: boolPtr(true)},
 		},
 	}
 	w := storageWarning(cfg)
@@ -262,7 +265,7 @@ func TestEvalCycleBroadcasts(t *testing.T) {
 
 func TestDryRunLogsAndNotifiesWithoutBroadcast(t *testing.T) {
 	ctx := context.Background()
-	f := newFixture(t, "dev", func(c *config.Config) { c.Chains["test"].DryRun = true })
+	f := newFixture(t, "dev", func(c *config.Config) { c.Chains["test"].DryRun = boolPtr(true) })
 
 	f.d.evalCycle(ctx, f.runtime(t))
 
@@ -280,8 +283,20 @@ func TestDryRunLogsAndNotifiesWithoutBroadcast(t *testing.T) {
 		}
 	}
 	bodies := f.notifs.all()
-	if len(bodies) != 1 || !strings.Contains(bodies[0], "[DRY-RUN]") {
-		t.Fatalf("want one DRY-RUN-labeled notification, got %+v", bodies)
+	if len(bodies) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(bodies))
+	}
+	body := bodies[0]
+	if !strings.Contains(body, "dry_run is enabled") {
+		t.Errorf("dry-run notification should say dry_run is enabled:\n%s", body)
+	}
+	// Like the old observe mode, a dry_run notification attaches the ejection
+	// script and a ready-to-run gnokey command.
+	if !strings.Contains(body, "eject-bad.gno") {
+		t.Errorf("dry-run notification missing the attached script filename:\n%s", body)
+	}
+	if !strings.Contains(body, "gnokey maketx run") {
+		t.Errorf("dry-run notification missing the gnokey command:\n%s", body)
 	}
 	props, err := f.st.ListProposals(ctx, 10)
 	if err != nil || len(props) != 1 || props[0].Status != store.StatusDryRun {
@@ -291,7 +306,7 @@ func TestDryRunLogsAndNotifiesWithoutBroadcast(t *testing.T) {
 
 func TestDryRunRepeatedCyclesDoNotSpam(t *testing.T) {
 	ctx := context.Background()
-	f := newFixture(t, "dev", func(c *config.Config) { c.Chains["test"].DryRun = true })
+	f := newFixture(t, "dev", func(c *config.Config) { c.Chains["test"].DryRun = boolPtr(true) })
 	rt := f.runtime(t)
 
 	f.d.evalCycle(ctx, rt)
@@ -339,7 +354,7 @@ func TestChainIDMismatchSkipsCycle(t *testing.T) {
 
 func TestChainIDMismatchSkipsDryRunToo(t *testing.T) {
 	ctx := context.Background()
-	f := newFixture(t, "test999", func(c *config.Config) { c.Chains["test"].DryRun = true })
+	f := newFixture(t, "test999", func(c *config.Config) { c.Chains["test"].DryRun = boolPtr(true) })
 
 	f.d.evalCycle(ctx, f.runtime(t))
 
@@ -351,20 +366,31 @@ func TestChainIDMismatchSkipsDryRunToo(t *testing.T) {
 	}
 }
 
-func TestDryRunRecordDoesNotBlockRealProposal(t *testing.T) {
+func TestDryRunRecordCountsTowardCooldown(t *testing.T) {
 	ctx := context.Background()
-	f := newFixture(t, "dev", func(c *config.Config) { c.Chains["test"].DryRun = true })
+	f := newFixture(t, "dev", func(c *config.Config) { c.Chains["test"].DryRun = boolPtr(true) })
 
-	// Rehearse once, then arm the chain.
+	// Rehearse once, then arm the chain immediately.
 	f.d.evalCycle(ctx, f.runtime(t))
-	f.cfg.Chains["test"].DryRun = false
+	f.cfg.Chains["test"].DryRun = boolPtr(false)
 	f.d.evalCycle(ctx, f.runtime(t))
 
-	if got := f.broadcasts.count(); got != 1 {
-		t.Fatalf("broadcasts = %d, want 1 after disabling dry_run\nlogs:\n%s", got, f.logs.String())
+	// The dry-run record counts toward the real lifecycle gate exactly like a
+	// broadcast attempt would: the cooldown (720h in the fixture) is still in
+	// effect immediately after, so disabling dry_run does not by itself
+	// produce a real broadcast.
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0: the cooldown from the dry-run record should still apply\nlogs:\n%s", got, f.logs.String())
 	}
 	props, _ := f.st.ListProposals(ctx, 10)
-	if len(props) != 2 || props[0].Status != store.StatusPending || props[1].Status != store.StatusDryRun {
-		t.Fatalf("proposals = %+v; want [pending, dry-run]", props)
+	if len(props) != 1 || props[0].Status != store.StatusDryRun {
+		t.Fatalf("proposals = %+v; want only the original dry-run record (no new one produced yet)", props)
+	}
+
+	// Once the cooldown has elapsed, the real proposal goes out normally.
+	f.d.now = func() time.Time { return time.Now().Add(800 * time.Hour) }
+	f.d.evalCycle(ctx, f.runtime(t))
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1 after the cooldown elapses\nlogs:\n%s", got, f.logs.String())
 	}
 }
