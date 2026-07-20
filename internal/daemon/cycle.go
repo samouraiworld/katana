@@ -68,29 +68,21 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 			continue
 		}
 
-		// Lifecycle gate: don't re-propose while pending/accepted/within backoff.
-		params := lifecycle.Params{
+		// Lifecycle gate: don't re-propose while pending/accepted/within
+		// backoff. Dry-run records count here too (LastProposal no longer
+		// excludes them), so a rehearsal already dedups across cycles the
+		// same way a real proposal would, and its cooldown carries over once
+		// dry_run is disabled.
+		last, _ := d.st.LastProposal(ctx, rt.Key, addr)
+		rejections, _ := d.st.RejectionCount(ctx, rt.Key, addr)
+		if dec := lifecycle.Gate(last, rejections, lifecycle.Params{
 			Cooldown:        rt.Proposal.CooldownDur(),
 			RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
 			MaxRejections:   rt.Proposal.MaxRejections,
 			Now:             d.now(),
-		}
-		last, _ := d.st.LastProposal(ctx, rt.Key, addr)
-		rejections, _ := d.st.RejectionCount(ctx, rt.Key, addr)
-		if dec := lifecycle.Gate(last, rejections, params); !dec.Allow {
+		}); !dec.Allow {
 			d.logger.Printf("[%s][eval] SUPPRESS %s: %s", rt.Key, disp(moniker, addr), dec.Reason)
 			continue
-		}
-
-		// Dry-run dedup: a rehearsal recorded within the cooldown window (via
-		// Gate's default branch) suppresses another one, so dry-run cycles do
-		// not re-log/re-notify the same would-be proposal every poll.
-		if rt.DryRun {
-			lastDry, _ := d.st.LastDryRun(ctx, rt.Key, addr)
-			if dec := lifecycle.Gate(lastDry, 0, params); !dec.Allow {
-				d.logger.Printf("[%s][eval] SUPPRESS dry-run for %s: %s", rt.Key, disp(moniker, addr), dec.Reason)
-				continue
-			}
 		}
 
 		// Safety: confirm the validator is in the live consensus valset.
@@ -114,7 +106,8 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 
 // produce builds an ejection proposal, then either broadcasts it (signing via
 // gnokey, recording it, notifying on success) or — on a dry_run chain — logs
-// and notifies the complete would-be proposal without touching the chain.
+// and notifies the complete would-be proposal, with the ejection script and a
+// ready-to-run gnokey command attached, without touching the chain.
 func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, addr, moniker, reason string) {
 	// A valset ejection is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
@@ -137,13 +130,6 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		Reason:          reason,
 	}, rt.Proposal, rt.Gnokey)
 
-	// Human-readable representation of what would be submitted, for logs and the
-	// observe (would_eject) notification.
-	code := built.Script
-	if built.Submit == "call" {
-		code = fmt.Sprintf("%s.%s(%s)", built.RealmPath, built.Function, strings.Join(built.Args, ", "))
-	}
-
 	rec := store.ProposalRecord{
 		CreatedAt: d.now(), Chain: rt.Key, ChainID: rt.ChainID, Address: addr,
 		Moniker: moniker, Reason: reason, Title: built.Title,
@@ -157,24 +143,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	}
 
 	if rt.DryRun {
-		d.dryRun(ctx, rt, built, rec, operator)
-		return
-	}
-
-	if !rt.Proposal.BroadcastEnabled() {
-		// Observe-only: record what would be sent (Status stays "" so the
-		// lifecycle gate applies the cooldown floor and we don't re-notify every
-		// poll), then notify with the proposal code. No gnokey broadcast.
-		rec.Output = code
-		rec.Success = false
-		id, recErr := d.st.RecordProposal(ctx, rec)
-		if recErr != nil {
-			d.logger.Printf("[%s][eval] recording observe proposal failed for %s: %v", rt.Key, addr, recErr)
-		}
-		filename := ejectFilename(disp(moniker, addr))
-		command := built.Command(rt.Gnokey, filename)
-		d.logger.Printf("[%s][eval] OBSERVE (sending disabled) would eject %s", rt.Key, disp(moniker, addr))
-		d.dispatch(ctx, notify.EventWouldEject, rt, id, addr, moniker, "", observePayload{code: code, filename: filename, command: command})
+		d.dryRun(ctx, rt, built, rec, operator, moniker, addr)
 		return
 	}
 
@@ -201,19 +170,29 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 }
 
 // dryRun records, logs, and notifies the proposal a dry_run chain would have
-// broadcast. The record carries store.StatusDryRun, which every real-lifecycle
-// query ignores, so the rehearsal never blocks a real proposal later.
-func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.Built, rec store.ProposalRecord, operator string) {
+// broadcast: the ejection script/expression, a filename to attach it under,
+// and a ready-to-run gnokey command — the same manual-approval hand-off a
+// broadcast-capable chain's operator would get if sending failed and they had
+// to act by hand. The record carries store.StatusDryRun and counts toward the
+// real lifecycle gate like any other proposal record.
+func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.Built, rec store.ProposalRecord, operator, moniker, addr string) {
+	code := built.Script
+	if built.Submit == "call" {
+		code = fmt.Sprintf("%s.%s(%s)", built.RealmPath, built.Function, strings.Join(built.Args, ", "))
+	}
+	filename := ejectFilename(disp(moniker, addr))
+	command := built.Command(rt.Gnokey, filename)
+
 	rec.Status = store.StatusDryRun
 	rec.Success = true
-	rec.Output = "[DRY-RUN] broadcast skipped (dry_run enabled)"
+	rec.Output = code
 	id, recErr := d.st.RecordProposal(ctx, rec)
 	if recErr != nil {
 		d.logger.Printf("[%s][eval] recording dry-run proposal failed for %s: %v — expect this rehearsal to repeat next cycle", rt.Key, rec.Address, recErr)
 	}
 	d.logger.Printf("[%s][eval] WARN [DRY-RUN] would broadcast valset-ejection proposal: validator=%q addr=%s operator=%s chain_id=%s conditions=%q title=%q description=%q",
-		rt.Key, rec.Moniker, rec.Address, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
-	d.dispatch(ctx, notify.EventDryRun, rt, id, rec.Address, rec.Moniker, "", observePayload{})
+		rt.Key, moniker, addr, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
+	d.dispatch(ctx, notify.EventWouldEject, rt, id, addr, moniker, "", observePayload{code: code, filename: filename, command: command})
 }
 
 // assertChainID confirms the node behind rt.RPCEndpoint still reports the
