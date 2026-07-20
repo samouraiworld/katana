@@ -17,11 +17,6 @@ gnokey:
   key_name: "global-key"
   password: "global-pass"
   gas_fee: "1000000ugnot"
-conditions:
-  critical_alerts:
-    enabled: true
-    max: 3
-    interval: 168h
 proposal:
   cooldown: 720h
   rejected_backoff: 240h
@@ -55,6 +50,99 @@ func writeConfig(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestActionDefaultsAndOverride(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "http://localhost:8989"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    lower_vp:
+      score_below: 55
+chains:
+  test:
+    rpc_endpoint: "http://x"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+    dry_run: true
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+
+	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
+		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
+	}
+	if rt.Proposal.MinVotingPower != 100 {
+		t.Errorf("MinVotingPower = %d, want default 100", rt.Proposal.MinVotingPower)
+	}
+	if rt.Proposal.MaxVotingPowerShare != 15 {
+		t.Errorf("MaxVotingPowerShare = %v, want default 15", rt.Proposal.MaxVotingPowerShare)
+	}
+
+	eject := rt.Proposal.Actions[ActionEject]
+	if eject.ScoreBelow != 30 || eject.Window != "current_month" {
+		t.Errorf("eject defaults = %+v, want score_below=30 window=current_month", eject)
+	}
+	if eject.RunScriptTemplate != DefaultEjectScript {
+		t.Errorf("eject run_script_template not defaulted to DefaultEjectScript")
+	}
+
+	// User set only score_below; window/steps/templates must still be defaulted.
+	lower := rt.Proposal.Actions[ActionLowerVP]
+	if lower.ScoreBelow != 55 {
+		t.Errorf("lower_vp.score_below = %d, want overridden 55", lower.ScoreBelow)
+	}
+	if lower.Window != "current_week" || lower.VPStepPercentOfSelf != -20 || lower.VPStepPercentOfTotal != -2 {
+		t.Errorf("lower_vp defaults not filled: %+v", lower)
+	}
+	if lower.RunScriptTemplate != DefaultVPChangeScript {
+		t.Errorf("lower_vp run_script_template not defaulted to DefaultVPChangeScript")
+	}
+
+	raise := rt.Proposal.Actions[ActionRaiseVP]
+	if raise.ScoreAtOrAbove != 85 || raise.Window != "current_year" || raise.VPStepPercentOfSelf != 20 {
+		t.Errorf("raise_vp defaults = %+v", raise)
+	}
+}
+
+func TestActionPriorityRejectsUnknownName(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  action_priority: [eject, not_a_real_action]
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error for an unknown action_priority entry")
+	}
+}
+
+func TestActionWindowMustBeAKnownPeriod(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    eject: {window: "not_a_period"}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error for an invalid action window")
+	}
 }
 
 func TestLoadAndRuntime(t *testing.T) {
