@@ -145,6 +145,50 @@ chains:
 	}
 }
 
+// TestCallSubmitEjectOnlyAllowedWithEjectOnlyPriority proves the fix for the
+// bug where the call-mode validation walked the fully-defaulted prop.Actions
+// map (always containing eject, lower_vp and raise_vp) instead of
+// action_priority, so submit: call was rejected even when action_priority
+// only listed eject.
+func TestCallSubmitEjectOnlyAllowedWithEjectOnlyPriority(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  submit: call
+  action_priority: [eject]
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := c.Runtime("test"); err != nil {
+		t.Fatalf("Runtime: %v, want submit: call with action_priority: [eject] to be accepted", err)
+	}
+}
+
+// TestCallSubmitStillRejectedWhenNonEjectActionInPriority keeps the
+// eject-only-call-mode invariant: if action_priority names an action other
+// than eject, submit: call must still be rejected.
+func TestCallSubmitStillRejectedWhenNonEjectActionInPriority(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  submit: call
+  action_priority: [eject, lower_vp]
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error: submit: call with a non-eject action in action_priority")
+	}
+}
+
 func TestLoadAndRuntime(t *testing.T) {
 	c, err := Load(writeConfig(t, validYAML))
 	if err != nil {

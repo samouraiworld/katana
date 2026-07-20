@@ -456,8 +456,10 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		if name != ActionEject && name != ActionLowerVP && name != ActionRaiseVP {
 			return Runtime{}, fmt.Errorf("proposal.action_priority: unknown action %q", name)
 		}
-	}
-	for name, ac := range prop.Actions {
+		ac, ok := prop.Actions[name]
+		if !ok {
+			continue
+		}
 		switch ac.Window {
 		case "last_24h", "current_week", "current_month", "current_year":
 		default:
