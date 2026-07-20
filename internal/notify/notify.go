@@ -24,9 +24,9 @@ import (
 type Event string
 
 const (
-	EventSent       Event = "sent"
-	EventAccepted   Event = "accepted"
-	EventRejected   Event = "rejected"
+	EventSent     Event = "sent"
+	EventAccepted Event = "accepted"
+	EventRejected Event = "rejected"
 	// EventWouldEject announces a proposal a dry_run chain would have sent;
 	// nothing was signed or broadcast.
 	EventWouldEject Event = "would_eject"
