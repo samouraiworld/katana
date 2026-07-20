@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/store"
 )
 
@@ -31,6 +32,26 @@ func TestGate(t *testing.T) {
 			name:      "accepted is terminal (already ejected)",
 			last:      &store.ProposalRecord{Status: store.StatusAccepted},
 			wantAllow: false,
+		},
+		{
+			name:      "accepted eject stays terminal",
+			last:      &store.ProposalRecord{Status: store.StatusAccepted, Action: config.ActionEject},
+			wantAllow: false,
+		},
+		{
+			name:      "accepted lower_vp within cooldown is blocked",
+			last:      &store.ProposalRecord{Status: store.StatusAccepted, Action: config.ActionLowerVP, CreatedAt: now.Add(-1 * time.Hour)},
+			wantAllow: false,
+		},
+		{
+			name:      "accepted lower_vp after cooldown is allowed",
+			last:      &store.ProposalRecord{Status: store.StatusAccepted, Action: config.ActionLowerVP, CreatedAt: now.Add(-800 * time.Hour)},
+			wantAllow: true,
+		},
+		{
+			name:      "accepted raise_vp after cooldown is allowed",
+			last:      &store.ProposalRecord{Status: store.StatusAccepted, Action: config.ActionRaiseVP, CreatedAt: now.Add(-800 * time.Hour)},
+			wantAllow: true,
 		},
 		{
 			name:      "pending blocks re-proposal",
@@ -74,5 +95,18 @@ func TestGate(t *testing.T) {
 				t.Fatalf("Allow = %v, want %v (reason: %q)", got.Allow, tt.wantAllow, got.Reason)
 			}
 		})
+	}
+}
+
+func TestRejectedCountIsSharedAcrossActionTypes(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	params := Params{Cooldown: 720 * time.Hour, RejectedBackoff: 720 * time.Hour, MaxRejections: 1, Now: now}
+
+	// A lower_vp proposal was rejected once; the cap (1) is already reached,
+	// regardless of what action a fresh evaluation would pick this cycle.
+	last := &store.ProposalRecord{Status: store.StatusRejected, Action: config.ActionLowerVP, ResolvedAt: now.Add(-800 * time.Hour)}
+	got := Gate(last, 1, params)
+	if got.Allow {
+		t.Fatalf("expected max_rejections to block regardless of action type, got Allow=true (reason: %q)", got.Reason)
 	}
 }

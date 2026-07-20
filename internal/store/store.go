@@ -51,13 +51,19 @@ type ProposalRecord struct {
 	ChainID   string
 	Address   string
 	Moniker   string
-	Reason    string
-	Title     string
-	RealmPath string
-	Function  string
-	Args      []string
-	Output    string // gnokey output / error text
-	Success   bool
+	// Action is the score-driven action this proposal represents: eject |
+	// lower_vp | raise_vp. Defaults to "eject" for rows written before this
+	// field existed (see the sqlite migration in Task 6).
+	Action       string
+	TargetPower  int64
+	CurrentPower int64
+	Reason       string
+	Title        string
+	RealmPath    string
+	Function     string
+	Args         []string
+	Output       string // gnokey output / error text
+	Success      bool
 	// Broadcast-only lifecycle fields.
 	OnchainID  string    // GovDAO proposal id
 	Status     string    // pending | accepted | rejected ("" until broadcast succeeds)
