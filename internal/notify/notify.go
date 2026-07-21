@@ -261,6 +261,7 @@ func (n *Notifier) Dispatch(ctx context.Context, event Event, in Info) []Result 
 		return nil
 	}
 	msg := Message(event, in)
+	title := Title(event, in)
 	// Observe notifications ship the proposal as a downloadable file where the
 	// channel supports it (Discord, Telegram); Slack webhooks cannot upload, so
 	// they fall back to the code inline.
@@ -269,13 +270,14 @@ func (n *Notifier) Dispatch(ctx context.Context, event Event, in Info) []Result 
 
 	if n.cfg.Discord.Enabled {
 		var err error
+		embed := map[string]any{"title": title, "description": msg, "color": embedColor(in.Action)}
 		if attach {
-			payload, _ := json.Marshal(map[string]string{"content": msg})
+			payload, _ := json.Marshal(map[string]any{"embeds": []any{embed}})
 			err = n.postMultipart(ctx, n.cfg.Discord.WebhookURL,
 				map[string]string{"payload_json": string(payload)},
 				"files[0]", in.ProposalFilename, in.ProposalCode)
 		} else {
-			err = n.postJSON(ctx, n.cfg.Discord.WebhookURL, map[string]string{"content": msg})
+			err = n.postJSON(ctx, n.cfg.Discord.WebhookURL, map[string]any{"embeds": []any{embed}})
 		}
 		results = append(results, result("discord", host(n.cfg.Discord.WebhookURL), err))
 	}
@@ -284,26 +286,36 @@ func (n *Notifier) Dispatch(ctx context.Context, event Event, in Info) []Result 
 		if attach {
 			text += "\n```\n" + truncate(in.ProposalCode, 1500) + "\n```"
 		}
-		err := n.postJSON(ctx, n.cfg.Slack.WebhookURL, map[string]string{"text": text})
+		attachment := map[string]any{
+			"color": slackColorHex(in.Action), "title": title, "text": text, "fallback": text,
+		}
+		err := n.postJSON(ctx, n.cfg.Slack.WebhookURL, map[string]any{"attachments": []any{attachment}})
 		results = append(results, result("slack", host(n.cfg.Slack.WebhookURL), err))
 	}
 	if n.cfg.Telegram.Enabled {
+		text := telegramText(event, in)
 		var err error
 		if attach {
 			endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", n.cfg.Telegram.BotToken)
 			err = n.postMultipart(ctx, endpoint,
-				map[string]string{"chat_id": n.cfg.Telegram.ChatID, "caption": msg},
+				map[string]string{"chat_id": n.cfg.Telegram.ChatID, "caption": text},
 				"document", in.ProposalFilename, in.ProposalCode)
 		} else {
 			endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", n.cfg.Telegram.BotToken)
 			err = n.postJSON(ctx, endpoint, map[string]string{
 				"chat_id": n.cfg.Telegram.ChatID,
-				"text":    msg,
+				"text":    text,
 			})
 		}
 		results = append(results, result("telegram", n.cfg.Telegram.ChatID, err))
 	}
 	return results
+}
+
+// telegramText prefixes the message with a colored-emoji marker and the
+// title, since Telegram's Bot API has no color concept for plain messages.
+func telegramText(event Event, in Info) string {
+	return fmt.Sprintf("%s %s\n\n%s", telegramEmoji(in.Action), Title(event, in), Message(event, in))
 }
 
 // postMultipart POSTs a multipart/form-data body: the string fields plus one

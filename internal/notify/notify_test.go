@@ -165,6 +165,76 @@ func TestDispatchWouldEjectAttachesFile(t *testing.T) {
 	if !strings.Contains(gotBody, "gnokey maketx run") {
 		t.Errorf("multipart body missing the command in payload_json:\n%s", gotBody)
 	}
+	if !strings.Contains(gotBody, `"embeds"`) {
+		t.Errorf("would_eject multipart payload_json should still carry an embed:\n%s", gotBody)
+	}
+}
+
+func TestDispatchDiscordEmbed(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	n := New(config.Notifications{
+		Enabled: true,
+		Discord: config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
+	})
+	n.Dispatch(context.Background(), EventSent, Info{
+		Chain: "chain1", Address: "g1x", Action: config.ActionRaiseVP,
+		CurrentPower: 100, TargetPower: 140,
+	})
+	if !strings.Contains(gotBody, `"color":3066993`) {
+		t.Errorf("discord body missing expected color: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "Voting power increase submitted — chain1") {
+		t.Errorf("discord body missing expected title: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "embeds") {
+		t.Errorf("discord body should use an embeds array, not bare content: %s", gotBody)
+	}
+}
+
+func TestDispatchSlackAttachment(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	n := New(config.Notifications{
+		Enabled: true,
+		Slack: config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
+	})
+	n.Dispatch(context.Background(), EventSent, Info{
+		Chain: "chain1", Address: "g1x", Action: config.ActionLowerVP,
+		CurrentPower: 1000, TargetPower: 600,
+	})
+	if !strings.Contains(gotBody, `"color":"#E67E22"`) {
+		t.Errorf("slack body missing expected color: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "Voting power reduction submitted — chain1") {
+		t.Errorf("slack body missing expected title: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "attachments") {
+		t.Errorf("slack body should use an attachments array, not bare text: %s", gotBody)
+	}
+}
+
+func TestTelegramText(t *testing.T) {
+	in := Info{Chain: "chain1", Action: config.ActionRaiseVP, CurrentPower: 100, TargetPower: 140}
+	msg := Message(EventSent, in)
+	title := Title(EventSent, in)
+	want := "🟢 " + title + "\n\n" + msg
+	got := telegramText(EventSent, in)
+	if got != want {
+		t.Errorf("telegramText = %q, want %q", got, want)
+	}
 }
 
 func TestTitle(t *testing.T) {
