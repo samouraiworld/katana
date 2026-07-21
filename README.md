@@ -1,4 +1,4 @@
-# katana
+![katana](asset/logo.png)
 
 **katana** is a continuously running backend that watches
 [gno.land](https://gno.land) validators and, based on a computed health score,
