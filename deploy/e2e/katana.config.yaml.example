@@ -1,11 +1,14 @@
 # katana e2e config TEMPLATE — BROADCAST against the local devnet, in-container.
 #
-# Copy this to `katana.config.yaml` (git-ignored) and set gnokey.mnemonic/password
-# to your throwaway devnet test key below (config-first — this file is
-# git-ignored and the devnet has no real funds, so a plaintext password here is
-# fine). Alternatively leave mnemonic/password empty and uncomment the
-# 'environment:' block in ../../docker-compose.e2e.yml to pass
-# KATANA_GNOKEY_MNEMONIC/KATANA_GNOKEY_PASSWORD from the shell instead.
+# Copy this to `katana.config.yaml` (git-ignored). Signing key: reuses the
+# devnet's pre-provisioned 'dev' account (funded, sole GovDAO T1 member from
+# bootstrap.sh) instead of a dedicated key — 'make launch-test-katana' copies
+# gnoland-test/.gnokey-dev into katana's data volume (as
+# /app/data/dev-keybase) before starting the container. Running this by hand
+# instead? Do that copy yourself, or fall back to a dedicated key with
+# 'make -C gnoland-test add-key NAME=katana-e2e' and set gnokey.mnemonic below
+# (or leave it empty and uncomment the 'environment:' block in
+# ../../docker-compose.e2e.yml to pass KATANA_GNOKEY_MNEMONIC instead).
 #
 # gnokey is shipped inside the katana image (Dockerfile GNO_REF). katana imports
 # the signing key into /app/data/keybase at startup.
@@ -27,10 +30,10 @@ valopers_realm: "gno.land/r/gnops/valopers"
 
 gnokey:
   bin: "gnokey"
-  key_name: "katana-e2e"
-  home: "/app/data/keybase"
-  password: "devpassword123"                   # devnet-only throwaway keybase passphrase
-  mnemonic: "<24-word devnet test mnemonic>"   # throwaway; devnet only
+  key_name: "dev"
+  home: "/app/data/dev-keybase"
+  password: "devpassword123"                   # devnet-only throwaway keybase passphrase, set by bootstrap.sh
+  mnemonic: ""                                  # empty: reuses the pre-provisioned 'dev' keybase (see above)
   gas_fee: "1000000ugnot"
   gas_wanted: 100000000   # headroom for maketx run script creation (eject alone fits in less, but this covers it)
 

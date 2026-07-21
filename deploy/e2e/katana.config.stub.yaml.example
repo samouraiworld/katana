@@ -11,14 +11,14 @@
 # Switch scores any time from gnoland-test/: `make stub-scenario NAME=lower_vp`
 # (or eject/raise_vp/multi_eject/healthy) — no restart needed.
 #
-# IMPORTANT: every 'make full-reinit'/'full-reinit-4' regenerates the devnet
-# genesis, which does NOT include this signing key. Re-provision it on the
-# live devnet before broadcasting (from gnoland-test/):
-#   make add-key NAME=katana-e2e MNEMONIC="<the mnemonic below>"
-# (funds it from 'dev' + adds it as a GovDAO T1 member; safe to re-run).
-#
-# gnokey is shipped inside the katana image (Dockerfile GNO_REF). katana imports
-# the signing key into /app/data/keybase at startup.
+# Signing key: reuses the devnet's pre-provisioned 'dev' account (funded, sole
+# GovDAO T1 member from bootstrap.sh) instead of a dedicated key. 'make
+# launch-test-katana' copies gnoland-test/.gnokey-dev into katana's data
+# volume (as /app/data/dev-keybase) before starting the container, so
+# gnokey.mnemonic below stays empty and internal/keybase.Ensure is a no-op.
+# Running the stub path by hand instead of via launch-test-katana? Do that
+# copy yourself, or fall back to a dedicated key with
+# 'make -C gnoland-test add-key NAME=katana-e2e'.
 
 log_level: info
 poll_interval: 15s
@@ -33,10 +33,10 @@ valopers_realm: "gno.land/r/gnops/valopers"
 
 gnokey:
   bin: "gnokey"
-  key_name: "katana-e2e"
-  home: "/app/data/keybase"
-  password: "devpassword123"                   # devnet-only throwaway keybase passphrase
-  mnemonic: "<24-word devnet test mnemonic>"   # throwaway; devnet only
+  key_name: "dev"
+  home: "/app/data/dev-keybase"
+  password: "devpassword123"                   # devnet-only throwaway keybase passphrase, set by bootstrap.sh
+  mnemonic: ""                                  # empty: reuses the pre-provisioned 'dev' keybase (see above)
   gas_fee: "1000000ugnot"
   gas_wanted: 100000000   # lower_vp/raise_vp scripts need more than eject alone (~26M used observed)
 
