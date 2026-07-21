@@ -138,9 +138,10 @@ submitted). Each loops on its own ticker.
   in `config.yaml` and logs a warning; discovery is best-effort.
 
 ### 6.3 Metrics ingestion `[EXISTS]`
-- **FR-3.1** Missed blocks from `GET /missing_block?chain=&period=`.
-- **FR-3.2** CRITICAL alert counts from `GET /admin/alerts?chain=&level=CRITICAL&from=`
-  (admin-protected → `gnomonitoring.api_token`).
+- **FR-3.1** *(superseded by FR-4b.1)* katana no longer polls raw
+  `GET /missing_block` / `GET /admin/alerts` endpoints. The single metrics
+  source is gnomonitoring's computed per-validator health score via
+  `GET /api/reports/validators?chain=` — see §6.4b for the full model.
 
 ### 6.4b Score-driven actions `[TO BUILD]`
 
@@ -487,12 +488,20 @@ chains:
 ## 8. Data model (SQLite) `[EXISTS + extend]`
 
 - `evaluations(id, created_at, chain, address, moniker, missed_blocks,
-  critical_alerts, eligible, excepted, reason)` — one row per candidate per cycle.
-- `proposals(id, created_at, chain, chain_id, address, moniker, reason,
-  title, realm_path, function, args, output, success,
-  onchain_proposal_id, status, resolved_at)` — one row per produced (broadcast)
-  proposal. `[EXTEND]` `onchain_proposal_id` (GovDAO id, captured after every
-  successful broadcast), `status`
+  critical_alerts, eligible, excepted, reason, score, tier)` — one row per
+  candidate per cycle. `[EXTEND]` `score` and `tier` are the real signal now
+  (§6.4b); `missed_blocks`/`critical_alerts` remain in the schema as
+  legacy, always-`0` columns (kept rather than dropped, so existing rows and
+  readers of the table don't break) since katana no longer calls the
+  raw missed-blocks/CRITICAL-alerts endpoints.
+- `proposals(id, created_at, chain, chain_id, address, moniker, action,
+  target_power, current_power, reason, title, realm_path, function, args,
+  output, success, onchain_proposal_id, status, resolved_at)` — one row per
+  produced (broadcast) proposal. `[EXTEND]` `action` (`eject` | `lower_vp` |
+  `raise_vp`, defaults to `eject` for rows written before this column
+  existed), `target_power`/`current_power` (voting-power before/after for
+  `lower_vp`/`raise_vp`, §6.4b), `onchain_proposal_id` (GovDAO id, captured
+  after every successful broadcast), `status`
   (`pending` | `accepted` | `rejected`), `resolved_at`. Source of truth for the
   lifecycle gate (cooldown, rejection backoff, rejection count) per
   `(chain, address)`.
