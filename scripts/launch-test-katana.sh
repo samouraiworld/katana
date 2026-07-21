@@ -35,6 +35,12 @@ if [ ! -f "$GNOLAND_TEST_DIR/.env" ] || [ ! -f "$GNOLAND_TEST_DIR/genesis.json" 
   echo "!! Run this first: cd gnoland-test && GNO_REPO_PATH=/path/to/gno ./bootstrap.sh" >&2
   exit 1
 fi
+if [ -z "${KATANA_DISCORD_WEBHOOK:-}" ]; then
+  echo "!! KATANA_DISCORD_WEBHOOK is not set - both configs enable Discord" >&2
+  echo "!! notifications, but with an empty webhook_url they'll silently" >&2
+  echo "!! no-op. export KATANA_DISCORD_WEBHOOK=<url> before running this" >&2
+  echo "!! if you want to actually receive them." >&2
+fi
 echo ">>> stopping any leftover real gnomonitoring/postgres from a previous run"
 "${COMPOSE[@]}" stop gnomonitoring postgres 2>/dev/null || true
 

@@ -44,6 +44,7 @@ scenario, against a freshly reset devnet:
 ```bash
 cd gnoland-test && GNO_REPO_PATH=/path/to/gno ./bootstrap.sh   # one-time
 cd ..
+export KATANA_DISCORD_WEBHOOK="<your webhook url>"   # optional, for notifications
 make launch-test-katana
 ```
 
@@ -92,12 +93,16 @@ key instead of reusing `dev`.
    - Real-broadcast path: `cp deploy/e2e/katana.config.yaml.example deploy/e2e/katana.config.yaml`
    - Stub path: `cp deploy/e2e/katana.config.stub.yaml.example deploy/e2e/katana.config.yaml`
 
-   Both share the same `gnokey.mnemonic`/`key_name`/`password` slot — put the
-   mnemonic from step 2 there directly (config-first: the file is git-ignored
-   and this is a throwaway devnet key, so a plaintext password is fine). The
-   `environment:` block in `docker-compose.e2e.yml` is commented out by
-   default — only uncomment it and export `KATANA_GNOKEY_MNEMONIC`/
-   `KATANA_GNOKEY_PASSWORD` if you'd rather not put secrets in the config file.
+   Both default to reusing the devnet's `dev` key (see the "One-shot" section
+   above) — no mnemonic to set. Using a dedicated key from step 2 instead? Put
+   its mnemonic directly in `gnokey.mnemonic` (config-first: the file is
+   git-ignored and this is a throwaway devnet key, so plaintext is fine).
+
+   To receive Discord notifications (both configs enable
+   `notifications.discord` with an empty `webhook_url`, filled from the
+   environment), export `KATANA_DISCORD_WEBHOOK` before `docker compose up` /
+   `make launch-test-katana` — `docker-compose.e2e.yml` already passes it
+   through.
 
 ## Real broadcast path
 
