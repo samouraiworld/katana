@@ -79,3 +79,57 @@ either:
 
 This mapping is the main remaining item to make the broadcast e2e fully
 automatic (tracked in `prd.md` §12.5 PP-5).
+
+## Stub gnomonitoring — testing score bands without real chain degradation
+
+katana only ever talks to gnomonitoring via `GET /api/reports/validators`
+(`internal/gnomonitoring/client.go`). `stub-gnomonitoring/` serves that exact
+JSON contract from a local file instead of a real gnomonitoring backend, so
+every score band (`eject`/`lower_vp`/`raise_vp`), the lifecycle gate, and both
+`dry_run` values can be exercised deterministically and instantly — no need to
+stop containers and wait for real downtime windows. The live valset check
+(`gno.IsValidator`) still runs against the real chain, so you need the devnet
+up with all 4 validators onboarded:
+
+```bash
+make full-reinit-4                 # fresh chain, validator4 onboarded via GovDAO
+make stub-scenario NAME=healthy    # render scenarios + activate one (default: healthy)
+make stub-up                       # foreground server on :8989 — leave this running
+```
+
+In another terminal:
+
+```bash
+cp gnoland-test/stub-gnomonitoring/config.katana.stub.yaml.example config.yaml
+# adjust gnokey.home to the absolute path of gnoland-test/.gnokey-dev if needed
+./katana --config config.yaml
+```
+
+Switch scenarios at any time — no restart of `stub-up` needed, katana picks
+the change up on its next `poll_interval`:
+
+```bash
+make stub-scenario NAME=eject        # validator4: score 15 on current_month (< score_below 30)
+make stub-scenario NAME=lower_vp     # validator4: score 45 on current_week (< score_below 60)
+make stub-scenario NAME=raise_vp     # validator4: score 90 on current_year (>= score_at_or_above 85)
+make stub-scenario NAME=multi_eject  # validator3 AND validator4 both below eject threshold
+make stub-scenario NAME=healthy      # everyone healthy, no action expected
+```
+
+(`make stub-list` prints the full set.) Each scenario's addresses are
+re-rendered from the live devnet (`genesis.json` + `.devaddrs.mk`) every time
+you switch, so they stay correct across `full-reinit`/`full-reinit-4` reruns.
+
+Things worth exercising this way, beyond the four scenarios above:
+
+- **`dry_run: true`** — flip it in `config.yaml`, rerun any scenario, and
+  confirm katana logs `[DRY-RUN]`, notifies with the script + ready gnokey
+  command, records `store.StatusDryRun`, and never calls `gnokey`.
+- **Exceptions** — add the target validator's signing address (printed in the
+  server logs, or `.devaddrs.mk`'s `VALIDATOR4_ADDR` for validator4) to
+  `exceptions:` in `config.yaml` and confirm the eligible action is logged but
+  suppressed.
+- **Lifecycle gate** — after a proposal is broadcast, switch back to the same
+  degraded scenario and confirm the `pending`/`cooldown`/`rejected_backoff`
+  suppression logs (drive `accepted`/`rejected` via `make accept-govdao` /
+  voting NO, same as the main flow above).

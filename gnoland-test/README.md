@@ -9,7 +9,7 @@ production — in particular for validating the
 It ships:
 
 - **validator / validator2 / validator3** — genesis validators
-  (`samourai-crew-1/2/3`, voting power 10/10/11)
+  (`samourai-crew-1/2/3`, voting power 10/10/10)
 - **validator4** — a 4th identity (`samourai-crew-4`) reserved for the
   Phase 2 "new validator via GovDAO" scenario, not part of the genesis
   validator set, started on demand via the `phase2` compose profile
@@ -97,6 +97,12 @@ make reinit        # keep identities, restart chain from existing genesis
 make clean-all
 make full-reinit   # bootstrap (new keys+genesis) + purge dev DB + start
 ```
+
+**`full-reinit` alone does not bring up validator4.** It's `phase2`
+profile-gated (see the service list above) and not a valoper until
+`scenario1` registers + onboards it via GovDAO. Use **`make full-reinit-4`**
+(= `full-reinit` + `scenario1`) to get a fresh chain with all 4 validators
+live and in the valset in one command.
 
 > **⚠️ Restart the backend after any reset.** `gnomonitoring-backend` keeps the
 > last-seen block height per chain in memory. When you reset the chain under a
@@ -221,9 +227,10 @@ participation tracking, alerts, GovDAO watcher, Prometheus metrics). They
 assume gnomonitoring is running against `chain=local` as described above and
 the chain is healthy (see "Resetting the chain" if not).
 
-Genesis validator set and voting power: samourai-crew-1/2/3 = 10/10/11 (total
-31). A strict majority above 2/3 of 31 is 21, so in theory any 2 of the 3
-genesis validators can keep the chain alive without the third.
+Genesis validator set and voting power: samourai-crew-1/2/3 = 10/10/10 (total
+30, `generate-genesis.sh` hardcodes `--power 10` for all three). A strict
+majority above 2/3 of 30 is 20, so no 2 of the 3 genesis validators reach
+supermajority without the third (see Scenario 3).
 
 A `Makefile` in this directory wraps the chain-lifecycle and scenario commands
 — run `make help` for the full list. Available scenarios:
@@ -489,8 +496,8 @@ Exercises gnomonitoring's behavior when the chain stops producing blocks
 entirely — the global stagnation/RPC-error alert path described in
 `CLAUDE.md` under "Known Limitations".
 
-With voting power 10/10/11 (total 31), more than 2/3 is 21. Stopping **any
-2** of the 3 genesis validators leaves at most 11/31 ≈ 35%, well below the
+With voting power 10/10/10 (total 30), more than 2/3 is 20. Stopping **any
+2** of the 3 genesis validators leaves at most 10/30 ≈ 33%, well below the
 66.67% supermajority CometBFT needs to commit blocks — the chain halts
 deterministically:
 
@@ -531,3 +538,33 @@ make clean-all && make full-reinit
 
 This wipes chain state while keeping (reinit) or regenerating (clean-all) the
 node identities. Acceptable for a devnet — there is no real data to preserve.
+
+## Validating katana's score-driven actions
+
+The scenarios above exercise **gnomonitoring**. To validate **katana** itself
+(the eject/lower_vp/raise_vp score-driven action model, the lifecycle gate,
+`dry_run`) against this same devnet, there are two complementary layers:
+
+| Layer | Speed | Realism | Covers |
+|-------|-------|---------|--------|
+| **Stub gnomonitoring** ([`stub-gnomonitoring/`](stub-gnomonitoring/), see [`KATANA-E2E.md`](KATANA-E2E.md#stub-gnomonitoring--testing-score-bands-without-real-chain-degradation)) | instant | katana logic only — real valset, faked scores | every score band, `action_priority`, VP dual-cap, lifecycle gate, exceptions, both `dry_run` values |
+| **Full e2e stack** ([`../docker-compose.e2e.yml`](../docker-compose.e2e.yml), [`../deploy/e2e/README.md`](../deploy/e2e/README.md)) | slow (real downtime) | real gnomonitoring + Postgres + katana broadcast | non-regression of the full detect → broadcast → vote → on-chain-effect path |
+
+Quick start:
+
+```bash
+make full-reinit-4                          # fresh chain, all 4 validators live + onboarded
+make stub-scenario NAME=eject               # or lower_vp / raise_vp / multi_eject / healthy
+make stub-up                                # foreground, leave running
+
+# in another terminal, from the repo root:
+cp gnoland-test/stub-gnomonitoring/config.katana.stub.yaml.example config.yaml
+./katana --config config.yaml
+```
+
+Switch scenarios any time with `make stub-scenario NAME=...` (no restart
+needed — katana picks it up on its next `poll_interval`); flip `dry_run` in
+`config.yaml` to compare the rehearsal path against a real broadcast. See
+[`KATANA-E2E.md`](KATANA-E2E.md) for the full walkthrough (both layers, plus
+the known signing-vs-operator-address gap) and
+[`../deploy/e2e/README.md`](../deploy/e2e/README.md) for the dockerized stack.
