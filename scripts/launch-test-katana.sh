@@ -11,6 +11,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+DRY_RUN="${DRY_RUN:-false}"
+if [ "$DRY_RUN" != "true" ] && [ "$DRY_RUN" != "false" ]; then
+  echo "!! DRY_RUN must be 'true' or 'false' (got: '$DRY_RUN')" >&2
+  exit 1
+fi
+
 GNOLAND_TEST_DIR="$ROOT_DIR/gnoland-test"
 COMPOSE=(docker compose -f docker-compose.e2e.yml)
 STUB_SCENARIOS=(healthy eject lower_vp raise_vp multi_eject)
@@ -32,6 +38,12 @@ cleanup() {
   "${COMPOSE[@]}" down
 }
 trap cleanup EXIT INT TERM
+
+apply_dry_run() {
+  # Both config examples ship 'dry_run: false' - overwrite it with $DRY_RUN
+  # right after copying the example, since the example itself isn't touched.
+  sed -i -E "s/^dry_run: (true|false)/dry_run: ${DRY_RUN}/" deploy/e2e/katana.config.yaml
+}
 
 echo "=== [1/5] preflight ==="
 if [ ! -f "$GNOLAND_TEST_DIR/.env" ] || [ ! -f "$GNOLAND_TEST_DIR/genesis.json" ]; then
@@ -57,8 +69,9 @@ echo ">>> stopping any leftover real gnomonitoring/postgres from a previous run"
 echo "=== [2/5] fresh chain (full-reinit-4) ==="
 make -C "$GNOLAND_TEST_DIR" full-reinit-4
 
-echo "=== [3/5] phase A - stub (every score band) ==="
+echo "=== [3/5] phase A - stub (every score band, dry_run=$DRY_RUN) ==="
 cp deploy/e2e/katana.config.stub.yaml.example deploy/e2e/katana.config.yaml
+apply_dry_run
 
 echo ">>> provisioning katana's data volume with the devnet 'dev' keybase and resetting katana's own history"
 # Reuses the katana service's own volume mount (/app/data -> e2e-katana-data)
@@ -124,8 +137,9 @@ kill "$STUB_PID" 2>/dev/null || true
 wait "$STUB_PID" 2>/dev/null || true
 STUB_PID=""
 
-echo "=== [4/5] phase B - real broadcast (non-regression) ==="
+echo "=== [4/5] phase B - real broadcast (non-regression, dry_run=$DRY_RUN) ==="
 cp deploy/e2e/katana.config.yaml.example deploy/e2e/katana.config.yaml
+apply_dry_run
 make -C "$GNOLAND_TEST_DIR" scenario2
 
 echo ">>> once a proposal appears in the logs below, from another terminal run:"

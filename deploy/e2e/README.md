@@ -60,6 +60,14 @@ logs live for each scenario, then switches to the real-broadcast path
 Ctrl-C. It does not assert pass/fail — read the logs, the same way you would
 running each step by hand.
 
+Add `DRY_RUN=true` to rehearse instead of broadcasting (both phases evaluate
+and notify — logging `[DRY-RUN]`, attaching the `.gno` script + a ready
+`gnokey` command — but never call `gnokey`):
+
+```bash
+make launch-test-katana DRY_RUN=true
+```
+
 The rest of this document covers each phase manually: useful when debugging
 one scenario in isolation, or when you want a dedicated `katana-e2e` signing
 key instead of reusing `dev`.

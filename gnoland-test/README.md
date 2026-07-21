@@ -555,7 +555,8 @@ resets katana's own SQLite history before *each* scenario (several scenarios
 target the same devnet validator, so a fresh lifecycle state per scenario is
 what lets each one actually broadcast instead of finding that validator
 already gate-blocked by the previous scenario), and streams katana's logs
-live — Ctrl-C stops everything it started.
+live — Ctrl-C stops everything it started. Add `DRY_RUN=true` to rehearse
+(evaluate + notify, never broadcast) instead.
 
 For a single scenario, a single phase, or any manual/debugging step — config
 reference, `add-key`, switching scenarios by hand, the real-broadcast

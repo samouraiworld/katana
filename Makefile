@@ -25,5 +25,8 @@ clean:
 	rm -f $(BINARY)
 	rm -rf proposals
 
+# make launch-test-katana DRY_RUN=true   - evaluate + notify, never broadcast
+DRY_RUN ?= false
+
 launch-test-katana:
-	./scripts/launch-test-katana.sh
+	DRY_RUN=$(DRY_RUN) ./scripts/launch-test-katana.sh
