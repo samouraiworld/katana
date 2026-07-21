@@ -104,6 +104,16 @@ done
 for scenario in "${STUB_SCENARIOS[@]}"; do
   echo "--- stub scenario: $scenario ---"
   make -C "$GNOLAND_TEST_DIR" stub-scenario NAME="$scenario"
+  # Reset katana's own lifecycle history and restart it before watching this
+  # scenario. Every stub scenario's "notable" score lands on the same devnet
+  # validator (samourai-crew-4) - without this, only the first
+  # action-triggering scenario in the loop would ever actually broadcast:
+  # every later one would find crew-4 already gate-blocked by a still-
+  # 'pending' proposal from the previous scenario and just suppress
+  # (confirmed in practice - eject fired, then lower_vp/raise_vp never did).
+  "${COMPOSE[@]}" rm -f -s katana
+  "${COMPOSE[@]}" run --rm --no-deps --user root --entrypoint sh katana -c 'rm -f /app/data/*.db'
+  "${COMPOSE[@]}" up -d --no-deps katana
   since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   timeout "${STUB_WATCH_SECONDS}s" "${COMPOSE[@]}" logs -f --since "$since" katana || true
 done

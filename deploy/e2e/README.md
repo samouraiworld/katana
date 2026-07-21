@@ -49,15 +49,16 @@ make launch-test-katana
 ```
 
 It reuses the devnet's pre-provisioned `dev` key (no manual mnemonic /
-`add-key` step), resets the chain (`full-reinit-4`) and katana's own SQLite
-history, streams katana's logs live for each stub scenario, then switches to
-the real-broadcast path (`scenario2` + real `gnomonitoring`+Postgres) and
-stays attached until you Ctrl-C. It does not assert pass/fail — read the
-logs, the same way you would running each step by hand. Several scenarios
-target the same devnet validator: once one of them triggers an action for a
-validator, later scenarios targeting that same validator in the same run
-will correctly show the lifecycle gate blocking re-proposal rather than a
-fresh broadcast — that's expected, and part of what's being exercised.
+`add-key` step), resets the chain (`full-reinit-4`) once up front, then before
+*each* stub scenario also resets katana's own SQLite history and restarts the
+container — several scenarios target the same devnet validator, so without a
+fresh lifecycle state per scenario, only the first one to trigger an action
+would ever actually broadcast (the rest would just find that validator
+gate-blocked by a still-`pending` proposal and suppress). It streams katana's
+logs live for each scenario, then switches to the real-broadcast path
+(`scenario2` + real `gnomonitoring`+Postgres) and stays attached until you
+Ctrl-C. It does not assert pass/fail — read the logs, the same way you would
+running each step by hand.
 
 The rest of this document covers each phase manually: useful when debugging
 one scenario in isolation, or when you want a dedicated `katana-e2e` signing
