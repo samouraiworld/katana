@@ -23,7 +23,7 @@ PG_USER      := gnomonitoring
 PG_DB        := gnomonitoring
 DEV_CHAIN    := dev
 
-.PHONY: help up up-validator4 ensure-bootstrap down reinit regen-genesis full-reinit full-reinit-4 clean-db clean-all status logs \
+.PHONY: help up up-validator4 ensure-bootstrap down reinit regen-genesis full-reinit full-reinit-4 wait-chain clean-db clean-all status logs \
         stop-val1 stop-val2 stop-val3 stop-val4 \
         start-val1 start-val2 start-val3 start-val4 \
         scenario1 scenario2 scenario2-restart scenario3 scenario3-restart \
@@ -192,12 +192,26 @@ full-reinit: regen-genesis clean-db
 	./reinit-chain.sh
 	docker compose up -d
 
+# wait-chain: block until the chain's RPC is up and has mined at least one
+# block. 'docker compose up -d' returns as soon as containers are Started, but
+# gnoland needs a few seconds to open its RPC port and produce the first
+# block — calling gnokey (scenario1's GovDAO init) before that fails with
+# "connection reset by peer", not a retryable/idempotent error.
+wait-chain:
+	@printf ">>> waiting for chain RPC to be ready"; \
+	for i in $$(seq 1 60); do \
+		h=$$(curl -s http://localhost:26658/status 2>/dev/null | jq -r '.result.sync_info.latest_block_height // empty' 2>/dev/null); \
+		if [ -n "$$h" ] && [ "$$h" -ge 1 ] 2>/dev/null; then echo " ready (height $$h)"; exit 0; fi; \
+		printf "."; sleep 1; \
+	done; \
+	echo " timeout after 60s — check 'docker compose logs validator'"; exit 1
+
 # full-reinit-4: full-reinit alone does NOT bring validator4 up (it's phase2
 # profile-gated, see up-validator4/docker-compose.yml) or onboard it as a
-# valoper. This chains full-reinit -> scenario1 (which itself depends on
-# up-validator4) so a single command gets you a fresh chain with all 4
-# validators live and in the valset.
-full-reinit-4: full-reinit scenario1
+# valoper. This chains full-reinit -> wait-chain -> scenario1 (which itself
+# depends on up-validator4) so a single command gets you a fresh chain with
+# all 4 validators live and in the valset.
+full-reinit-4: full-reinit wait-chain scenario1
 
 # Purge the local "dev" chain rows from the gnomonitoring backend DB. Chain data
 # only (participation, monikers, govdao proposals, aggregates, alert logs).

@@ -550,7 +550,7 @@ The scenarios above exercise **gnomonitoring**. To validate **katana** itself
 | **Stub gnomonitoring** ([`stub-gnomonitoring/`](stub-gnomonitoring/), see [`KATANA-E2E.md`](KATANA-E2E.md#stub-gnomonitoring--testing-score-bands-without-real-chain-degradation)) | instant | katana logic only — real valset, faked scores | every score band, `action_priority`, VP dual-cap, lifecycle gate, exceptions, both `dry_run` values |
 | **Full e2e stack** ([`../docker-compose.e2e.yml`](../docker-compose.e2e.yml), [`../deploy/e2e/README.md`](../deploy/e2e/README.md)) | slow (real downtime) | real gnomonitoring + Postgres + katana broadcast | non-regression of the full detect → broadcast → vote → on-chain-effect path |
 
-Quick start:
+### Quick start — stub gnomonitoring (layer A)
 
 ```bash
 make full-reinit-4                          # fresh chain, all 4 validators live + onboarded
@@ -558,13 +558,33 @@ make stub-scenario NAME=eject               # or lower_vp / raise_vp / multi_eje
 make stub-up                                # foreground, leave running
 
 # in another terminal, from the repo root:
+make build                                  # builds ./katana (go build ./cmd/katana)
 cp gnoland-test/stub-gnomonitoring/config.katana.stub.yaml.example config.yaml
-./katana --config config.yaml
+./katana --config config.yaml               # starts the daemon — Ctrl-C to stop
 ```
 
 Switch scenarios any time with `make stub-scenario NAME=...` (no restart
 needed — katana picks it up on its next `poll_interval`); flip `dry_run` in
-`config.yaml` to compare the rehearsal path against a real broadcast. See
-[`KATANA-E2E.md`](KATANA-E2E.md) for the full walkthrough (both layers, plus
-the known signing-vs-operator-address gap) and
-[`../deploy/e2e/README.md`](../deploy/e2e/README.md) for the dockerized stack.
+`config.yaml` to compare the rehearsal path against a real broadcast.
+
+### Quick start — full e2e stack (layer B)
+
+Real gnomonitoring + Postgres + katana, all in Docker, wired to this devnet
+(katana itself doesn't need a local build here — its image is built by the
+compose file). Devnet must already be up (`make full-reinit-4` above starts
+it):
+
+```bash
+# from the repo root:
+export KATANA_GNOKEY_PASSWORD=devpassword123
+export GNO_REF=master                       # must match GNO_REPO_PATH's gno revision
+docker compose -f docker-compose.e2e.yml up --build
+```
+
+This starts 3 containers (`katana-e2e-postgres`, `katana-e2e-gnomonitoring`,
+`katana-e2e`) using `deploy/e2e/katana.config.yaml` (copy it from
+`katana.config.yaml.example` first if it doesn't exist yet — see full details
+and troubleshooting in [`../deploy/e2e/README.md`](../deploy/e2e/README.md)).
+
+See [`KATANA-E2E.md`](KATANA-E2E.md) for the full walkthrough of both layers,
+plus the known signing-vs-operator-address gap.
