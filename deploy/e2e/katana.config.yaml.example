@@ -1,14 +1,18 @@
 # katana e2e config TEMPLATE — BROADCAST against the local devnet, in-container.
 #
-# Copy this to `katana.config.yaml` (git-ignored) and set gnokey.mnemonic to your
-# throwaway devnet test key, OR leave it empty here and pass the key via the env
-# var KATANA_GNOKEY_MNEMONIC. The password comes from KATANA_GNOKEY_PASSWORD.
+# Copy this to `katana.config.yaml` (git-ignored) and set gnokey.mnemonic/password
+# to your throwaway devnet test key below (config-first — this file is
+# git-ignored and the devnet has no real funds, so a plaintext password here is
+# fine). Alternatively leave mnemonic/password empty and uncomment the
+# 'environment:' block in ../../docker-compose.e2e.yml to pass
+# KATANA_GNOKEY_MNEMONIC/KATANA_GNOKEY_PASSWORD from the shell instead.
 #
 # gnokey is shipped inside the katana image (Dockerfile GNO_REF). katana imports
 # the signing key into /app/data/keybase at startup.
 #
 # The signing key's address MUST be funded in the devnet genesis AND be a GovDAO
-# member, otherwise the broadcast succeeds but no proposal is created.
+# member, otherwise the broadcast succeeds but no proposal is created — see
+# 'make add-key' in gnoland-test/Makefile.
 
 log_level: info
 poll_interval: 15s
@@ -25,9 +29,10 @@ gnokey:
   bin: "gnokey"
   key_name: "katana-e2e"
   home: "/app/data/keybase"
+  password: "devpassword123"                   # devnet-only throwaway keybase passphrase
   mnemonic: "<24-word devnet test mnemonic>"   # throwaway; devnet only
   gas_fee: "1000000ugnot"
-  gas_wanted: 20000000
+  gas_wanted: 100000000   # headroom for maketx run script creation (eject alone fits in less, but this covers it)
 
 proposal:
   action_priority: [eject]

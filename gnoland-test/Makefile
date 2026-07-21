@@ -119,14 +119,17 @@ add-key:
 	  echo "    already a GovDAO member — skipping"; \
 	else \
 	  echo "    proposing $$NEWADDR as a T1 member (dev creates the proposal, votes YES, executes)"; \
-	  SCRIPT=$$(mktemp --suffix=.gno); \
+	  SCRIPTDIR=$$(mktemp -d); SCRIPT="$$SCRIPTDIR/addmember.gno"; \
 	  printf 'package main\n\nimport (\n\t"gno.land/r/gov/dao"\n\t"gno.land/r/gov/dao/v3/impl"\n)\n\nfunc main(cur realm) {\n\tpr := impl.NewAddMemberRequest(cross(cur), address("%s"), "T1", "katana e2e signer")\n\tdao.MustCreateProposal(cross(cur), pr)\n}\n' "$$NEWADDR" > "$$SCRIPT"; \
-	  OUT=$$(echo "$(DEV_PASS)" | gnokey maketx run -gas-fee 1000000ugnot -gas-wanted 100000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev "$$SCRIPT" 2>&1); \
-	  rm -f "$$SCRIPT"; \
+	  OUT=$$(echo "$(DEV_PASS)" | gnokey maketx run -gas-fee 1000000ugnot -gas-wanted 100000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev "$$SCRIPT" 2>&1) || true; \
+	  rm -rf "$$SCRIPTDIR"; \
 	  echo "$$OUT" | grep -q '"type":"ProposalCreated"' || { echo "!! add-member proposal failed:"; echo "$$OUT" | tail -20; exit 1; }; \
 	  PID=$$(echo "$$OUT" | grep -oE '"key":"id","value":"[0-9]+"' | grep -oE '[0-9]+' | head -1); \
-	  echo "    proposal #$$PID created — voting YES + executing as dev"; \
-	  echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func MustVoteOnProposalSimple -args "$$PID" -args YES -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev; \
+	  echo "    proposal #$$PID created — voting YES with every known member + executing"; \
+	  for M in dev katana; do \
+	    echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func MustVoteOnProposalSimple -args "$$PID" -args YES -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin $$M \
+	      || echo "    ($$M vote skipped: not in keybase, already voted, or not a member yet)"; \
+	  done; \
 	  echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func ExecuteProposal -args "$$PID" -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev; \
 	fi; \
 	echo ">>> done: '$(NAME)' = $$NEWADDR is funded + GovDAO member."; \

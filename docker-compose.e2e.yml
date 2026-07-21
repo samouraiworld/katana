@@ -4,10 +4,17 @@
 # (gnoland-test/ bootstrap.sh + docker compose up), which creates the external
 # network `gnoland-test_default` that the services below join.
 #
-# Usage:
-#   1. cd gnoland-test && GNO_REPO_PATH=/path/to/gno ./bootstrap.sh && docker compose up -d
-#   2. (optional) make scenario1 && make scenario2   # onboard then down validator4
+# Usage — real gnomonitoring (broadcast non-regression):
+#   1. cd gnoland-test && GNO_REPO_PATH=/path/to/gno ./bootstrap.sh && make full-reinit-4
+#   2. make scenario2   # stop validator4 -> real degradation
 #   3. docker compose -f docker-compose.e2e.yml up --build
+#
+# Usage — stub gnomonitoring (katana logic: eject/lower_vp/raise_vp/dry_run),
+# no postgres/gnomonitoring needed, scores come from gnoland-test/stub-gnomonitoring
+# running on the host:
+#   1. cd gnoland-test && make full-reinit-4 && make stub-scenario NAME=eject && make stub-up
+#   2. cp deploy/e2e/katana.config.stub.yaml.example deploy/e2e/katana.config.yaml
+#   3. docker compose -f docker-compose.e2e.yml up --build --no-deps katana
 #
 # See deploy/e2e/README.md for the full walkthrough.
 
@@ -69,6 +76,12 @@ services:
     networks:
       - default
       - gno-devnet
+    # Lets the container reach a stub-gnomonitoring server running on the host
+    # (gnoland-test/stub-gnomonitoring, started with 'make stub-up') via
+    # http://host.docker.internal:8989 — see katana.config.stub.yaml.example.
+    # Only relevant when run with --no-deps (skips gnomonitoring/postgres).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   e2e-pgdata:

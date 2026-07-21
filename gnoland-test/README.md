@@ -539,52 +539,35 @@ make clean-all && make full-reinit
 This wipes chain state while keeping (reinit) or regenerating (clean-all) the
 node identities. Acceptable for a devnet — there is no real data to preserve.
 
-## Validating katana's score-driven actions
+## Testing katana
 
-The scenarios above exercise **gnomonitoring**. To validate **katana** itself
-(the eject/lower_vp/raise_vp score-driven action model, the lifecycle gate,
-`dry_run`) against this same devnet, there are two complementary layers:
-
-| Layer | Speed | Realism | Covers |
-|-------|-------|---------|--------|
-| **Stub gnomonitoring** ([`stub-gnomonitoring/`](stub-gnomonitoring/), see [`KATANA-E2E.md`](KATANA-E2E.md#stub-gnomonitoring--testing-score-bands-without-real-chain-degradation)) | instant | katana logic only — real valset, faked scores | every score band, `action_priority`, VP dual-cap, lifecycle gate, exceptions, both `dry_run` values |
-| **Full e2e stack** ([`../docker-compose.e2e.yml`](../docker-compose.e2e.yml), [`../deploy/e2e/README.md`](../deploy/e2e/README.md)) | slow (real downtime) | real gnomonitoring + Postgres + katana broadcast | non-regression of the full detect → broadcast → vote → on-chain-effect path |
-
-### Quick start — stub gnomonitoring (layer A)
+katana always runs in Docker here — there is no supported "run `./katana`
+locally" path. One command for a working chain, then one command to test:
 
 ```bash
-make full-reinit-4                          # fresh chain, all 4 validators live + onboarded
-make stub-scenario NAME=eject               # or lower_vp / raise_vp / multi_eject / healthy
-make stub-up                                # foreground, leave running
-
-# in another terminal, from the repo root:
-make build                                  # builds ./katana (go build ./cmd/katana)
-cp gnoland-test/stub-gnomonitoring/config.katana.stub.yaml.example config.yaml
-./katana --config config.yaml               # starts the daemon — Ctrl-C to stop
+cd gnoland-test
+make full-reinit-4                 # fresh chain, all 4 validators live + onboarded
+make stub-scenario NAME=eject      # or lower_vp / raise_vp / multi_eject / healthy
+make stub-up                       # terminal 1, foreground, leave running
 ```
-
-Switch scenarios any time with `make stub-scenario NAME=...` (no restart
-needed — katana picks it up on its next `poll_interval`); flip `dry_run` in
-`config.yaml` to compare the rehearsal path against a real broadcast.
-
-### Quick start — full e2e stack (layer B)
-
-Real gnomonitoring + Postgres + katana, all in Docker, wired to this devnet
-(katana itself doesn't need a local build here — its image is built by the
-compose file). Devnet must already be up (`make full-reinit-4` above starts
-it):
 
 ```bash
-# from the repo root:
-export KATANA_GNOKEY_PASSWORD=devpassword123
-export GNO_REF=master                       # must match GNO_REPO_PATH's gno revision
-docker compose -f docker-compose.e2e.yml up --build
+# terminal 2, repo root:
+cp deploy/e2e/katana.config.stub.yaml.example deploy/e2e/katana.config.yaml
+# put a mnemonic in that file, then provision it on the live devnet (once per full-reinit):
+cd gnoland-test && make add-key NAME=katana-e2e MNEMONIC="<same mnemonic>" && cd ..
+docker compose -f docker-compose.e2e.yml up --build --no-deps katana
 ```
 
-This starts 3 containers (`katana-e2e-postgres`, `katana-e2e-gnomonitoring`,
-`katana-e2e`) using `deploy/e2e/katana.config.yaml` (copy it from
-`katana.config.yaml.example` first if it doesn't exist yet — see full details
-and troubleshooting in [`../deploy/e2e/README.md`](../deploy/e2e/README.md)).
+Watch it with `docker logs -f katana-e2e`. Switch scenarios any time from
+`gnoland-test/` with `make stub-scenario NAME=...` — no restart needed, katana
+picks it up on its next `poll_interval`. **Stop the test** with
+`docker compose -f docker-compose.e2e.yml stop katana` (not Ctrl-C on a local
+process — there isn't one).
 
-See [`KATANA-E2E.md`](KATANA-E2E.md) for the full walkthrough of both layers,
-plus the known signing-vs-operator-address gap.
+This covers katana's own logic: every score band, `action_priority`,
+lifecycle gate, exceptions, both `dry_run` values. For the real-broadcast
+variant (genuine gnomonitoring + Postgres + real chain degradation, used for
+non-regression rather than day-to-day testing), the full config reference,
+and troubleshooting — see **[`../deploy/e2e/README.md`](../deploy/e2e/README.md)**,
+the single source of truth for testing katana.
