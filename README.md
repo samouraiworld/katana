@@ -283,7 +283,3 @@ gnoland-test/          local devnet for preprod/e2e
 - No key material is stored by katana outside the keybase; signing is
   delegated to `gnokey`.
 - `config.yaml`, `data/` and `*.db` are git-ignored.
-
-## License
-
-See [LICENSE](LICENSE).
