@@ -33,6 +33,29 @@ is no host-run katana path anymore.
 columns). If `e2e-katana-data` was created by a pre-refactor katana, wipe it
 (`docker volume rm katana_e2e-katana-data` or similar) rather than reusing it.
 
+## One-shot: `make launch-test-katana`
+
+From the repo root, one command runs every stub score band
+(healthy/eject/lower_vp/raise_vp/multi_eject) followed by the real-broadcast
+scenario, against a freshly reset devnet:
+
+```bash
+cd gnoland-test && GNO_REPO_PATH=/path/to/gno ./bootstrap.sh   # one-time
+cd ..
+make launch-test-katana
+```
+
+It reuses the devnet's pre-provisioned `dev` key (no manual mnemonic /
+`add-key` step), resets the chain (`full-reinit-4`), streams katana's logs
+live for each stub scenario, then switches to the real-broadcast path
+(`scenario2` + real `gnomonitoring`+Postgres) and stays attached until you
+Ctrl-C. It does not assert pass/fail — read the logs, the same way you would
+running each step by hand.
+
+The rest of this document covers each phase manually: useful when debugging
+one scenario in isolation, or when you want a dedicated `katana-e2e` signing
+key instead of reusing `dev`.
+
 ## Setup (once)
 
 1. **Start the devnet** with all 4 validators onboarded (creates the shared
