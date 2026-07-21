@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# One-shot e2e run: fresh devnet -> every stub score-band scenario -> the
+# real-broadcast scenario. See
+# docs/superpowers/specs/2026-07-21-launch-test-katana-design.md.
+#
+# Reuses the devnet's pre-provisioned 'dev' signing key (see Task 1 in the
+# plan / the config examples) instead of a dedicated katana-e2e key: no
+# manual mnemonic/add-key step needed.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+GNOLAND_TEST_DIR="$ROOT_DIR/gnoland-test"
+COMPOSE=(docker compose -f docker-compose.e2e.yml)
+STUB_SCENARIOS=(healthy eject lower_vp raise_vp multi_eject)
+STUB_WATCH_SECONDS=30   # ~2x the stub config's poll_interval (15s)
+
+STUB_PID=""
+
+cleanup() {
+  if [ -n "$STUB_PID" ] && kill -0 "$STUB_PID" 2>/dev/null; then
+    echo ">>> stopping stub-gnomonitoring (pid $STUB_PID)"
+    kill "$STUB_PID" 2>/dev/null || true
+    wait "$STUB_PID" 2>/dev/null || true
+  fi
+  echo ">>> docker compose down"
+  "${COMPOSE[@]}" down
+}
+trap cleanup EXIT INT TERM
+
+echo "=== [1/5] preflight ==="
+if [ ! -f "$GNOLAND_TEST_DIR/.env" ] || [ ! -f "$GNOLAND_TEST_DIR/genesis.json" ]; then
+  echo "!! gnoland-test/.env or genesis.json missing." >&2
+  echo "!! Run this first: cd gnoland-test && GNO_REPO_PATH=/path/to/gno ./bootstrap.sh" >&2
+  exit 1
+fi
+echo ">>> stopping any leftover real gnomonitoring/postgres from a previous run"
+"${COMPOSE[@]}" stop gnomonitoring postgres 2>/dev/null || true
+
+echo "=== [2/5] fresh chain (full-reinit-4) ==="
+make -C "$GNOLAND_TEST_DIR" full-reinit-4
+
+echo "=== [3/5] phase A - stub (every score band) ==="
+cp deploy/e2e/katana.config.stub.yaml.example deploy/e2e/katana.config.yaml
+
+echo ">>> provisioning katana's data volume with the devnet 'dev' keybase"
+# Reuses the katana service's own volume mount (/app/data -> e2e-katana-data)
+# instead of a raw 'docker run -v e2e-katana-data:/data': compose has no
+# 'name:' override for that volume, so it actually resolves to the
+# project-prefixed 'katana_e2e-katana-data' (confirmed via 'docker compose
+# config') - a bare 'docker run' referencing the short name would silently
+# write to a different, empty volume. '--user root' overrides the image's
+# default 'katana' user (uid 10001, see Dockerfile) so the copy/chown can
+# run; 'chown -R katana:katana' (by name - that user already exists in the
+# image) leaves the copy owned by the same user the daemon runs as.
+"${COMPOSE[@]}" run --rm --build --no-deps --user root --entrypoint sh \
+  -v "$GNOLAND_TEST_DIR/.gnokey-dev:/src:ro" \
+  katana -c 'rm -rf /app/data/dev-keybase && cp -r /src /app/data/dev-keybase && chown -R katana:katana /app/data/dev-keybase'
+
+( cd "$GNOLAND_TEST_DIR/stub-gnomonitoring" && exec go run . -listen :8989 -file scenarios/current.json ) &
+STUB_PID=$!
+sleep 1   # let the stub server bind before katana starts polling it
+
+"${COMPOSE[@]}" up -d --build --no-deps katana
+
+for scenario in "${STUB_SCENARIOS[@]}"; do
+  echo "--- stub scenario: $scenario ---"
+  make -C "$GNOLAND_TEST_DIR" stub-scenario NAME="$scenario"
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  timeout "${STUB_WATCH_SECONDS}s" "${COMPOSE[@]}" logs -f --since "$since" katana || true
+done
+
+echo ">>> stub phase done - tearing down the stub katana container + server"
+"${COMPOSE[@]}" rm -f -s katana
+kill "$STUB_PID" 2>/dev/null || true
+wait "$STUB_PID" 2>/dev/null || true
+STUB_PID=""
+
+echo "=== [4/5] phase B - real broadcast (non-regression) ==="
+cp deploy/e2e/katana.config.yaml.example deploy/e2e/katana.config.yaml
+make -C "$GNOLAND_TEST_DIR" scenario2
+
+echo ">>> once a proposal appears in the logs below, from another terminal run:"
+echo "    make -C gnoland-test accept-govdao ID=<id>"
+echo "=== [5/5] streaming katana + gnomonitoring logs (Ctrl-C to stop) ==="
+"${COMPOSE[@]}" up --build

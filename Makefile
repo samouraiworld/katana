@@ -1,7 +1,7 @@
 BINARY := katana
 PKG := ./cmd/katana
 
-.PHONY: build run test tidy fmt vet clean
+.PHONY: build run test tidy fmt vet clean launch-test-katana
 
 build:
 	go build -o $(BINARY) $(PKG)
@@ -24,3 +24,6 @@ vet:
 clean:
 	rm -f $(BINARY)
 	rm -rf proposals
+
+launch-test-katana:
+	./scripts/launch-test-katana.sh
