@@ -96,6 +96,14 @@ func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]conf
 // raising step (raise_vp) is capped at maxVPShare% of total. The other bound
 // never applies — e.g. clamping a lower_vp target against the network-share
 // ceiling would push it back up and defeat the action.
+//
+// The floor/ceiling clamp can itself push the target back across current in
+// the wrong direction — e.g. raise_vp on a validator already above the
+// maxVPShare ceiling clamps target down below current, which would read as a
+// "raise" whose target is lower than where it started. When that happens the
+// action is not meaningful (the validator is already past the relevant
+// bound), so the target collapses to current, which Evaluate's
+// target == period.VotingPower check then treats as a no-op.
 func vpTarget(current int64, ac config.ActionConfig, minVP int64, maxVPShare float64, total int64) int64 {
 	capSelf := ac.VPStepPercentOfSelf / 100 * float64(current)
 	capTotal := ac.VPStepPercentOfTotal / 100 * float64(total)
@@ -110,10 +118,22 @@ func vpTarget(current int64, ac config.ActionConfig, minVP int64, maxVPShare flo
 		if target < minVP {
 			target = minVP
 		}
+		if target >= current {
+			// Clamping to the floor pushed the target back up to or past
+			// current: the validator is already at/under the floor, so a
+			// further reduction is not meaningful — no-op.
+			target = current
+		}
 	case step > 0:
 		ceiling := int64(maxVPShare / 100 * float64(total))
 		if target > ceiling {
 			target = ceiling
+		}
+		if target <= current {
+			// Clamping to the ceiling pushed the target back down to or past
+			// current: the validator is already at/over the share ceiling, so
+			// a further increase is not meaningful — no-op.
+			target = current
 		}
 	}
 	return target

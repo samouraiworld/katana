@@ -1,5 +1,5 @@
 # katana — Product Requirements Document (PRD)
-idée # retirer tu voting power systeme de freeze 
+
 Status: **draft for validation** · Owner: Samourai · Last updated: 2026-07-02
 
 This document defines the target behaviour of katana. It is the single source of
@@ -68,8 +68,8 @@ submitted). Each loops on its own ticker.
 ```
                     ┌──────────────────────────── katana service ────────────────────────────┐
  gnomonitoring API ─┼─► eval-worker(chain N) ─► evaluate ─► lifecycle gate ─► proposal ─► notify ─► store
-   /missing_block   │                            (rules)   (state machine)   (broadcast)   (sent)
-   /admin/alerts    │
+   /api/reports/    │                            (rules)   (state machine)   (broadcast)   (sent)
+   validators?chain=│
  gno.land RPC ──────┼─► (valset safety check)
    /validators      │
  GovDAO realm ──────┼─► vote-worker(chain N) ─► poll proposal status ─► on ACCEPTED / REJECTED:
@@ -79,14 +79,22 @@ submitted). Each loops on its own ticker.
 ```
 
 **Evaluation worker** cycle (every `poll_interval`):
-1. Query gnomonitoring for missed blocks (window = condition interval).
-2. Query gnomonitoring for CRITICAL alert counts (window = condition interval).
-3. Build the candidate set (union of observed addresses).
-4. For each candidate: evaluate conditions → check exceptions → **lifecycle gate**
-   (skip if a proposal is pending / accepted / within cooldown or rejection
-   backoff) → valset safety check → build proposal → broadcast via gnokey →
-   notify *proposal sent* → persist evaluation + proposal.
-5. Sleep until next tick.
+1. Query gnomonitoring's single `GET /api/reports/validators?chain=` endpoint
+   for the per-validator report: a computed health score (0-100) plus
+   sub-metrics (`sign_rate`, `incident_rate_per_week`, `downtime_blocks`, …),
+   each broken out per reporting window (`last_24h` | `current_week` |
+   `current_month` | `current_year`) — see §6.4b.
+2. Compute each window's total valset voting power across every reported
+   validator (`rules.TotalVotingPower`), needed to clamp `lower_vp`/`raise_vp`
+   targets against `max_voting_power_share`.
+3. For each candidate (validator in the report): evaluate its score against
+   the configured action thresholds (`rules.Evaluate` — `eject` / `lower_vp` /
+   `raise_vp`, first match in `action_priority` wins) → check exceptions →
+   **lifecycle gate** (skip if a proposal is pending / accepted / within
+   cooldown or rejection backoff) → valset safety check → build proposal →
+   broadcast via gnokey → notify *proposal sent* → persist evaluation +
+   proposal.
+4. Sleep until next tick.
 
 **Vote-watcher worker** cycle (every `vote_poll_interval`):
 1. For each of katana's proposals still `pending`, query the GovDAO realm for its
@@ -794,11 +802,18 @@ All decisions are now settled; the PRD is ready to implement.
 
 - **gnomonitoring** (metrics source): <https://github.com/samouraiworld/gnomonitoring>
 - gnomonitoring endpoints katana consumes:
-  - `GET /missing_block?chain=&period=` — missed blocks per validator.
-  - `GET /admin/alerts?chain=&level=CRITICAL&from=` — CRITICAL alerts (admin, needs token).
+  - `GET /api/reports/validators?chain=` — the single metrics source (§6.4b):
+    per-validator computed health score (0-100) plus sub-metrics, broken out
+    per reporting window (`last_24h` | `current_week` | `current_month` |
+    `current_year`).
   - `GET /info` — **chain discovery**: returns `enabled_chains` and, per chain,
     `rpc_endpoints` / `graphqls` / `gnowebs`. Public, no token. **Confirmed
     available** in the current backend.
+  - Superseded (no longer consumed, kept here for historical reference):
+    `GET /missing_block?chain=&period=` (raw missed blocks) and
+    `GET /admin/alerts?chain=&level=CRITICAL&from=` (raw CRITICAL alerts,
+    admin, needs token) — replaced end-to-end by the computed-score model
+    above (FR-3.1).
 - GovDAO vote tracking reference impl (to mirror in katana):
   `backend/internal/govdao/govdao.go` — `ProposalCreated` event id extraction
   (`ExtractGovDAOIDs`, `ProcessProposal`) and status render

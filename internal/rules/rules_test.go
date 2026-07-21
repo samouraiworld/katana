@@ -147,6 +147,46 @@ func TestEvaluate_NoopClampClearsAction(t *testing.T) {
 	}
 }
 
+// TestEvaluate_RaiseAboveCeilingIsNoop guards against vpTarget's floor/ceiling
+// clamp reversing the action's direction: a raise_vp-eligible validator whose
+// current power is already above max_voting_power_share% of total must not
+// produce a "raise_vp" decision whose TargetPower is actually lower than
+// CurrentPower.
+func TestEvaluate_RaiseAboveCeilingIsNoop(t *testing.T) {
+	totalVP := map[string]int64{"current_year": 10000}
+	// current=5000 is 50% of total(10000), already well above the 15%
+	// ceiling (1500). The raise step would nominally target current+step,
+	// but clamping to the ceiling (1500) would push the target below
+	// current(5000) — must collapse to a no-op instead.
+	r := report("g1a", map[string]gnomonitoring.PeriodScore{
+		"current_year": {Score: 90, VotingPower: 5000},
+	})
+	got := Evaluate(r, defaultPriority(), actions(), 100, 15, totalVP)
+	if got.Action != "" {
+		t.Fatalf("Action = %q, want \"\" (no-op: already above max_voting_power_share ceiling); TargetPower=%d CurrentPower=%d",
+			got.Action, got.TargetPower, got.CurrentPower)
+	}
+}
+
+// TestEvaluate_LowerBelowFloorIsNoop is the mirror case: a lower_vp-eligible
+// validator whose current power is already below min_voting_power must not
+// produce a "lower_vp" decision whose TargetPower is actually higher than
+// CurrentPower.
+func TestEvaluate_LowerBelowFloorIsNoop(t *testing.T) {
+	totalVP := map[string]int64{"current_week": 20000}
+	// current=50 is already below minVP=100. The lower_vp step would
+	// nominally target current-step, but clamping to the floor (100) would
+	// push the target above current(50) — must collapse to a no-op instead.
+	r := report("g1a", map[string]gnomonitoring.PeriodScore{
+		"current_week": {Score: 40, VotingPower: 50},
+	})
+	got := Evaluate(r, defaultPriority(), actions(), 100, 15, totalVP)
+	if got.Action != "" {
+		t.Fatalf("Action = %q, want \"\" (no-op: already below min_voting_power floor); TargetPower=%d CurrentPower=%d",
+			got.Action, got.TargetPower, got.CurrentPower)
+	}
+}
+
 func TestEvaluate_MissingWindowDataSkipsAction(t *testing.T) {
 	totalVP := map[string]int64{"current_week": 20000}
 	// No current_month entry at all -> eject can't be evaluated, falls

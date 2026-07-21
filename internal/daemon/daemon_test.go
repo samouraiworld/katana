@@ -190,13 +190,12 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 			Cooldown: "720h", RejectedBackoff: "720h", Submit: "run",
 			ActionPriority: []string{config.ActionEject, config.ActionLowerVP, config.ActionRaiseVP},
 			MinVotingPower: 100,
-			// MaxVotingPowerShare deliberately set well above the brief's
-			// original 15 (%): the raise_vp fixture uses a single-validator
-			// "network" where total valset VP always equals the validator's
-			// own power, so a real-world 15% ceiling would clamp any raise
-			// below the current power (target < current), defeating the
-			// action outright — see task-8-report.md for the full trace.
-			MaxVotingPowerShare: 200,
+			// Realistic ceiling, matching the config default. The raise_vp
+			// fixture (TestEvalCycleRaisesVotingPower) reports a second,
+			// larger validator alongside g1bad so g1bad's share of total
+			// valset VP stays well under this ceiling and a genuine
+			// (non-clamped) raise occurs.
+			MaxVotingPowerShare: 15,
 			Actions: map[string]config.ActionConfig{
 				config.ActionEject: {
 					ScoreBelow: 30, Window: "current_month",
@@ -386,11 +385,22 @@ func TestEvalCycleLowersVotingPower(t *testing.T) {
 
 func TestEvalCycleRaisesVotingPower(t *testing.T) {
 	ctx := context.Background()
+	// g1bad (1000 VP, raise-eligible) is reported alongside a second, much
+	// larger validator (g1big, 19000 VP, neutral score) so the total valset
+	// VP is a realistic 20000: g1bad's 5% share stays well under the 15%
+	// max_voting_power_share ceiling (proposal.MaxVotingPowerShare in
+	// newFixture), and a genuine, non-clamped raise occurs. g1big's score
+	// (70, on every window) sits in the 60-84 no-action stability zone so it
+	// never itself becomes eligible for eject/lower_vp/raise_vp.
 	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[{"addr":"g1bad","moniker":"bad","periods":{
 			"current_month":{"score":95,"tier":"Excellent","voting_power":1000},
 			"current_week":{"score":95,"tier":"Excellent","voting_power":1000},
 			"current_year":{"score":95,"tier":"Excellent","voting_power":1000}
+		}},{"addr":"g1big","moniker":"big","periods":{
+			"current_month":{"score":70,"tier":"Stable","voting_power":19000},
+			"current_week":{"score":70,"tier":"Stable","voting_power":19000},
+			"current_year":{"score":70,"tier":"Stable","voting_power":19000}
 		}}]`))
 	}))
 	t.Cleanup(gnomon.Close)

@@ -243,6 +243,60 @@ chains:
 	}
 }
 
+// TestPerChainProposalOverrideStillGetsActionDefaults guards against a
+// per-chain proposal: override silently disabling every action: since the
+// override is a whole-block replace that bypasses applyDefaults, a chain
+// that overrides proposal: to tweak just one field (here cooldown) must
+// still resolve the same built-in action_priority/actions/VP-bound defaults
+// the global config would have gotten — not an empty ActionPriority (zero
+// proposals, ever, with no error) and zeroed MinVotingPower/MaxVotingPowerShare.
+func TestPerChainProposalOverrideStillGetsActionDefaults(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+chains:
+  test:
+    rpc_endpoint: "http://x"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+    dry_run: true
+    proposal:
+      cooldown: 240h
+      rejected_backoff: 240h
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+
+	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
+		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
+	}
+	if rt.Proposal.MinVotingPower != 100 {
+		t.Errorf("MinVotingPower = %d, want default 100", rt.Proposal.MinVotingPower)
+	}
+	if rt.Proposal.MaxVotingPowerShare != 15 {
+		t.Errorf("MaxVotingPowerShare = %v, want default 15", rt.Proposal.MaxVotingPowerShare)
+	}
+	for _, name := range []string{ActionEject, ActionLowerVP, ActionRaiseVP} {
+		ac, ok := rt.Proposal.Actions[name]
+		if !ok || ac.Window == "" {
+			t.Errorf("Actions[%q] = %+v (ok=%v), want a defaulted entry", name, ac, ok)
+		}
+	}
+	// The override's own field must still take effect (whole-block replace
+	// preserved for what the chain DOES set).
+	if rt.Proposal.CooldownDur() != 240*time.Hour {
+		t.Errorf("Cooldown = %s, want overridden 240h", rt.Proposal.CooldownDur())
+	}
+}
+
 func TestLoadAndRuntime(t *testing.T) {
 	c, err := Load(writeConfig(t, validYAML))
 	if err != nil {
