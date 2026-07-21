@@ -151,6 +151,85 @@ func actionNoun(action string) string {
 	}
 }
 
+func actionLabel(action string) string {
+	switch action {
+	case config.ActionRaiseVP:
+		return "Voting power increase"
+	case config.ActionLowerVP:
+		return "Voting power reduction"
+	case config.ActionEject:
+		return "Validator ejection"
+	default:
+		return "katana event"
+	}
+}
+
+func stageSuffix(event Event) string {
+	switch event {
+	case EventSent:
+		return "submitted"
+	case EventAccepted:
+		return "accepted"
+	case EventRejected:
+		return "rejected"
+	case EventWouldEject:
+		return "(dry-run)"
+	default:
+		return string(event)
+	}
+}
+
+// Title renders the short embed/attachment title: the action label, the
+// lifecycle stage, and the chain. Color (embedColor/slackColorHex/
+// telegramEmoji) is a function of Action alone; Title additionally varies by
+// Event so the stage is visible without reading the body.
+func Title(event Event, in Info) string {
+	return fmt.Sprintf("%s %s — %s", actionLabel(in.Action), stageSuffix(event), in.Chain)
+}
+
+// embedColor returns the Discord embed color (decimal RGB) for action.
+func embedColor(action string) int {
+	switch action {
+	case config.ActionRaiseVP:
+		return 3066993 // #2ECC71 green
+	case config.ActionLowerVP:
+		return 15105570 // #E67E22 orange
+	case config.ActionEject:
+		return 15158332 // #E74C3C red
+	default:
+		return 9807270 // #95A5A6 gray
+	}
+}
+
+// slackColorHex returns the Slack attachment color (hex string) for action.
+func slackColorHex(action string) string {
+	switch action {
+	case config.ActionRaiseVP:
+		return "#2ECC71"
+	case config.ActionLowerVP:
+		return "#E67E22"
+	case config.ActionEject:
+		return "#E74C3C"
+	default:
+		return "#95A5A6"
+	}
+}
+
+// telegramEmoji returns the colored-emoji prefix standing in for color on a
+// channel with no native color concept.
+func telegramEmoji(action string) string {
+	switch action {
+	case config.ActionRaiseVP:
+		return "🟢"
+	case config.ActionLowerVP:
+		return "🟠"
+	case config.ActionEject:
+		return "🔴"
+	default:
+		return "⚪"
+	}
+}
+
 // Result is the per-channel outcome of a Dispatch.
 type Result struct {
 	Channel string // discord | slack | telegram

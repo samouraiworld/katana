@@ -166,3 +166,76 @@ func TestDispatchWouldEjectAttachesFile(t *testing.T) {
 		t.Errorf("multipart body missing the command in payload_json:\n%s", gotBody)
 	}
 }
+
+func TestTitle(t *testing.T) {
+	cases := []struct {
+		name   string
+		event  Event
+		action string
+		want   string
+	}{
+		{"raise sent", EventSent, config.ActionRaiseVP, "Voting power increase submitted — chain1"},
+		{"raise accepted", EventAccepted, config.ActionRaiseVP, "Voting power increase accepted — chain1"},
+		{"raise rejected", EventRejected, config.ActionRaiseVP, "Voting power increase rejected — chain1"},
+		{"raise dry-run", EventWouldEject, config.ActionRaiseVP, "Voting power increase (dry-run) — chain1"},
+		{"lower sent", EventSent, config.ActionLowerVP, "Voting power reduction submitted — chain1"},
+		{"lower accepted", EventAccepted, config.ActionLowerVP, "Voting power reduction accepted — chain1"},
+		{"lower rejected", EventRejected, config.ActionLowerVP, "Voting power reduction rejected — chain1"},
+		{"lower dry-run", EventWouldEject, config.ActionLowerVP, "Voting power reduction (dry-run) — chain1"},
+		{"eject sent", EventSent, config.ActionEject, "Validator ejection submitted — chain1"},
+		{"eject accepted", EventAccepted, config.ActionEject, "Validator ejection accepted — chain1"},
+		{"eject rejected", EventRejected, config.ActionEject, "Validator ejection rejected — chain1"},
+		{"eject dry-run", EventWouldEject, config.ActionEject, "Validator ejection (dry-run) — chain1"},
+		{"unknown action", EventSent, "", "katana event submitted — chain1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Title(c.event, Info{Chain: "chain1", Action: c.action})
+			if got != c.want {
+				t.Errorf("Title(%s, action=%q) = %q, want %q", c.event, c.action, got, c.want)
+			}
+		})
+	}
+}
+
+func TestEmbedColor(t *testing.T) {
+	cases := map[string]int{
+		config.ActionRaiseVP: 3066993,
+		config.ActionLowerVP: 15105570,
+		config.ActionEject:   15158332,
+		"":                   9807270,
+	}
+	for action, want := range cases {
+		if got := embedColor(action); got != want {
+			t.Errorf("embedColor(%q) = %d, want %d", action, got, want)
+		}
+	}
+}
+
+func TestSlackColorHex(t *testing.T) {
+	cases := map[string]string{
+		config.ActionRaiseVP: "#2ECC71",
+		config.ActionLowerVP: "#E67E22",
+		config.ActionEject:   "#E74C3C",
+		"":                   "#95A5A6",
+	}
+	for action, want := range cases {
+		if got := slackColorHex(action); got != want {
+			t.Errorf("slackColorHex(%q) = %q, want %q", action, got, want)
+		}
+	}
+}
+
+func TestTelegramEmoji(t *testing.T) {
+	cases := map[string]string{
+		config.ActionRaiseVP: "🟢",
+		config.ActionLowerVP: "🟠",
+		config.ActionEject:   "🔴",
+		"":                   "⚪",
+	}
+	for action, want := range cases {
+		if got := telegramEmoji(action); got != want {
+			t.Errorf("telegramEmoji(%q) = %q, want %q", action, got, want)
+		}
+	}
+}
