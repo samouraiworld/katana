@@ -180,11 +180,12 @@ func stageSuffix(event Event) string {
 }
 
 // Title renders the short embed/attachment title: the action label, the
-// lifecycle stage, and the chain. Color (embedColor/slackColorHex/
-// telegramEmoji) is a function of Action alone; Title additionally varies by
-// Event so the stage is visible without reading the body.
+// lifecycle stage, the validator (moniker, falling back to address), and the
+// chain. Color (embedColor/slackColorHex/telegramEmoji) is a function of
+// Action alone; Title additionally varies by Event so the stage is visible
+// without reading the body.
 func Title(event Event, in Info) string {
-	return fmt.Sprintf("%s %s — %s", actionLabel(in.Action), stageSuffix(event), in.Chain)
+	return fmt.Sprintf("%s %s — %s (%s)", actionLabel(in.Action), stageSuffix(event), in.display(), in.Chain)
 }
 
 // embedColor returns the Discord embed color (decimal RGB) for action.

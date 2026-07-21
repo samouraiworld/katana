@@ -190,7 +190,7 @@ func TestDispatchDiscordEmbed(t *testing.T) {
 	if !strings.Contains(gotBody, `"color":3066993`) {
 		t.Errorf("discord body missing expected color: %s", gotBody)
 	}
-	if !strings.Contains(gotBody, "Voting power increase submitted — chain1") {
+	if !strings.Contains(gotBody, "Voting power increase submitted — g1x (chain1)") {
 		t.Errorf("discord body missing expected title: %s", gotBody)
 	}
 	if !strings.Contains(gotBody, "embeds") {
@@ -218,7 +218,7 @@ func TestDispatchSlackAttachment(t *testing.T) {
 	if !strings.Contains(gotBody, `"color":"#E67E22"`) {
 		t.Errorf("slack body missing expected color: %s", gotBody)
 	}
-	if !strings.Contains(gotBody, "Voting power reduction submitted — chain1") {
+	if !strings.Contains(gotBody, "Voting power reduction submitted — g1x (chain1)") {
 		t.Errorf("slack body missing expected title: %s", gotBody)
 	}
 	if !strings.Contains(gotBody, "attachments") {
@@ -239,28 +239,31 @@ func TestTelegramText(t *testing.T) {
 
 func TestTitle(t *testing.T) {
 	cases := []struct {
-		name   string
-		event  Event
-		action string
-		want   string
+		name    string
+		event   Event
+		action  string
+		moniker string
+		address string
+		want    string
 	}{
-		{"raise sent", EventSent, config.ActionRaiseVP, "Voting power increase submitted — chain1"},
-		{"raise accepted", EventAccepted, config.ActionRaiseVP, "Voting power increase accepted — chain1"},
-		{"raise rejected", EventRejected, config.ActionRaiseVP, "Voting power increase rejected — chain1"},
-		{"raise dry-run", EventWouldEject, config.ActionRaiseVP, "Voting power increase (dry-run) — chain1"},
-		{"lower sent", EventSent, config.ActionLowerVP, "Voting power reduction submitted — chain1"},
-		{"lower accepted", EventAccepted, config.ActionLowerVP, "Voting power reduction accepted — chain1"},
-		{"lower rejected", EventRejected, config.ActionLowerVP, "Voting power reduction rejected — chain1"},
-		{"lower dry-run", EventWouldEject, config.ActionLowerVP, "Voting power reduction (dry-run) — chain1"},
-		{"eject sent", EventSent, config.ActionEject, "Validator ejection submitted — chain1"},
-		{"eject accepted", EventAccepted, config.ActionEject, "Validator ejection accepted — chain1"},
-		{"eject rejected", EventRejected, config.ActionEject, "Validator ejection rejected — chain1"},
-		{"eject dry-run", EventWouldEject, config.ActionEject, "Validator ejection (dry-run) — chain1"},
-		{"unknown action", EventSent, "", "katana event submitted — chain1"},
+		{"raise sent", EventSent, config.ActionRaiseVP, "val1", "", "Voting power increase submitted — val1 (chain1)"},
+		{"raise accepted", EventAccepted, config.ActionRaiseVP, "val1", "", "Voting power increase accepted — val1 (chain1)"},
+		{"raise rejected", EventRejected, config.ActionRaiseVP, "val1", "", "Voting power increase rejected — val1 (chain1)"},
+		{"raise dry-run", EventWouldEject, config.ActionRaiseVP, "val1", "", "Voting power increase (dry-run) — val1 (chain1)"},
+		{"lower sent", EventSent, config.ActionLowerVP, "val1", "", "Voting power reduction submitted — val1 (chain1)"},
+		{"lower accepted", EventAccepted, config.ActionLowerVP, "val1", "", "Voting power reduction accepted — val1 (chain1)"},
+		{"lower rejected", EventRejected, config.ActionLowerVP, "val1", "", "Voting power reduction rejected — val1 (chain1)"},
+		{"lower dry-run", EventWouldEject, config.ActionLowerVP, "val1", "", "Voting power reduction (dry-run) — val1 (chain1)"},
+		{"eject sent", EventSent, config.ActionEject, "val1", "", "Validator ejection submitted — val1 (chain1)"},
+		{"eject accepted", EventAccepted, config.ActionEject, "val1", "", "Validator ejection accepted — val1 (chain1)"},
+		{"eject rejected", EventRejected, config.ActionEject, "val1", "", "Validator ejection rejected — val1 (chain1)"},
+		{"eject dry-run", EventWouldEject, config.ActionEject, "val1", "", "Validator ejection (dry-run) — val1 (chain1)"},
+		{"unknown action", EventSent, "", "val1", "", "katana event submitted — val1 (chain1)"},
+		{"moniker falls back to address", EventSent, config.ActionEject, "", "g1x", "Validator ejection submitted — g1x (chain1)"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Title(c.event, Info{Chain: "chain1", Action: c.action})
+			got := Title(c.event, Info{Chain: "chain1", Action: c.action, Moniker: c.moniker, Address: c.address})
 			if got != c.want {
 				t.Errorf("Title(%s, action=%q) = %q, want %q", c.event, c.action, got, c.want)
 			}

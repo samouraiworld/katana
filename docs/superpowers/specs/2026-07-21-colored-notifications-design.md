@@ -42,15 +42,18 @@ colored-emoji equivalent).
 | `eject` | `#E74C3C` (red) | 🔴 | "Validator ejection" |
 | unknown/other | `#95A5A6` (gray) | ⚪ | "katana event" (fallback, matches today's `default:` case in `Message`) |
 
-Title = `"{label} {stage suffix} — {chain}"`:
+Title = `"{label} {stage suffix} — {validator} ({chain})"`, where `{validator}`
+is the moniker, falling back to the address when the moniker is empty
+(same fallback `Info.display()` already uses for the message body):
 
 - `EventSent` → *"submitted"*
 - `EventAccepted` → *"accepted"*
 - `EventRejected` → *"rejected"*
 - `EventWouldEject` → *"(dry-run)"*
 
-Example: `raise_vp` + `EventSent` on chain `gnoland-test` → title
-`"Voting power increase submitted — gnoland-test"`, color `#2ECC71`.
+Example: `raise_vp` + `EventSent` for validator `good-node` on chain
+`gnoland-test` → title `"Voting power increase submitted — good-node
+(gnoland-test)"`, color `#2ECC71`.
 
 ## `internal/notify` changes
 
