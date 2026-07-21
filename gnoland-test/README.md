@@ -543,15 +543,19 @@ node identities. Acceptable for a devnet — there is no real data to preserve.
 
 katana always runs in Docker here — there is no supported "run `./katana`
 locally" path. From the repo root, one command runs every stub score band
-(eject/lower_vp/raise_vp/multi_eject/healthy) followed by the real-broadcast
+(healthy/eject/lower_vp/raise_vp/multi_eject) followed by the real-broadcast
 path against this devnet:
 
 ```bash
 make launch-test-katana
 ```
 
-It reuses this devnet's `dev` key (no manual mnemonic/`add-key` step needed)
-and streams katana's logs live — Ctrl-C stops everything it started.
+It reuses this devnet's `dev` key (no manual mnemonic/`add-key` step needed),
+resets katana's own SQLite history, and streams katana's logs live — Ctrl-C
+stops everything it started. Once a scenario triggers an action for a
+validator, later scenarios targeting that same validator in the same run
+will correctly show the lifecycle gate blocking re-proposal rather than a
+fresh broadcast — that's expected, and part of what's being exercised.
 
 For a single scenario, a single phase, or any manual/debugging step — config
 reference, `add-key`, switching scenarios by hand, the real-broadcast

@@ -25,8 +25,10 @@ gnoland-test/ (layer 1, always)          docker-compose.e2e.yml (layer 2)
                                             OR host-run stub-gnomonitoring (fast path)
 ```
 
-katana ships `gnokey` inside its image and imports a signing key from a
-mnemonic into an in-container keybase (`/app/data/keybase`) at startup — there
+katana ships `gnokey` inside its image. By default it just reuses the
+devnet's pre-provisioned key at `/app/data/dev-keybase` (no import); switch
+to a dedicated key and it imports the signing key from a mnemonic into
+whatever in-container keybase path you configure at startup instead. There
 is no host-run katana path anymore.
 
 **Data volume:** the SQLite schema is broadcast-only (no `mode`/`artifact`
@@ -46,11 +48,15 @@ make launch-test-katana
 ```
 
 It reuses the devnet's pre-provisioned `dev` key (no manual mnemonic /
-`add-key` step), resets the chain (`full-reinit-4`), streams katana's logs
-live for each stub scenario, then switches to the real-broadcast path
-(`scenario2` + real `gnomonitoring`+Postgres) and stays attached until you
-Ctrl-C. It does not assert pass/fail — read the logs, the same way you would
-running each step by hand.
+`add-key` step), resets the chain (`full-reinit-4`) and katana's own SQLite
+history, streams katana's logs live for each stub scenario, then switches to
+the real-broadcast path (`scenario2` + real `gnomonitoring`+Postgres) and
+stays attached until you Ctrl-C. It does not assert pass/fail — read the
+logs, the same way you would running each step by hand. Several scenarios
+target the same devnet validator: once one of them triggers an action for a
+validator, later scenarios targeting that same validator in the same run
+will correctly show the lifecycle gate blocking re-proposal rather than a
+fresh broadcast — that's expected, and part of what's being exercised.
 
 The rest of this document covers each phase manually: useful when debugging
 one scenario in isolation, or when you want a dedicated `katana-e2e` signing

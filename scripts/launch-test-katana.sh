@@ -44,7 +44,7 @@ make -C "$GNOLAND_TEST_DIR" full-reinit-4
 echo "=== [3/5] phase A - stub (every score band) ==="
 cp deploy/e2e/katana.config.stub.yaml.example deploy/e2e/katana.config.yaml
 
-echo ">>> provisioning katana's data volume with the devnet 'dev' keybase"
+echo ">>> provisioning katana's data volume with the devnet 'dev' keybase and resetting katana's own history"
 # Reuses the katana service's own volume mount (/app/data -> e2e-katana-data)
 # instead of a raw 'docker run -v e2e-katana-data:/data': compose has no
 # 'name:' override for that volume, so it actually resolves to the
@@ -54,13 +54,25 @@ echo ">>> provisioning katana's data volume with the devnet 'dev' keybase"
 # default 'katana' user (uid 10001, see Dockerfile) so the copy/chown can
 # run; 'chown -R katana:katana' (by name - that user already exists in the
 # image) leaves the copy owned by the same user the daemon runs as.
+# The trailing 'rm -f /app/data/*.db' wipes katana's own SQLite history
+# (proposals/lifecycle state) in that same volume, since 'e2e-katana-data' is
+# a named volume that outlives 'docker compose down' and 'full-reinit-4'
+# (which only resets the chain) - without it, stale 'pending' rows from a
+# prior run's chain incarnation would permanently block re-proposing via
+# internal/lifecycle.Gate. This makes every invocation start from a clean
+# slate.
 "${COMPOSE[@]}" run --rm --build --no-deps --user root --entrypoint sh \
   -v "$GNOLAND_TEST_DIR/.gnokey-dev:/src:ro" \
-  katana -c 'rm -rf /app/data/dev-keybase && cp -r /src /app/data/dev-keybase && chown -R katana:katana /app/data/dev-keybase'
+  katana -c 'rm -rf /app/data/dev-keybase && cp -r /src /app/data/dev-keybase && chown -R katana:katana /app/data/dev-keybase && rm -f /app/data/*.db'
 
 ( cd "$GNOLAND_TEST_DIR/stub-gnomonitoring" && exec go run . -listen :8989 -file scenarios/current.json ) &
 STUB_PID=$!
-sleep 1   # let the stub server bind before katana starts polling it
+# Wait for the stub server to bind before katana starts polling it - poll
+# instead of a blind sleep so a cold 'go run' build cache doesn't race it.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  curl -s --connect-timeout 1 http://localhost:8989/ -o /dev/null && break
+  sleep 0.5
+done
 
 "${COMPOSE[@]}" up -d --build --no-deps katana
 

@@ -10,8 +10,11 @@
 # (or leave it empty and uncomment the 'environment:' block in
 # ../../docker-compose.e2e.yml to pass KATANA_GNOKEY_MNEMONIC instead).
 #
-# gnokey is shipped inside the katana image (Dockerfile GNO_REF). katana imports
-# the signing key into /app/data/keybase at startup.
+# gnokey is shipped inside the katana image (Dockerfile GNO_REF). With the
+# default settings above, katana just reuses the pre-provisioned key at
+# /app/data/dev-keybase (gnokey.mnemonic empty -> internal/keybase.Ensure is
+# a no-op, no import happens). Switch to a dedicated key (gnokey.mnemonic set)
+# and katana imports it into whatever 'gnokey.home' you configure at startup.
 #
 # The signing key's address MUST be funded in the devnet genesis AND be a GovDAO
 # member, otherwise the broadcast succeeds but no proposal is created — see
