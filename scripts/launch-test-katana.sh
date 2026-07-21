@@ -15,6 +15,9 @@ GNOLAND_TEST_DIR="$ROOT_DIR/gnoland-test"
 COMPOSE=(docker compose -f docker-compose.e2e.yml)
 STUB_SCENARIOS=(healthy eject lower_vp raise_vp multi_eject)
 STUB_WATCH_SECONDS=30   # ~2x the stub config's poll_interval (15s)
+STUB_DIR="$GNOLAND_TEST_DIR/stub-gnomonitoring"
+STUB_BIN_DIR="$(mktemp -d)"
+STUB_BIN="$STUB_BIN_DIR/stub-gnomonitoring"
 
 STUB_PID=""
 
@@ -24,6 +27,7 @@ cleanup() {
     kill "$STUB_PID" 2>/dev/null || true
     wait "$STUB_PID" 2>/dev/null || true
   fi
+  rm -rf "$STUB_BIN_DIR"
   echo ">>> docker compose down"
   "${COMPOSE[@]}" down
 }
@@ -40,6 +44,12 @@ if [ -z "${KATANA_DISCORD_WEBHOOK:-}" ]; then
   echo "!! notifications, but with an empty webhook_url they'll silently" >&2
   echo "!! no-op. export KATANA_DISCORD_WEBHOOK=<url> before running this" >&2
   echo "!! if you want to actually receive them." >&2
+fi
+if command -v lsof >/dev/null 2>&1 && lsof -i :8989 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "!! something is already listening on :8989 (stub-gnomonitoring's port)," >&2
+  echo "!! likely an orphaned process from a previous interrupted run." >&2
+  echo "!! find it with 'lsof -i :8989', kill its PID, then re-run." >&2
+  exit 1
 fi
 echo ">>> stopping any leftover real gnomonitoring/postgres from a previous run"
 "${COMPOSE[@]}" stop gnomonitoring postgres 2>/dev/null || true
@@ -71,10 +81,19 @@ echo ">>> provisioning katana's data volume with the devnet 'dev' keybase and re
   -v "$GNOLAND_TEST_DIR/.gnokey-dev:/src:ro" \
   katana -c 'rm -rf /app/data/dev-keybase && cp -r /src /app/data/dev-keybase && chown -R katana:katana /app/data/dev-keybase && rm -f /app/data/*.db'
 
-( cd "$GNOLAND_TEST_DIR/stub-gnomonitoring" && exec go run . -listen :8989 -file scenarios/current.json ) &
+echo ">>> building stub-gnomonitoring"
+# Built once into a temp binary and exec'd directly, rather than 'go run .':
+# 'go run' compiles and then forks a child process for the actual binary, so
+# killing the tracked PID kills only the 'go run' wrapper and leaves the real
+# server (still holding :8989) orphaned - confirmed in practice, it survived
+# a full Phase A teardown and made Phase B's real gnomonitoring fail to bind
+# the same port. Running the built binary directly means STUB_PID IS the
+# server, so 'kill "$STUB_PID"' actually frees the port.
+( cd "$STUB_DIR" && go build -o "$STUB_BIN" . )
+
+"$STUB_BIN" -listen :8989 -file "$STUB_DIR/scenarios/current.json" &
 STUB_PID=$!
-# Wait for the stub server to bind before katana starts polling it - poll
-# instead of a blind sleep so a cold 'go run' build cache doesn't race it.
+# Wait for the stub server to bind before katana starts polling it.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   curl -s --connect-timeout 1 http://localhost:8989/ -o /dev/null && break
   sleep 0.5
