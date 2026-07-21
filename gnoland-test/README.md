@@ -542,32 +542,18 @@ node identities. Acceptable for a devnet — there is no real data to preserve.
 ## Testing katana
 
 katana always runs in Docker here — there is no supported "run `./katana`
-locally" path. One command for a working chain, then one command to test:
+locally" path. From the repo root, one command runs every stub score band
+(eject/lower_vp/raise_vp/multi_eject/healthy) followed by the real-broadcast
+path against this devnet:
 
 ```bash
-cd gnoland-test
-make full-reinit-4                 # fresh chain, all 4 validators live + onboarded
-make stub-scenario NAME=eject      # or lower_vp / raise_vp / multi_eject / healthy
-make stub-up                       # terminal 1, foreground, leave running
+make launch-test-katana
 ```
 
-```bash
-# terminal 2, repo root:
-cp deploy/e2e/katana.config.stub.yaml.example deploy/e2e/katana.config.yaml
-# put a mnemonic in that file, then provision it on the live devnet (once per full-reinit):
-cd gnoland-test && make add-key NAME=katana-e2e MNEMONIC="<same mnemonic>" && cd ..
-docker compose -f docker-compose.e2e.yml up --build --no-deps katana
-```
+It reuses this devnet's `dev` key (no manual mnemonic/`add-key` step needed)
+and streams katana's logs live — Ctrl-C stops everything it started.
 
-Watch it with `docker logs -f katana-e2e`. Switch scenarios any time from
-`gnoland-test/` with `make stub-scenario NAME=...` — no restart needed, katana
-picks it up on its next `poll_interval`. **Stop the test** with
-`docker compose -f docker-compose.e2e.yml stop katana` (not Ctrl-C on a local
-process — there isn't one).
-
-This covers katana's own logic: every score band, `action_priority`,
-lifecycle gate, exceptions, both `dry_run` values. For the real-broadcast
-variant (genuine gnomonitoring + Postgres + real chain degradation, used for
-non-regression rather than day-to-day testing), the full config reference,
-and troubleshooting — see **[`../deploy/e2e/README.md`](../deploy/e2e/README.md)**,
+For a single scenario, a single phase, or any manual/debugging step — config
+reference, `add-key`, switching scenarios by hand, the real-broadcast
+walkthrough — see **[`../deploy/e2e/README.md`](../deploy/e2e/README.md)**,
 the single source of truth for testing katana.
