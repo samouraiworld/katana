@@ -68,10 +68,11 @@ columns). If `e2e-katana-data` was created by a pre-refactor katana, wipe it
 
 5. **Observe**
    - gnomonitoring ingests `chain=local` and, after a while,
-     `curl -s 'http://localhost:8989/missing_block?chain=local&period=current_week' | jq`
-     lists validator4's missed blocks;
-   - katana logs `ELIGIBLE …`, signs and broadcasts a GovDAO ejection proposal
-     via the in-container `gnokey`, then polls for the vote outcome;
+     `curl -s 'http://localhost:8989/api/reports/validators?chain=local' | jq`
+     shows validator4's computed health score dropping;
+   - katana logs the matched score-driven action, signs and broadcasts a
+     GovDAO ejection proposal via the in-container `gnokey`, then polls for
+     the vote outcome;
    - `curl -s http://localhost:8990/health` returns `ok`.
 
 ## Config
@@ -80,12 +81,12 @@ columns). If `e2e-katana-data` was created by a pre-refactor katana, wipe it
   points at the devnet by service name, Postgres on the `postgres` service.
 - katana: `katana.config.yaml` (git-ignored, copied from
   [`katana.config.yaml.example`](katana.config.yaml.example)) — broadcast-only,
-  `missed_blocks` only (public endpoint, no admin token).
+  `eject` action only, reading the public `reports_path` (no admin token).
 
 ## Going further
 
-- **critical_alerts:** enable it in the katana config and set
-  `gnomonitoring.api_token` (Clerk) — the alerts endpoint is admin-protected.
+- **lower_vp/raise_vp:** add them to the katana config's `proposal.actions`
+  and `action_priority` to exercise the VP-change actions alongside `eject`.
 - **Pinning gno:** `GNO_REF` must match the gno revision the devnet
   (`gnoland-test/GNO_REPO_PATH`) was built from, or the ejection `.gno` script
   broadcast by `gnokey maketx run` may not match the on-chain realm ABI.
