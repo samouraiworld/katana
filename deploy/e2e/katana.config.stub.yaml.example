@@ -1,0 +1,94 @@
+# katana e2e config TEMPLATE — dockerized katana, BUT pointed at
+# stub-gnomonitoring running on the HOST (gnoland-test/stub-gnomonitoring,
+# started with 'make stub-up') instead of the real gnomonitoring+postgres
+# services. This is the fast path for testing katana's own logic
+# (eject/lower_vp/raise_vp/dry_run/lifecycle gate/exceptions) with
+# deterministic fake scores, without waiting on real chain degradation.
+#
+# Run with (repo root):
+#   docker compose -f docker-compose.e2e.yml up --build --no-deps katana
+# ('--no-deps' skips starting gnomonitoring/postgres — see docker-compose.e2e.yml).
+# Switch scores any time from gnoland-test/: `make stub-scenario NAME=lower_vp`
+# (or eject/raise_vp/multi_eject/healthy) — no restart needed.
+#
+# Signing key: reuses the devnet's pre-provisioned 'dev' account (funded, sole
+# GovDAO T1 member from bootstrap.sh) instead of a dedicated key. 'make
+# launch-test-katana' copies gnoland-test/.gnokey-dev into katana's data
+# volume (as /app/data/dev-keybase) before starting the container, so
+# gnokey.mnemonic below stays empty and internal/keybase.Ensure is a no-op.
+# Running the stub path by hand instead of via launch-test-katana? Do that
+# copy yourself, or fall back to a dedicated key with
+# 'make -C gnoland-test add-key NAME=katana-e2e'.
+
+log_level: info
+poll_interval: 15s
+dry_run: false          # true = observe-only: evaluate + notify (attach .gno script + gnokey command), no broadcast
+
+gnomonitoring:
+  base_url: "http://host.docker.internal:8989"   # stub-gnomonitoring on the host
+  timeout_seconds: 10
+  reports_path: "/api/reports/validators"
+
+valopers_realm: "gno.land/r/gnops/valopers"
+
+gnokey:
+  bin: "gnokey"
+  key_name: "dev"
+  home: "/app/data/dev-keybase"
+  password: "devpassword123"                   # devnet-only throwaway keybase passphrase, set by bootstrap.sh
+  mnemonic: ""                                  # empty: reuses the pre-provisioned 'dev' keybase (see above)
+  gas_fee: "1000000ugnot"
+  gas_wanted: 100000000   # lower_vp/raise_vp scripts need more than eject alone (~26M used observed)
+
+proposal:
+  action_priority: [eject, lower_vp, raise_vp]
+  # 4 validators at voting_power=10 each (total=40) on this devnet: the default
+  # VP step targets ~9 (lower_vp) / ~11 (raise_vp) — min_voting_power=1 keeps
+  # the floor out of the way, max_voting_power_share=40 (ceiling=16) keeps the
+  # ceiling above the raise_vp target so it isn't clamped to a no-op.
+  min_voting_power: 1
+  max_voting_power_share: 40
+  # Short cooldown/backoff for fast iteration — a failed or rejected broadcast
+  # otherwise blocks re-testing the same scenario for a long time. Raise back
+  # towards production-like values (1h) when testing the lifecycle gate itself.
+  cooldown: 5m
+  rejected_backoff: 5m
+  max_rejections: 2
+  submit: run
+  actions:
+    eject:
+      score_below: 30
+      window: current_month
+    lower_vp:
+      score_below: 60
+      window: current_week
+    raise_vp:
+      score_at_or_above: 85
+      window: current_year
+
+vote_tracking:
+  vote_poll_interval: 15s
+  govdao_realm: "gno.land/r/gov/dao"
+  status_source: rpc
+
+notifications:
+  enabled: true
+  discord:
+    enabled: true
+    webhook_url: ""            # via env KATANA_DISCORD_WEBHOOK
+
+storage:
+  driver: sqlite
+  sqlite_path: "/app/data/katana-stub.db"
+
+web:
+  enabled: true
+  listen: ":8990"
+
+chains:
+  local:
+    rpc_endpoint: "http://validator:26657"
+    gnoweb_url: "http://localhost:8890"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"   # ignored by the stub, kept for parity
+    enabled: true

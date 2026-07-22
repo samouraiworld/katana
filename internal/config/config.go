@@ -26,7 +26,6 @@ type Config struct {
 	PollInterval  string        `yaml:"poll_interval"` // daemon cadence (global default)
 	Gnomonitoring Gnomonitoring `yaml:"gnomonitoring"`
 	Gnokey        Gnokey        `yaml:"gnokey"` // global proposing wallet
-	Conditions    Conditions    `yaml:"conditions"`
 	Proposal      Proposal      `yaml:"proposal"`
 	// DryRun is the global default for whether chains broadcast: false
 	// (default) broadcasts; true means every enabled chain rehearses instead
@@ -49,13 +48,12 @@ type Config struct {
 
 // Gnomonitoring points katana at a running gnomonitoring REST API.
 type Gnomonitoring struct {
-	BaseURL          string `yaml:"base_url"`
-	APIToken         string `yaml:"api_token"`
-	TimeoutSeconds   int    `yaml:"timeout_seconds"`
-	MissedBlocksPath string `yaml:"missed_blocks_path"`
-	AlertsPath       string `yaml:"alerts_path"`
-	InfoPath         string `yaml:"info_path"`
-	DiscoverChains   bool   `yaml:"discover_chains"`
+	BaseURL        string `yaml:"base_url"`
+	APIToken       string `yaml:"api_token"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	ReportsPath    string `yaml:"reports_path"`
+	InfoPath       string `yaml:"info_path"`
+	DiscoverChains bool   `yaml:"discover_chains"`
 }
 
 // Gnokey is a proposing wallet. Used only on the broadcast path. The global
@@ -100,51 +98,66 @@ func (g Gnokey) mergedWith(o Gnokey) Gnokey {
 	return g
 }
 
-// Conditions describes when a validator becomes eligible for an ejection
-// proposal. RequireAll combines enabled conditions as AND (true) or OR (false).
-type Conditions struct {
-	RequireAll     bool             `yaml:"require_all"`
-	MissedBlocks   MissedBlocksCond `yaml:"missed_blocks"`
-	CriticalAlerts CriticalCond     `yaml:"critical_alerts"`
-}
+// Score-driven action names: map keys for Proposal.Actions and the only
+// valid entries in Proposal.ActionPriority.
+const (
+	ActionEject   = "eject"
+	ActionLowerVP = "lower_vp"
+	ActionRaiseVP = "raise_vp"
+)
 
-// MissedBlocksCond triggers when missed blocks over Interval exceed Max.
-type MissedBlocksCond struct {
-	Enabled  bool   `yaml:"enabled"`
-	Max      int    `yaml:"max"`
-	Interval string `yaml:"interval"` // gnomonitoring period keyword
-}
-
-// CriticalCond triggers when CRITICAL alerts over Interval exceed Max.
-type CriticalCond struct {
-	Enabled  bool   `yaml:"enabled"`
-	Max      int    `yaml:"max"`
-	Interval string `yaml:"interval"` // Go duration
-}
-
-// Duration parses the critical-alert interval as a time.Duration.
-func (c CriticalCond) Duration() (time.Duration, error) {
-	return time.ParseDuration(c.Interval)
-}
-
-// Proposal describes the on-chain GovDAO ejection entrypoint plus the lifecycle
-// timers. The timers have global defaults, overridable per chain.
-type Proposal struct {
-	Cooldown        string `yaml:"cooldown"`
-	RejectedBackoff string `yaml:"rejected_backoff"`
-	MaxRejections   int    `yaml:"max_rejections"`
-	// Submit selects the on-chain submission method: "run" (a .gno script via
-	// gnokey maketx run — required for gno.land valset ejection) or "call" (a
-	// single MsgCall to RealmPkgPath.Function with Args).
-	Submit            string `yaml:"submit"`
-	RunScriptTemplate string `yaml:"run_script_template"`
-	// call-mode fields:
+// ActionConfig configures one score-driven action. Only the threshold field
+// relevant to that action's fixed semantics is read: eject/lower_vp use
+// ScoreBelow (score strictly below triggers), raise_vp uses ScoreAtOrAbove
+// (score at or above triggers). VPStepPercentOfSelf/OfTotal only apply to
+// lower_vp/raise_vp — see internal/rules for the dual-cap step formula.
+// ScoreBelow, ScoreAtOrAbove, VPStepPercentOfSelf and VPStepPercentOfTotal are
+// pointers so mergeActionDefault can tell "unset in this override" (nil) apart
+// from "explicitly configured as 0" — a plain int/float64 zero value would be
+// silently replaced by the built-in default in both cases.
+type ActionConfig struct {
+	ScoreBelow     *int `yaml:"score_below"`
+	ScoreAtOrAbove *int `yaml:"score_at_or_above"`
+	// Window is the gnomonitoring reporting period this action reads its
+	// score from: last_24h | current_week | current_month | current_year.
+	Window               string   `yaml:"window"`
+	VPStepPercentOfSelf  *float64 `yaml:"vp_step_percent_of_self"`
+	VPStepPercentOfTotal *float64 `yaml:"vp_step_percent_of_total"`
+	RunScriptTemplate    string   `yaml:"run_script_template"`
+	// call-mode fields (eject only; see internal/proposal doc comment):
 	RealmPkgPath string   `yaml:"realm_pkg_path"`
 	Function     string   `yaml:"function"`
 	Args         []string `yaml:"args"`
 
 	TitleTemplate       string `yaml:"title_template"`
 	DescriptionTemplate string `yaml:"description_template"`
+}
+
+// Proposal describes the score-driven action model plus the lifecycle
+// timers. The timers and VP bounds have global defaults, overridable per
+// chain (whole-block replace — see the Runtime doc comment).
+type Proposal struct {
+	// ActionPriority is the order Evaluate checks actions in; the first
+	// action whose threshold matches (on its own configured window) wins.
+	// Defaults to [eject, lower_vp, raise_vp].
+	ActionPriority []string `yaml:"action_priority"`
+	// MinVotingPower is an absolute floor: lower_vp never proposes a target
+	// below this. MaxVotingPowerShare is a ceiling expressed as % of the
+	// chain's total valset VP (portable across networks): raise_vp never
+	// proposes a target above it. Pointers so resolveProposalDefaults can
+	// tell "unset" apart from an explicit 0 (e.g. no floor at all).
+	MinVotingPower      *int64   `yaml:"min_voting_power"`
+	MaxVotingPowerShare *float64 `yaml:"max_voting_power_share"`
+
+	Cooldown        string `yaml:"cooldown"`
+	RejectedBackoff string `yaml:"rejected_backoff"`
+	MaxRejections   int    `yaml:"max_rejections"`
+	// Submit selects the on-chain submission method: "run" (a .gno script via
+	// gnokey maketx run) or "call" (a single MsgCall). "call" is eject-only —
+	// see validate().
+	Submit string `yaml:"submit"`
+
+	Actions map[string]ActionConfig `yaml:"actions"`
 }
 
 // VoteTracking configures the vote-watcher worker.
@@ -199,12 +212,11 @@ type ChainConfig struct {
 	// (with the ejection script and a ready-to-run gnokey command attached)
 	// instead. Meant both for rehearsing katana on a new network and as a
 	// standing manual-approval mode.
-	DryRun       *bool       `yaml:"dry_run"`
-	PollInterval string      `yaml:"poll_interval"`
-	Conditions   *Conditions `yaml:"conditions"`
-	Proposal     *Proposal   `yaml:"proposal"`
-	Gnokey       *Gnokey     `yaml:"gnokey"`
-	Exceptions   []string    `yaml:"exceptions"`
+	DryRun       *bool     `yaml:"dry_run"`
+	PollInterval string    `yaml:"poll_interval"`
+	Proposal     *Proposal `yaml:"proposal"`
+	Gnokey       *Gnokey   `yaml:"gnokey"`
+	Exceptions   []string  `yaml:"exceptions"`
 }
 
 // Runtime is the fully-resolved settings for one chain, global defaults merged
@@ -218,7 +230,6 @@ type Runtime struct {
 	DryRun             bool
 	PollInterval       time.Duration
 	VotePollInterval   time.Duration
-	Conditions         Conditions
 	Proposal           Proposal
 	Gnokey             Gnokey
 }
@@ -243,6 +254,28 @@ import (
 func main(cur realm) {
 	pr := validators.NewValidatorProposalRequest(cross(cur),
 		[]validators.ValoperChange{validators.NewValoperChange(address("{operator_address}"), 0)},
+		"{title}",
+		"{description}",
+	)
+	dao.MustCreateProposal(cross(cur), pr)
+}
+`
+
+// DefaultVPChangeScript is the gno.land valset voting-power-change script
+// used by lower_vp/raise_vp in "run" submission mode. Same crossing-script
+// pattern as DefaultEjectScript, but with an arbitrary {target_power}
+// instead of a hardcoded 0. Placeholders: {operator_address} {target_power}
+// {title} {description}.
+const DefaultVPChangeScript = `package main
+
+import (
+	"gno.land/r/gov/dao"
+	validators "gno.land/r/sys/validators/v3"
+)
+
+func main(cur realm) {
+	pr := validators.NewValidatorProposalRequest(cross(cur),
+		[]validators.ValoperChange{validators.NewValoperChange(address("{operator_address}"), {target_power})},
 		"{title}",
 		"{description}",
 	)
@@ -290,8 +323,7 @@ func (c *Config) applyDefaults() {
 	if c.Gnomonitoring.TimeoutSeconds == 0 {
 		c.Gnomonitoring.TimeoutSeconds = 10
 	}
-	setIfEmpty(&c.Gnomonitoring.MissedBlocksPath, "/missing_block")
-	setIfEmpty(&c.Gnomonitoring.AlertsPath, "/admin/alerts")
+	setIfEmpty(&c.Gnomonitoring.ReportsPath, "/api/reports/validators")
 	setIfEmpty(&c.Gnomonitoring.InfoPath, "/info")
 	setIfEmpty(&c.Gnokey.Bin, "gnokey")
 	setIfEmpty(&c.Gnokey.GasFee, "1000000ugnot")
@@ -301,7 +333,7 @@ func (c *Config) applyDefaults() {
 	setIfEmpty(&c.Proposal.Cooldown, "720h")
 	setIfEmpty(&c.Proposal.RejectedBackoff, "720h")
 	setIfEmpty(&c.Proposal.Submit, "run")
-	setIfEmpty(&c.Proposal.RunScriptTemplate, DefaultEjectScript)
+	c.Proposal = resolveProposalDefaults(c.Proposal)
 	setIfEmpty(&c.VoteTracking.VotePollInterval, "5m")
 	setIfEmpty(&c.VoteTracking.GovdaoRealm, "gno.land/r/gov/dao")
 	setIfEmpty(&c.VoteTracking.StatusSource, "rpc")
@@ -379,16 +411,6 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		return Runtime{}, fmt.Errorf("vote_poll_interval: %w", err)
 	}
 
-	cond := c.Conditions
-	if ch.Conditions != nil {
-		cond = *ch.Conditions
-	}
-	if cond.CriticalAlerts.Enabled {
-		if _, err := cond.CriticalAlerts.Duration(); err != nil {
-			return Runtime{}, fmt.Errorf("critical_alerts.interval: %w", err)
-		}
-	}
-
 	dryRun := c.DryRun
 	if ch.DryRun != nil {
 		dryRun = *ch.DryRun
@@ -398,11 +420,45 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 	if ch.Proposal != nil {
 		prop = *ch.Proposal
 	}
+	// A per-chain proposal: override is a whole-block replace and bypasses
+	// applyDefaults, so re-apply the action defaults here: a chain that
+	// overrides proposal: to tweak only e.g. cooldown must not silently end
+	// up with an empty action_priority/actions and zeroed VP bounds. Fields
+	// the override already set are left untouched.
+	prop = resolveProposalDefaults(prop)
 	if _, err := parseDur(prop.Cooldown); err != nil {
 		return Runtime{}, fmt.Errorf("proposal.cooldown: %w", err)
 	}
 	if _, err := parseDur(prop.RejectedBackoff); err != nil {
 		return Runtime{}, fmt.Errorf("proposal.rejected_backoff: %w", err)
+	}
+	for name, ac := range prop.Actions {
+		switch ac.Window {
+		case "last_24h", "current_week", "current_month", "current_year":
+		default:
+			return Runtime{}, fmt.Errorf("proposal.actions.%s.window: %q is not a known gnomonitoring period", name, ac.Window)
+		}
+		// The dual-cap step fields must agree in sign with the action's
+		// direction: a mismatched sign lets vpTarget's smaller-magnitude pick
+		// silently flip a lower_vp into a raise (or vice versa).
+		switch name {
+		case ActionLowerVP:
+			if *ac.VPStepPercentOfSelf > 0 || *ac.VPStepPercentOfTotal > 0 {
+				return Runtime{}, fmt.Errorf("proposal.actions.lower_vp: vp_step_percent_of_self/of_total must be <= 0, got %v/%v", *ac.VPStepPercentOfSelf, *ac.VPStepPercentOfTotal)
+			}
+		case ActionRaiseVP:
+			if *ac.VPStepPercentOfSelf < 0 || *ac.VPStepPercentOfTotal < 0 {
+				return Runtime{}, fmt.Errorf("proposal.actions.raise_vp: vp_step_percent_of_self/of_total must be >= 0, got %v/%v", *ac.VPStepPercentOfSelf, *ac.VPStepPercentOfTotal)
+			}
+		}
+	}
+	for _, name := range prop.ActionPriority {
+		if name != ActionEject && name != ActionLowerVP && name != ActionRaiseVP {
+			return Runtime{}, fmt.Errorf("proposal.action_priority: unknown action %q", name)
+		}
+		if prop.Submit == "call" && name != ActionEject {
+			return Runtime{}, fmt.Errorf("proposal.submit \"call\" is only supported for the eject action; %q must use \"run\"", name)
+		}
 	}
 
 	gk := c.Gnokey
@@ -422,7 +478,6 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		DryRun:             dryRun,
 		PollInterval:       poll,
 		VotePollInterval:   votePoll,
-		Conditions:         cond,
 		Proposal:           prop,
 		Gnokey:             gk,
 	}, nil
@@ -504,4 +559,95 @@ func setIfEmpty(dst *string, def string) {
 	if *dst == "" {
 		*dst = def
 	}
+}
+
+// resolveProposalDefaults fills in the score-driven action defaults
+// (ActionPriority, MinVotingPower, MaxVotingPowerShare, Actions) on p if they
+// are unset. Applied to the global proposal in applyDefaults, and again in
+// Runtime on the resolved per-chain Proposal: a per-chain proposal: override
+// is a whole-block replace (see the Runtime doc comment) that bypasses
+// applyDefaults entirely, so without this second pass a chain overriding
+// proposal: to tweak a single field (e.g. cooldown) would silently end up
+// with an empty ActionPriority/Actions and zeroed VP bounds — i.e. no
+// proposal ever produced for that chain, with no error. Fields the override
+// DOES set are left untouched; only zero-valued fields are defaulted.
+func resolveProposalDefaults(p Proposal) Proposal {
+	if len(p.ActionPriority) == 0 {
+		p.ActionPriority = []string{ActionEject, ActionLowerVP, ActionRaiseVP}
+	}
+	if p.MinVotingPower == nil {
+		p.MinVotingPower = int64Ptr(100)
+	}
+	if p.MaxVotingPowerShare == nil {
+		p.MaxVotingPowerShare = float64Ptr(15)
+	}
+	if p.Actions == nil {
+		p.Actions = map[string]ActionConfig{}
+	}
+	p.Actions[ActionEject] = mergeActionDefault(p.Actions[ActionEject], ActionConfig{
+		ScoreBelow: intPtr(30), Window: "current_month",
+		RunScriptTemplate:   DefaultEjectScript,
+		TitleTemplate:       "Eject validator {moniker} ({address}) from the valset",
+		DescriptionTemplate: "Automated ejection proposal generated by katana.\nValidator: {moniker} ({address})\nScore: {score}/100 (tier {tier}) over {window}\nReason: {reason}\n",
+	})
+	p.Actions[ActionLowerVP] = mergeActionDefault(p.Actions[ActionLowerVP], ActionConfig{
+		ScoreBelow: intPtr(60), Window: "current_week",
+		VPStepPercentOfSelf: float64Ptr(-20), VPStepPercentOfTotal: float64Ptr(-2),
+		RunScriptTemplate:   DefaultVPChangeScript,
+		TitleTemplate:       "Lower voting power of validator {moniker} ({address})",
+		DescriptionTemplate: "Automated voting-power reduction generated by katana.\nValidator: {moniker} ({address})\nScore: {score}/100 (tier {tier}) over {window}\nVoting power: {current_power} -> {target_power}\nReason: {reason}\n",
+	})
+	p.Actions[ActionRaiseVP] = mergeActionDefault(p.Actions[ActionRaiseVP], ActionConfig{
+		ScoreAtOrAbove: intPtr(85), Window: "current_year",
+		VPStepPercentOfSelf: float64Ptr(20), VPStepPercentOfTotal: float64Ptr(2),
+		RunScriptTemplate:   DefaultVPChangeScript,
+		TitleTemplate:       "Raise voting power of validator {moniker} ({address})",
+		DescriptionTemplate: "Automated voting-power increase generated by katana.\nValidator: {moniker} ({address})\nScore: {score}/100 (tier {tier}) over {window}\nVoting power: {current_power} -> {target_power}\nReason: {reason}\n",
+	})
+	return p
+}
+
+func intPtr(i int) *int             { return &i }
+func int64Ptr(i int64) *int64       { return &i }
+func float64Ptr(f float64) *float64 { return &f }
+
+// mergeActionDefault fills any unset (nil, or empty for strings/slices) field
+// of cur from def, so a chain or global override that only sets e.g.
+// score_below still gets sane defaults for window/steps/templates. Pointer
+// fields distinguish "unset" from an explicit zero value.
+func mergeActionDefault(cur, def ActionConfig) ActionConfig {
+	if cur.ScoreBelow == nil {
+		cur.ScoreBelow = def.ScoreBelow
+	}
+	if cur.ScoreAtOrAbove == nil {
+		cur.ScoreAtOrAbove = def.ScoreAtOrAbove
+	}
+	if cur.Window == "" {
+		cur.Window = def.Window
+	}
+	if cur.VPStepPercentOfSelf == nil {
+		cur.VPStepPercentOfSelf = def.VPStepPercentOfSelf
+	}
+	if cur.VPStepPercentOfTotal == nil {
+		cur.VPStepPercentOfTotal = def.VPStepPercentOfTotal
+	}
+	if cur.RunScriptTemplate == "" {
+		cur.RunScriptTemplate = def.RunScriptTemplate
+	}
+	if cur.RealmPkgPath == "" {
+		cur.RealmPkgPath = def.RealmPkgPath
+	}
+	if cur.Function == "" {
+		cur.Function = def.Function
+	}
+	if len(cur.Args) == 0 {
+		cur.Args = def.Args
+	}
+	if cur.TitleTemplate == "" {
+		cur.TitleTemplate = def.TitleTemplate
+	}
+	if cur.DescriptionTemplate == "" {
+		cur.DescriptionTemplate = def.DescriptionTemplate
+	}
+	return cur
 }

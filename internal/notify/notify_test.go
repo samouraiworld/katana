@@ -41,6 +41,47 @@ func TestMessage(t *testing.T) {
 	}
 }
 
+func TestMessage_LowerVPSent(t *testing.T) {
+	msg := Message(EventSent, Info{
+		Chain: "test6", Moniker: "bad-node", Address: "g1bad",
+		Action: config.ActionLowerVP, CurrentPower: 1000, TargetPower: 600, VPDeltaPercent: -2.0,
+	})
+	want := "A proposal for validator bad-node (g1bad) on test6 has been sent to lower its voting power from 1000 to 600 (-2.0% of total valset VP)."
+	if msg != want {
+		t.Errorf("Message = %q, want %q", msg, want)
+	}
+}
+
+func TestMessage_RaiseVPAccepted(t *testing.T) {
+	msg := Message(EventAccepted, Info{
+		Chain: "test6", Moniker: "good-node", Address: "g1good",
+		Action: config.ActionRaiseVP, CurrentPower: 1000, TargetPower: 1400,
+	})
+	want := "GovDAO accepted the proposal for validator good-node (g1good) on test6: its voting power has been raised from 1000 to 1400."
+	if msg != want {
+		t.Errorf("Message = %q, want %q", msg, want)
+	}
+}
+
+func TestMessage_LowerVPRejected(t *testing.T) {
+	msg := Message(EventRejected, Info{
+		Chain: "test6", Moniker: "bad-node", Address: "g1bad",
+		Action: config.ActionLowerVP, CurrentPower: 1000, RejectedBackoff: 720 * time.Hour,
+	})
+	want := "GovDAO rejected the proposal for validator bad-node (g1bad) on test6 to lower its voting power: it stays at 1000. A new proposal may be sent after 720h0m0s."
+	if msg != want {
+		t.Errorf("Message = %q, want %q", msg, want)
+	}
+}
+
+func TestMessage_EjectUnchanged(t *testing.T) {
+	msg := Message(EventSent, Info{Chain: "test6", Moniker: "bad-node", Address: "g1bad", Action: config.ActionEject})
+	want := "A proposal for validator bad-node (g1bad) on test6 has been sent to remove it from the valset."
+	if msg != want {
+		t.Errorf("Message = %q, want %q (eject wording must not change)", msg, want)
+	}
+}
+
 func TestDispatchDiscord(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,5 +164,151 @@ func TestDispatchWouldEjectAttachesFile(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, "gnokey maketx run") {
 		t.Errorf("multipart body missing the command in payload_json:\n%s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"embeds"`) {
+		t.Errorf("would_eject multipart payload_json should still carry an embed:\n%s", gotBody)
+	}
+}
+
+func TestDispatchDiscordEmbed(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	n := New(config.Notifications{
+		Enabled: true,
+		Discord: config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
+	})
+	n.Dispatch(context.Background(), EventSent, Info{
+		Chain: "chain1", Address: "g1x", Action: config.ActionRaiseVP,
+		CurrentPower: 100, TargetPower: 140,
+	})
+	if !strings.Contains(gotBody, `"color":3066993`) {
+		t.Errorf("discord body missing expected color: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "Voting power increase submitted — g1x (chain1)") {
+		t.Errorf("discord body missing expected title: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "embeds") {
+		t.Errorf("discord body should use an embeds array, not bare content: %s", gotBody)
+	}
+}
+
+func TestDispatchSlackAttachment(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	n := New(config.Notifications{
+		Enabled: true,
+		Slack:   config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
+	})
+	n.Dispatch(context.Background(), EventSent, Info{
+		Chain: "chain1", Address: "g1x", Action: config.ActionLowerVP,
+		CurrentPower: 1000, TargetPower: 600,
+	})
+	if !strings.Contains(gotBody, `"color":"#E67E22"`) {
+		t.Errorf("slack body missing expected color: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "Voting power reduction submitted — g1x (chain1)") {
+		t.Errorf("slack body missing expected title: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "attachments") {
+		t.Errorf("slack body should use an attachments array, not bare text: %s", gotBody)
+	}
+}
+
+func TestTelegramText(t *testing.T) {
+	in := Info{Chain: "chain1", Action: config.ActionRaiseVP, CurrentPower: 100, TargetPower: 140}
+	msg := Message(EventSent, in)
+	title := Title(EventSent, in)
+	want := "🟢 " + title + "\n\n" + msg
+	got := telegramText(EventSent, in)
+	if got != want {
+		t.Errorf("telegramText = %q, want %q", got, want)
+	}
+}
+
+func TestTitle(t *testing.T) {
+	cases := []struct {
+		name    string
+		event   Event
+		action  string
+		moniker string
+		address string
+		want    string
+	}{
+		{"raise sent", EventSent, config.ActionRaiseVP, "val1", "", "Voting power increase submitted — val1 (chain1)"},
+		{"raise accepted", EventAccepted, config.ActionRaiseVP, "val1", "", "Voting power increase accepted — val1 (chain1)"},
+		{"raise rejected", EventRejected, config.ActionRaiseVP, "val1", "", "Voting power increase rejected — val1 (chain1)"},
+		{"raise dry-run", EventWouldEject, config.ActionRaiseVP, "val1", "", "Voting power increase (dry-run) — val1 (chain1)"},
+		{"lower sent", EventSent, config.ActionLowerVP, "val1", "", "Voting power reduction submitted — val1 (chain1)"},
+		{"lower accepted", EventAccepted, config.ActionLowerVP, "val1", "", "Voting power reduction accepted — val1 (chain1)"},
+		{"lower rejected", EventRejected, config.ActionLowerVP, "val1", "", "Voting power reduction rejected — val1 (chain1)"},
+		{"lower dry-run", EventWouldEject, config.ActionLowerVP, "val1", "", "Voting power reduction (dry-run) — val1 (chain1)"},
+		{"eject sent", EventSent, config.ActionEject, "val1", "", "Validator ejection submitted — val1 (chain1)"},
+		{"eject accepted", EventAccepted, config.ActionEject, "val1", "", "Validator ejection accepted — val1 (chain1)"},
+		{"eject rejected", EventRejected, config.ActionEject, "val1", "", "Validator ejection rejected — val1 (chain1)"},
+		{"eject dry-run", EventWouldEject, config.ActionEject, "val1", "", "Validator ejection (dry-run) — val1 (chain1)"},
+		{"unknown action", EventSent, "", "val1", "", "katana event submitted — val1 (chain1)"},
+		{"moniker falls back to address", EventSent, config.ActionEject, "", "g1x", "Validator ejection submitted — g1x (chain1)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Title(c.event, Info{Chain: "chain1", Action: c.action, Moniker: c.moniker, Address: c.address})
+			if got != c.want {
+				t.Errorf("Title(%s, action=%q) = %q, want %q", c.event, c.action, got, c.want)
+			}
+		})
+	}
+}
+
+func TestEmbedColor(t *testing.T) {
+	cases := map[string]int{
+		config.ActionRaiseVP: 3066993,
+		config.ActionLowerVP: 15105570,
+		config.ActionEject:   15158332,
+		"":                   9807270,
+	}
+	for action, want := range cases {
+		if got := embedColor(action); got != want {
+			t.Errorf("embedColor(%q) = %d, want %d", action, got, want)
+		}
+	}
+}
+
+func TestSlackColorHex(t *testing.T) {
+	cases := map[string]string{
+		config.ActionRaiseVP: "#2ECC71",
+		config.ActionLowerVP: "#E67E22",
+		config.ActionEject:   "#E74C3C",
+		"":                   "#95A5A6",
+	}
+	for action, want := range cases {
+		if got := slackColorHex(action); got != want {
+			t.Errorf("slackColorHex(%q) = %q, want %q", action, got, want)
+		}
+	}
+}
+
+func TestTelegramEmoji(t *testing.T) {
+	cases := map[string]string{
+		config.ActionRaiseVP: "🟢",
+		config.ActionLowerVP: "🟠",
+		config.ActionEject:   "🔴",
+		"":                   "⚪",
+	}
+	for action, want := range cases {
+		if got := telegramEmoji(action); got != want {
+			t.Errorf("telegramEmoji(%q) = %q, want %q", action, got, want)
+		}
 	}
 }

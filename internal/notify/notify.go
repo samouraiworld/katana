@@ -40,6 +40,14 @@ type Info struct {
 	GnowebURL       string
 	ProposalID      string
 	RejectedBackoff time.Duration
+	// Action is the score-driven action this notification is about: eject |
+	// lower_vp | raise_vp. CurrentPower/TargetPower are 0 for eject.
+	// VPDeltaPercent is the signed % of the chain's total valset VP this
+	// move represents (only used by the "sent" wording).
+	Action         string
+	CurrentPower   int64
+	TargetPower    int64
+	VPDeltaPercent float64
 	// Observe (would_eject) fields: the proposal script/expression, the filename
 	// it is attached under, and the ready-to-run gnokey command to broadcast it.
 	ProposalCode     string
@@ -67,19 +75,16 @@ func Message(event Event, in Info) string {
 	var msg string
 	switch event {
 	case EventSent:
-		msg = fmt.Sprintf("A proposal for validator %s (%s) on %s has been sent to remove it from the valset.",
-			in.display(), in.Address, in.Chain)
+		msg = sentText(in)
 	case EventAccepted:
-		msg = fmt.Sprintf("GovDAO accepted the proposal for validator %s (%s) on %s: it has been removed from the valset.",
-			in.display(), in.Address, in.Chain)
+		msg = acceptedText(in)
 	case EventRejected:
-		msg = fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
-			in.display(), in.Address, in.Chain, in.RejectedBackoff)
+		msg = rejectedText(in)
 	case EventWouldEject:
-		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for ejection, but dry_run is enabled — nothing was broadcast.",
-			in.display(), in.Address, in.Chain)
+		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for %s, but dry_run is enabled — nothing was broadcast.",
+			in.display(), in.Address, in.Chain, actionNoun(in.Action))
 		if in.GnokeyCommand != "" {
-			msg += "\nTo broadcast it manually, run:\n```\n" + in.GnokeyCommand + "\n```\nThe ejection script is included with this notification (attached, or inline below if your channel doesn't support attachments)."
+			msg += "\nTo broadcast it manually, run:\n```\n" + in.GnokeyCommand + "\n```\nThe proposal script is included with this notification (attached, or inline below if your channel doesn't support attachments)."
 		}
 		return msg
 	default:
@@ -89,6 +94,111 @@ func Message(event Event, in Info) string {
 		msg += " " + link
 	}
 	return msg
+}
+
+func isVPAction(action string) bool {
+	return action == config.ActionLowerVP || action == config.ActionRaiseVP
+}
+
+func vpVerb(action string, past bool) string {
+	if action == config.ActionRaiseVP {
+		if past {
+			return "raised"
+		}
+		return "raise"
+	}
+	if past {
+		return "lowered"
+	}
+	return "lower"
+}
+
+func sentText(in Info) string {
+	if isVPAction(in.Action) {
+		return fmt.Sprintf("A proposal for validator %s (%s) on %s has been sent to %s its voting power from %d to %d (%+.1f%% of total valset VP).",
+			in.display(), in.Address, in.Chain, vpVerb(in.Action, false), in.CurrentPower, in.TargetPower, in.VPDeltaPercent)
+	}
+	return fmt.Sprintf("A proposal for validator %s (%s) on %s has been sent to remove it from the valset.",
+		in.display(), in.Address, in.Chain)
+}
+
+func acceptedText(in Info) string {
+	if isVPAction(in.Action) {
+		return fmt.Sprintf("GovDAO accepted the proposal for validator %s (%s) on %s: its voting power has been %s from %d to %d.",
+			in.display(), in.Address, in.Chain, vpVerb(in.Action, true), in.CurrentPower, in.TargetPower)
+	}
+	return fmt.Sprintf("GovDAO accepted the proposal for validator %s (%s) on %s: it has been removed from the valset.",
+		in.display(), in.Address, in.Chain)
+}
+
+func rejectedText(in Info) string {
+	if isVPAction(in.Action) {
+		return fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s to %s its voting power: it stays at %d. A new proposal may be sent after %s.",
+			in.display(), in.Address, in.Chain, vpVerb(in.Action, false), in.CurrentPower, in.RejectedBackoff)
+	}
+	return fmt.Sprintf("GovDAO rejected the proposal for validator %s (%s) on %s: it stays in the valset. A new proposal may be sent after %s.",
+		in.display(), in.Address, in.Chain, in.RejectedBackoff)
+}
+
+// actionMeta groups every per-action display property (used to render the
+// message noun, the embed/attachment title, and each channel's color/emoji)
+// in one place, so a future action only needs one new map entry instead of
+// five parallel switches that can silently drift out of sync.
+type actionMeta struct {
+	noun  string
+	label string
+	rgb   int
+	hex   string
+	emoji string
+}
+
+var actionMetas = map[string]actionMeta{
+	config.ActionEject:   {noun: "ejection", label: "Validator ejection", rgb: 15158332, hex: "#E74C3C", emoji: "🔴"},
+	config.ActionLowerVP: {noun: "a voting-power reduction", label: "Voting power reduction", rgb: 15105570, hex: "#E67E22", emoji: "🟠"},
+	config.ActionRaiseVP: {noun: "a voting-power increase", label: "Voting power increase", rgb: 3066993, hex: "#2ECC71", emoji: "🟢"},
+}
+
+// unknownActionMeta is the fallback for an empty/unrecognized action. The
+// noun still reads as "ejection" (Message's EventWouldEject wording predates
+// the Action field and always assumed eject when unset); colors/label render
+// as a neutral, unbranded event instead.
+var unknownActionMeta = actionMeta{noun: "ejection", label: "katana event", rgb: 9807270, hex: "#95A5A6", emoji: "⚪"}
+
+func metaFor(action string) actionMeta {
+	if m, ok := actionMetas[action]; ok {
+		return m
+	}
+	return unknownActionMeta
+}
+
+func actionNoun(action string) string    { return metaFor(action).noun }
+func actionLabel(action string) string   { return metaFor(action).label }
+func embedColor(action string) int       { return metaFor(action).rgb }
+func slackColorHex(action string) string { return metaFor(action).hex }
+func telegramEmoji(action string) string { return metaFor(action).emoji }
+
+func stageSuffix(event Event) string {
+	switch event {
+	case EventSent:
+		return "submitted"
+	case EventAccepted:
+		return "accepted"
+	case EventRejected:
+		return "rejected"
+	case EventWouldEject:
+		return "(dry-run)"
+	default:
+		return string(event)
+	}
+}
+
+// Title renders the short embed/attachment title: the action label, the
+// lifecycle stage, the validator (moniker, falling back to address), and the
+// chain. Color (embedColor/slackColorHex/telegramEmoji) is a function of
+// Action alone; Title additionally varies by Event so the stage is visible
+// without reading the body.
+func Title(event Event, in Info) string {
+	return fmt.Sprintf("%s %s — %s (%s)", actionLabel(in.Action), stageSuffix(event), in.display(), in.Chain)
 }
 
 // Result is the per-channel outcome of a Dispatch.
@@ -122,6 +232,7 @@ func (n *Notifier) Dispatch(ctx context.Context, event Event, in Info) []Result 
 		return nil
 	}
 	msg := Message(event, in)
+	title := Title(event, in)
 	// Observe notifications ship the proposal as a downloadable file where the
 	// channel supports it (Discord, Telegram); Slack webhooks cannot upload, so
 	// they fall back to the code inline.
@@ -130,13 +241,14 @@ func (n *Notifier) Dispatch(ctx context.Context, event Event, in Info) []Result 
 
 	if n.cfg.Discord.Enabled {
 		var err error
+		embed := map[string]any{"title": title, "description": msg, "color": embedColor(in.Action)}
 		if attach {
-			payload, _ := json.Marshal(map[string]string{"content": msg})
+			payload, _ := json.Marshal(map[string]any{"embeds": []any{embed}})
 			err = n.postMultipart(ctx, n.cfg.Discord.WebhookURL,
 				map[string]string{"payload_json": string(payload)},
 				"files[0]", in.ProposalFilename, in.ProposalCode)
 		} else {
-			err = n.postJSON(ctx, n.cfg.Discord.WebhookURL, map[string]string{"content": msg})
+			err = n.postJSON(ctx, n.cfg.Discord.WebhookURL, map[string]any{"embeds": []any{embed}})
 		}
 		results = append(results, result("discord", host(n.cfg.Discord.WebhookURL), err))
 	}
@@ -145,26 +257,36 @@ func (n *Notifier) Dispatch(ctx context.Context, event Event, in Info) []Result 
 		if attach {
 			text += "\n```\n" + truncate(in.ProposalCode, 1500) + "\n```"
 		}
-		err := n.postJSON(ctx, n.cfg.Slack.WebhookURL, map[string]string{"text": text})
+		attachment := map[string]any{
+			"color": slackColorHex(in.Action), "title": title, "text": text, "fallback": text,
+		}
+		err := n.postJSON(ctx, n.cfg.Slack.WebhookURL, map[string]any{"attachments": []any{attachment}})
 		results = append(results, result("slack", host(n.cfg.Slack.WebhookURL), err))
 	}
 	if n.cfg.Telegram.Enabled {
+		text := telegramText(event, in)
 		var err error
 		if attach {
 			endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", n.cfg.Telegram.BotToken)
 			err = n.postMultipart(ctx, endpoint,
-				map[string]string{"chat_id": n.cfg.Telegram.ChatID, "caption": msg},
+				map[string]string{"chat_id": n.cfg.Telegram.ChatID, "caption": text},
 				"document", in.ProposalFilename, in.ProposalCode)
 		} else {
 			endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", n.cfg.Telegram.BotToken)
 			err = n.postJSON(ctx, endpoint, map[string]string{
 				"chat_id": n.cfg.Telegram.ChatID,
-				"text":    msg,
+				"text":    text,
 			})
 		}
 		results = append(results, result("telegram", n.cfg.Telegram.ChatID, err))
 	}
 	return results
+}
+
+// telegramText prefixes the message with a colored-emoji marker and the
+// title, since Telegram's Bot API has no color concept for plain messages.
+func telegramText(event Event, in Info) string {
+	return fmt.Sprintf("%s %s\n\n%s", telegramEmoji(in.Action), Title(event, in), Message(event, in))
 }
 
 // postMultipart POSTs a multipart/form-data body: the string fields plus one

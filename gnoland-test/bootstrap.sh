@@ -163,8 +163,8 @@ else
 fi
 KEYLIST=$(docker run --rm --user "$DOCKER_USER" -v "$PWD/.gnokey-dev:/gnoroot/keybase" \
   gno-gnokey:local list -home /gnoroot/keybase 2>/dev/null)
-DEV_ADDR=$(echo "$KEYLIST" | grep "^0\." | sed -n 's/.*addr: \(g1[a-z0-9]*\).*/\1/p')
-V4OP_ADDR=$(echo "$KEYLIST" | grep " v4op " | sed -n 's/.*addr: \(g1[a-z0-9]*\).*/\1/p')
+DEV_ADDR=$(echo "$KEYLIST" | grep " dev (" | sed -n 's/.*addr: \(g1[a-z0-9]*\).*/\1/p')
+V4OP_ADDR=$(echo "$KEYLIST" | grep " v4op (" | sed -n 's/.*addr: \(g1[a-z0-9]*\).*/\1/p')
 echo "    dev  addr=$DEV_ADDR"
 echo "    v4op addr=$V4OP_ADDR"
 

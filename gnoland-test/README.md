@@ -9,7 +9,7 @@ production — in particular for validating the
 It ships:
 
 - **validator / validator2 / validator3** — genesis validators
-  (`samourai-crew-1/2/3`, voting power 10/10/11)
+  (`samourai-crew-1/2/3`, voting power 10/10/10)
 - **validator4** — a 4th identity (`samourai-crew-4`) reserved for the
   Phase 2 "new validator via GovDAO" scenario, not part of the genesis
   validator set, started on demand via the `phase2` compose profile
@@ -97,6 +97,12 @@ make reinit        # keep identities, restart chain from existing genesis
 make clean-all
 make full-reinit   # bootstrap (new keys+genesis) + purge dev DB + start
 ```
+
+**`full-reinit` alone does not bring up validator4.** It's `phase2`
+profile-gated (see the service list above) and not a valoper until
+`scenario1` registers + onboards it via GovDAO. Use **`make full-reinit-4`**
+(= `full-reinit` + `scenario1`) to get a fresh chain with all 4 validators
+live and in the valset in one command.
 
 > **⚠️ Restart the backend after any reset.** `gnomonitoring-backend` keeps the
 > last-seen block height per chain in memory. When you reset the chain under a
@@ -221,9 +227,10 @@ participation tracking, alerts, GovDAO watcher, Prometheus metrics). They
 assume gnomonitoring is running against `chain=local` as described above and
 the chain is healthy (see "Resetting the chain" if not).
 
-Genesis validator set and voting power: samourai-crew-1/2/3 = 10/10/11 (total
-31). A strict majority above 2/3 of 31 is 21, so in theory any 2 of the 3
-genesis validators can keep the chain alive without the third.
+Genesis validator set and voting power: samourai-crew-1/2/3 = 10/10/10 (total
+30, `generate-genesis.sh` hardcodes `--power 10` for all three). A strict
+majority above 2/3 of 30 is 20, so no 2 of the 3 genesis validators reach
+supermajority without the third (see Scenario 3).
 
 A `Makefile` in this directory wraps the chain-lifecycle and scenario commands
 — run `make help` for the full list. Available scenarios:
@@ -489,8 +496,8 @@ Exercises gnomonitoring's behavior when the chain stops producing blocks
 entirely — the global stagnation/RPC-error alert path described in
 `CLAUDE.md` under "Known Limitations".
 
-With voting power 10/10/11 (total 31), more than 2/3 is 21. Stopping **any
-2** of the 3 genesis validators leaves at most 11/31 ≈ 35%, well below the
+With voting power 10/10/10 (total 30), more than 2/3 is 20. Stopping **any
+2** of the 3 genesis validators leaves at most 10/30 ≈ 33%, well below the
 66.67% supermajority CometBFT needs to commit blocks — the chain halts
 deterministically:
 
@@ -531,3 +538,27 @@ make clean-all && make full-reinit
 
 This wipes chain state while keeping (reinit) or regenerating (clean-all) the
 node identities. Acceptable for a devnet — there is no real data to preserve.
+
+## Testing katana
+
+katana always runs in Docker here — there is no supported "run `./katana`
+locally" path. From the repo root, one command runs every stub score band
+(healthy/eject/lower_vp/raise_vp/multi_eject) followed by the real-broadcast
+path against this devnet:
+
+```bash
+make launch-test-katana
+```
+
+It reuses this devnet's `dev` key (no manual mnemonic/`add-key` step needed),
+resets katana's own SQLite history before *each* scenario (several scenarios
+target the same devnet validator, so a fresh lifecycle state per scenario is
+what lets each one actually broadcast instead of finding that validator
+already gate-blocked by the previous scenario), and streams katana's logs
+live — Ctrl-C stops everything it started. Add `DRY_RUN=true` to rehearse
+(evaluate + notify, never broadcast) instead.
+
+For a single scenario, a single phase, or any manual/debugging step — config
+reference, `add-key`, switching scenarios by hand, the real-broadcast
+walkthrough — see **[`../deploy/e2e/README.md`](../deploy/e2e/README.md)**,
+the single source of truth for testing katana.

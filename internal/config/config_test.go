@@ -17,11 +17,6 @@ gnokey:
   key_name: "global-key"
   password: "global-pass"
   gas_fee: "1000000ugnot"
-conditions:
-  critical_alerts:
-    enabled: true
-    max: 3
-    interval: 168h
 proposal:
   cooldown: 720h
   rejected_backoff: 240h
@@ -55,6 +50,300 @@ func writeConfig(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestActionDefaultsAndOverride(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "http://localhost:8989"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    lower_vp:
+      score_below: 55
+chains:
+  test:
+    rpc_endpoint: "http://x"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+    dry_run: true
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+
+	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
+		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
+	}
+	if *rt.Proposal.MinVotingPower != 100 {
+		t.Errorf("MinVotingPower = %d, want default 100", *rt.Proposal.MinVotingPower)
+	}
+	if *rt.Proposal.MaxVotingPowerShare != 15 {
+		t.Errorf("MaxVotingPowerShare = %v, want default 15", *rt.Proposal.MaxVotingPowerShare)
+	}
+
+	eject := rt.Proposal.Actions[ActionEject]
+	if *eject.ScoreBelow != 30 || eject.Window != "current_month" {
+		t.Errorf("eject defaults = %+v, want score_below=30 window=current_month", eject)
+	}
+	if eject.RunScriptTemplate != DefaultEjectScript {
+		t.Errorf("eject run_script_template not defaulted to DefaultEjectScript")
+	}
+
+	// User set only score_below; window/steps/templates must still be defaulted.
+	lower := rt.Proposal.Actions[ActionLowerVP]
+	if *lower.ScoreBelow != 55 {
+		t.Errorf("lower_vp.score_below = %d, want overridden 55", *lower.ScoreBelow)
+	}
+	if lower.Window != "current_week" || *lower.VPStepPercentOfSelf != -20 || *lower.VPStepPercentOfTotal != -2 {
+		t.Errorf("lower_vp defaults not filled: %+v", lower)
+	}
+	if lower.RunScriptTemplate != DefaultVPChangeScript {
+		t.Errorf("lower_vp run_script_template not defaulted to DefaultVPChangeScript")
+	}
+
+	raise := rt.Proposal.Actions[ActionRaiseVP]
+	if *raise.ScoreAtOrAbove != 85 || raise.Window != "current_year" || *raise.VPStepPercentOfSelf != 20 {
+		t.Errorf("raise_vp defaults = %+v", raise)
+	}
+}
+
+func TestActionPriorityRejectsUnknownName(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  action_priority: [eject, not_a_real_action]
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error for an unknown action_priority entry")
+	}
+}
+
+func TestActionWindowMustBeAKnownPeriod(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    eject: {window: "not_a_period"}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error for an invalid action window")
+	}
+}
+
+// TestVPStepSignMustMatchActionDirection guards against a config typo (a
+// missing minus sign) silently flipping lower_vp into a raise, or vice versa:
+// vpTarget picks the smaller-magnitude of the two step caps with no sign
+// check of its own, so Runtime() must reject a mismatched sign up front.
+func TestVPStepSignMustMatchActionDirection(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    lower_vp: {vp_step_percent_of_self: -20, vp_step_percent_of_total: 2}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error for lower_vp with a positive vp_step_percent_of_total")
+	}
+}
+
+// TestExplicitZeroActionFieldIsNotOverwrittenByDefault guards against the
+// zero-value/unset ambiguity: an operator setting vp_step_percent_of_total:
+// 0 (meaning "no network-share cap, self-cap only") must not have it
+// silently replaced by the built-in default.
+func TestExplicitZeroActionFieldIsNotOverwrittenByDefault(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    lower_vp: {vp_step_percent_of_self: -20, vp_step_percent_of_total: 0}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+	lower := rt.Proposal.Actions[ActionLowerVP]
+	if *lower.VPStepPercentOfTotal != 0 {
+		t.Errorf("vp_step_percent_of_total = %v, want explicit 0 preserved (not defaulted to -2)", *lower.VPStepPercentOfTotal)
+	}
+}
+
+// TestCallSubmitEjectOnlyAllowedWithEjectOnlyPriority proves the fix for the
+// bug where the call-mode validation walked the fully-defaulted prop.Actions
+// map (always containing eject, lower_vp and raise_vp) instead of
+// action_priority, so submit: call was rejected even when action_priority
+// only listed eject.
+func TestCallSubmitEjectOnlyAllowedWithEjectOnlyPriority(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  submit: call
+  action_priority: [eject]
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := c.Runtime("test"); err != nil {
+		t.Fatalf("Runtime: %v, want submit: call with action_priority: [eject] to be accepted", err)
+	}
+}
+
+// TestCallSubmitStillRejectedWhenNonEjectActionInPriority keeps the
+// eject-only-call-mode invariant: if action_priority names an action other
+// than eject, submit: call must still be rejected.
+func TestCallSubmitStillRejectedWhenNonEjectActionInPriority(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  submit: call
+  action_priority: [eject, lower_vp]
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error: submit: call with a non-eject action in action_priority")
+	}
+}
+
+// TestActionWindowValidatedEvenWhenNotInActionPriority guards against
+// over-scoping the window check to action_priority when the call-mode fix
+// (TestCallSubmitEjectOnlyAllowedWithEjectOnlyPriority) was applied: window
+// validation must still cover every action configured under proposal.actions,
+// not just the ones currently listed in action_priority. Here action_priority
+// is [eject] only, but raise_vp carries a bogus window and must still fail
+// Load/Runtime.
+func TestActionWindowValidatedEvenWhenNotInActionPriority(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  action_priority: [eject]
+  actions:
+    raise_vp: {window: "bogus"}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error: raise_vp.window is invalid even though raise_vp is not in action_priority")
+	}
+}
+
+// TestCallSubmitRejectedForPerChainOverrideWithNoActionsBlock guards against
+// a dead-code guard that used to skip the submit: call / non-eject check
+// whenever prop.Actions had no entry for the action_priority name. A
+// per-chain proposal override is a whole-block replace (bypasses
+// applyDefaults), so a chain config that sets submit/action_priority without
+// a nested actions: block leaves Actions nil/empty; the call-mode check must
+// still apply based on action_priority alone.
+func TestCallSubmitRejectedForPerChainOverrideWithNoActionsBlock(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+chains:
+  test:
+    rpc_endpoint: "http://x"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+    dry_run: true
+    proposal:
+      submit: call
+      action_priority: [lower_vp]
+      cooldown: 720h
+      rejected_backoff: 720h
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error: per-chain submit: call with lower_vp in action_priority and no actions: block must still be rejected")
+	}
+}
+
+// TestPerChainProposalOverrideStillGetsActionDefaults guards against a
+// per-chain proposal: override silently disabling every action: since the
+// override is a whole-block replace that bypasses applyDefaults, a chain
+// that overrides proposal: to tweak just one field (here cooldown) must
+// still resolve the same built-in action_priority/actions/VP-bound defaults
+// the global config would have gotten — not an empty ActionPriority (zero
+// proposals, ever, with no error) and zeroed MinVotingPower/MaxVotingPowerShare.
+func TestPerChainProposalOverrideStillGetsActionDefaults(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+chains:
+  test:
+    rpc_endpoint: "http://x"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true
+    dry_run: true
+    proposal:
+      cooldown: 240h
+      rejected_backoff: 240h
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+
+	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
+		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
+	}
+	if *rt.Proposal.MinVotingPower != 100 {
+		t.Errorf("MinVotingPower = %d, want default 100", *rt.Proposal.MinVotingPower)
+	}
+	if *rt.Proposal.MaxVotingPowerShare != 15 {
+		t.Errorf("MaxVotingPowerShare = %v, want default 15", *rt.Proposal.MaxVotingPowerShare)
+	}
+	for _, name := range []string{ActionEject, ActionLowerVP, ActionRaiseVP} {
+		ac, ok := rt.Proposal.Actions[name]
+		if !ok || ac.Window == "" {
+			t.Errorf("Actions[%q] = %+v (ok=%v), want a defaulted entry", name, ac, ok)
+		}
+	}
+	// The override's own field must still take effect (whole-block replace
+	// preserved for what the chain DOES set).
+	if rt.Proposal.CooldownDur() != 240*time.Hour {
+		t.Errorf("Cooldown = %s, want overridden 240h", rt.Proposal.CooldownDur())
+	}
 }
 
 func TestLoadAndRuntime(t *testing.T) {

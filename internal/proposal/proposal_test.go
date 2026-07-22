@@ -7,36 +7,45 @@ import (
 	"github.com/samouraiworld/katana/internal/config"
 )
 
-func target() Target {
+func target(action string) Target {
 	return Target{
 		ChainKey: "local", ChainID: "dev", RPC: "http://localhost:26658",
 		Moniker: "bad-node", Address: "g1sign", OperatorAddress: "g1op",
-		Reason: "missed 200 blocks",
+		Reason: "score 20/100 (tier Critical) over current_month",
+		Action: action, Score: 20, Tier: "Critical", Window: "current_month",
+		CurrentPower: 1000, TargetPower: 0,
+	}
+}
+
+func ejectProposalConfig() config.Proposal {
+	return config.Proposal{
+		Submit: "run",
+		Actions: map[string]config.ActionConfig{
+			config.ActionEject: {
+				RunScriptTemplate:   config.DefaultEjectScript,
+				TitleTemplate:       "Eject {moniker} ({operator_address})",
+				DescriptionTemplate: "Reason: {reason}\n\"quoted\"",
+			},
+		},
 	}
 }
 
 func TestBuildRunMode(t *testing.T) {
-	p := config.Proposal{
-		Submit:              "run",
-		RunScriptTemplate:   config.DefaultEjectScript,
-		TitleTemplate:       "Eject {moniker} ({operator_address})",
-		DescriptionTemplate: "Reason: {reason}\n\"quoted\"",
-	}
+	p := ejectProposalConfig()
 	gk := config.Gnokey{Bin: "gnokey", KeyName: "dev", GasFee: "1000000ugnot", GasWanted: 20000000}
 
-	b := Build(target(), p, gk)
+	tg := target(config.ActionEject)
+	b := Build(tg, p, gk)
 	if b.Submit != "run" {
 		t.Fatalf("submit = %s, want run", b.Submit)
 	}
-	// Operator address is used in the script, not the signing address.
 	if !strings.Contains(b.Script, `address("g1op")`) {
 		t.Errorf("script missing operator address:\n%s", b.Script)
 	}
 	if !strings.Contains(b.Script, "NewValoperChange") || !strings.Contains(b.Script, ", 0)") {
 		t.Errorf("script is not a Power=0 removal:\n%s", b.Script)
 	}
-	// The description's quotes/newlines must be escaped inside the .gno literal.
-	if !strings.Contains(b.Script, `\"quoted\"`) || strings.Contains(b.Script, "Reason: missed 200 blocks\n\"quoted\"") {
+	if !strings.Contains(b.Script, `\"quoted\"`) || strings.Contains(b.Script, "Reason: score 20/100 (tier Critical) over current_month\n\"quoted\"") {
 		t.Errorf("description not escaped for Go literal:\n%s", b.Script)
 	}
 
@@ -45,24 +54,83 @@ func TestBuildRunMode(t *testing.T) {
 	if !strings.HasPrefix(joined, "maketx run") || !strings.HasSuffix(joined, "dev /tmp/x.gno") {
 		t.Errorf("unexpected run args: %v", args)
 	}
-	// gnokey must read the password from stdin, not a TTY (katana execs it with
-	// no controlling terminal); otherwise it fails with "inappropriate ioctl".
 	if !strings.Contains(joined, "-insecure-password-stdin") {
 		t.Errorf("run args missing -insecure-password-stdin: %v", args)
 	}
 }
 
-func TestBuildCallMode(t *testing.T) {
+func TestBuildLowerVPRunMode(t *testing.T) {
 	p := config.Proposal{
-		Submit:        "call",
-		RealmPkgPath:  "gno.land/r/x",
-		Function:      "RemoveValidator",
-		Args:          []string{"{operator_address}", "{moniker}"},
-		TitleTemplate: "t",
+		Submit: "run",
+		Actions: map[string]config.ActionConfig{
+			config.ActionLowerVP: {
+				RunScriptTemplate:   config.DefaultVPChangeScript,
+				TitleTemplate:       "Lower {moniker}",
+				DescriptionTemplate: "{current_power} -> {target_power}",
+			},
+		},
 	}
 	gk := config.Gnokey{Bin: "gnokey", KeyName: "dev", GasFee: "1ugnot", GasWanted: 1}
 
-	b := Build(target(), p, gk)
+	tg := target(config.ActionLowerVP)
+	tg.CurrentPower, tg.TargetPower = 1000, 600
+	b := Build(tg, p, gk)
+
+	if !strings.Contains(b.Script, `address("g1op")`) {
+		t.Errorf("script missing operator address:\n%s", b.Script)
+	}
+	if !strings.Contains(b.Script, ", 600)") {
+		t.Errorf("script does not carry the target power 600:\n%s", b.Script)
+	}
+	if strings.Contains(b.Script, ", 0)") {
+		t.Errorf("script must not be a Power=0 removal for lower_vp:\n%s", b.Script)
+	}
+	if !strings.Contains(b.Description, "1000 -> 600") {
+		t.Errorf("description missing current->target power: %s", b.Description)
+	}
+}
+
+func TestBuildRaiseVPRunMode(t *testing.T) {
+	p := config.Proposal{
+		Submit: "run",
+		Actions: map[string]config.ActionConfig{
+			config.ActionRaiseVP: {
+				RunScriptTemplate:   config.DefaultVPChangeScript,
+				TitleTemplate:       "Raise {moniker}",
+				DescriptionTemplate: "score={score} tier={tier} window={window}",
+			},
+		},
+	}
+	gk := config.Gnokey{Bin: "gnokey", KeyName: "dev", GasFee: "1ugnot", GasWanted: 1}
+
+	tg := target(config.ActionRaiseVP)
+	tg.Score, tg.Tier, tg.Window = 90, "Excellent", "current_year"
+	tg.CurrentPower, tg.TargetPower = 1000, 1200
+	b := Build(tg, p, gk)
+
+	if !strings.Contains(b.Script, ", 1200)") {
+		t.Errorf("script does not carry the target power 1200:\n%s", b.Script)
+	}
+	if b.Description != "score=90 tier=Excellent window=current_year" {
+		t.Errorf("description = %q", b.Description)
+	}
+}
+
+func TestBuildCallMode(t *testing.T) {
+	p := config.Proposal{
+		Submit: "call",
+		Actions: map[string]config.ActionConfig{
+			config.ActionEject: {
+				RealmPkgPath:  "gno.land/r/x",
+				Function:      "RemoveValidator",
+				Args:          []string{"{operator_address}", "{moniker}"},
+				TitleTemplate: "t",
+			},
+		},
+	}
+	gk := config.Gnokey{Bin: "gnokey", KeyName: "dev", GasFee: "1ugnot", GasWanted: 1}
+
+	b := Build(target(config.ActionEject), p, gk)
 	if b.Submit != "call" {
 		t.Fatalf("submit = %s, want call", b.Submit)
 	}
@@ -77,9 +145,9 @@ func TestBuildCallMode(t *testing.T) {
 }
 
 func TestCommandRunMode(t *testing.T) {
-	p := config.Proposal{Submit: "run", RunScriptTemplate: config.DefaultEjectScript}
+	p := ejectProposalConfig()
 	gk := config.Gnokey{Bin: "gnokey", KeyName: "dev", GasFee: "1000000ugnot", GasWanted: 20000000, Home: "/app/data/keybase", Password: "s3cret"}
-	b := Build(target(), p, gk)
+	b := Build(target(config.ActionEject), p, gk)
 
 	cmd := b.Command(gk, "eject-bad-node.gno")
 	for _, want := range []string{
@@ -90,7 +158,6 @@ func TestCommandRunMode(t *testing.T) {
 			t.Errorf("command missing %q:\n%s", want, cmd)
 		}
 	}
-	// The password must be piped via stdin, never embedded in the command text.
 	if strings.Contains(cmd, "s3cret") {
 		t.Errorf("password must not appear in the command: %s", cmd)
 	}
@@ -100,9 +167,9 @@ func TestCommandRunMode(t *testing.T) {
 }
 
 func TestOperatorFallsBackToAddress(t *testing.T) {
-	tg := target()
+	tg := target(config.ActionEject)
 	tg.OperatorAddress = ""
-	b := Build(tg, config.Proposal{Submit: "run", RunScriptTemplate: config.DefaultEjectScript}, config.Gnokey{})
+	b := Build(tg, ejectProposalConfig(), config.Gnokey{})
 	if !strings.Contains(b.Script, `address("g1sign")`) {
 		t.Errorf("expected fallback to signing address:\n%s", b.Script)
 	}

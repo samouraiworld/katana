@@ -15,8 +15,15 @@ import (
 	"github.com/samouraiworld/katana/internal/store"
 )
 
-// evalCycle runs one evaluation pass for a chain: fetch metrics, evaluate every
-// candidate, and produce a proposal for each eligible, non-suppressed validator.
+// reportWindows are the four periods gnomonitoring always includes in a
+// report; totals are precomputed for all of them once per cycle so any
+// action's configured window has its total valset VP ready, with no extra
+// API call.
+var reportWindows = []string{"last_24h", "current_week", "current_month", "current_year"}
+
+// evalCycle runs one evaluation pass for a chain: fetch validator reports,
+// evaluate every candidate against the score-driven action model, and
+// produce a proposal for each eligible, non-suppressed validator.
 func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	// Chain-identity assert (also runs on the worker's first cycle at startup):
 	// skip the whole cycle before any state is written when the node no longer
@@ -26,97 +33,110 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		return
 	}
 
-	cond := rt.Conditions
-	missed, monikers, critical, err := d.fetchMetrics(ctx, rt)
+	reports, err := d.gnomon.FetchReports(ctx, rt.GnomonitoringChain)
 	if err != nil {
 		d.logger.Printf("[%s][eval] %v", rt.Key, err)
 		return
 	}
 
-	candidates := map[string]struct{}{}
-	for a := range missed {
-		candidates[a] = struct{}{}
+	totalVP := map[string]int64{}
+	for _, w := range reportWindows {
+		totalVP[w] = rules.TotalVotingPower(reports, w)
 	}
-	for a := range critical {
-		candidates[a] = struct{}{}
+
+	// Fetched once per cycle rather than re-queried per eligible candidate:
+	// the score-driven model (raise_vp especially) can make many more
+	// validators eligible per cycle than the old missed-blocks/critical-
+	// alerts subset did, so a per-candidate valset refetch would multiply
+	// RPC calls with the candidate count instead of staying flat per cycle.
+	valset, err := gno.Validators(ctx)
+	if err != nil {
+		d.logger.Printf("[%s][eval] valset fetch failed: %v (skipping cycle)", rt.Key, err)
+		return
+	}
+	inValset := make(map[string]bool, len(valset))
+	for _, v := range valset {
+		inValset[strings.ToLower(v.Address)] = true
 	}
 
 	produced := 0
-	for addr := range candidates {
-		moniker := monikers[addr]
-		eval := rules.Evaluate(rules.Metrics{
-			Moniker:        moniker,
-			Address:        addr,
-			MissedBlocks:   missed[addr],
-			CriticalAlerts: critical[addr],
-		}, cond)
+	byAction := map[string]int{}
+	evals := make([]store.EvalRecord, 0, len(reports))
+	for _, report := range reports {
+		dec := rules.Evaluate(report, rt.Proposal.ActionPriority, rt.Proposal.Actions,
+			*rt.Proposal.MinVotingPower, *rt.Proposal.MaxVotingPowerShare, totalVP)
 
-		excepted := d.cfg.IsException(rt.Key, addr, moniker)
-		_ = d.st.RecordEvaluation(ctx, store.EvalRecord{
-			CreatedAt: d.now(), Chain: rt.Key, Address: addr, Moniker: moniker,
-			MissedBlocks: missed[addr], CriticalAlerts: critical[addr],
-			Eligible: eval.Eligible, Excepted: excepted, Reason: eval.Reason(),
+		excepted := d.cfg.IsException(rt.Key, report.Addr, report.Moniker)
+		evals = append(evals, store.EvalRecord{
+			CreatedAt: d.now(), Chain: rt.Key, Address: report.Addr, Moniker: report.Moniker,
+			Score: dec.Score, Tier: dec.Tier, Eligible: dec.Action != "", Excepted: excepted, Reason: dec.Reason,
 		})
 
 		if excepted {
-			if eval.Eligible {
-				d.logger.Printf("[%s][eval] SKIP (exception) %s would be eligible: %s", rt.Key, disp(moniker, addr), eval.Reason())
+			if dec.Action != "" {
+				d.logger.Printf("[%s][eval] SKIP (exception) %s would be eligible for %s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, dec.Reason)
 			}
 			continue
 		}
-		if !eval.Eligible {
+		if dec.Action == "" {
 			continue
 		}
 
-		// Lifecycle gate: don't re-propose while pending/accepted/within
-		// backoff. Dry-run records count here too (LastProposal no longer
-		// excludes them), so a rehearsal already dedups across cycles the
-		// same way a real proposal would, and its cooldown carries over once
-		// dry_run is disabled.
-		last, _ := d.st.LastProposal(ctx, rt.Key, addr)
-		rejections, _ := d.st.RejectionCount(ctx, rt.Key, addr)
-		if dec := lifecycle.Gate(last, rejections, lifecycle.Params{
+		// Lifecycle gate: don't re-propose while pending/accepted(eject)/within
+		// backoff or cooldown. Dry-run records count here too (LastProposal no
+		// longer excludes them), so a rehearsal already dedups across cycles
+		// the same way a real proposal would.
+		last, _ := d.st.LastProposal(ctx, rt.Key, report.Addr)
+		rejections, _ := d.st.RejectionCount(ctx, rt.Key, report.Addr)
+		if g := lifecycle.Gate(last, rejections, lifecycle.Params{
 			Cooldown:        rt.Proposal.CooldownDur(),
 			RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
 			MaxRejections:   rt.Proposal.MaxRejections,
 			Now:             d.now(),
-		}); !dec.Allow {
-			d.logger.Printf("[%s][eval] SUPPRESS %s: %s", rt.Key, disp(moniker, addr), dec.Reason)
+		}); !g.Allow {
+			d.logger.Printf("[%s][eval] SUPPRESS %s: %s", rt.Key, disp(report.Moniker, report.Addr), g.Reason)
 			continue
 		}
 
 		// Safety: confirm the validator is in the live consensus valset.
-		if inSet, err := gno.IsValidator(ctx, addr); err != nil {
-			d.logger.Printf("[%s][eval] valset check failed for %s: %v (skipping)", rt.Key, addr, err)
-			continue
-		} else if !inSet {
-			d.logger.Printf("[%s][eval] %s not in valset, skipping", rt.Key, addr)
+		if !inValset[strings.ToLower(report.Addr)] {
+			d.logger.Printf("[%s][eval] %s not in valset, skipping", rt.Key, report.Addr)
 			continue
 		}
 
-		d.logger.Printf("[%s][eval] ELIGIBLE %s: %s", rt.Key, disp(moniker, addr), eval.Reason())
-		d.produce(ctx, rt, gno, addr, moniker, eval.Reason())
+		d.logger.Printf("[%s][eval] ELIGIBLE %s action=%s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, dec.Reason)
+		d.produce(ctx, rt, gno, dec, totalVP[dec.Window])
 		produced++
+		byAction[dec.Action]++
+	}
+
+	if err := d.st.RecordEvaluations(ctx, evals); err != nil {
+		d.logger.Printf("[%s][eval] recording evaluations: %v", rt.Key, err)
 	}
 
 	if produced == 0 {
-		d.logger.Printf("[%s][eval] no proposal produced (%d candidates)", rt.Key, len(candidates))
+		d.logger.Printf("[%s][eval] no proposal produced (%d candidates)", rt.Key, len(reports))
+	} else {
+		d.logger.Printf("[%s][eval] produced %d proposal(s) (eject=%d lower_vp=%d raise_vp=%d)",
+			rt.Key, produced, byAction[config.ActionEject], byAction[config.ActionLowerVP], byAction[config.ActionRaiseVP])
 	}
 }
 
-// produce builds an ejection proposal, then either broadcasts it (signing via
-// gnokey, recording it, notifying on success) or — on a dry_run chain — logs
-// and notifies the complete would-be proposal, with the ejection script and a
-// ready-to-run gnokey command attached, without touching the chain.
-func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, addr, moniker, reason string) {
-	// A valset ejection is keyed by the operator address, but metrics are keyed
+// produce builds a proposal for dec.Action, then either broadcasts it
+// (signing via gnokey, recording it, notifying on success) or — on a
+// dry_run chain — logs and notifies the complete would-be proposal, with
+// the script and a ready-to-run gnokey command attached, without touching
+// the chain. totalWindowVP is dec.Window's total valset VP this cycle, used
+// to compute the notification's VPDeltaPercent.
+func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalWindowVP int64) {
+	// A valset action is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
-	// would eject an unknown operator).
-	operator := addr
-	if op, ok := d.resolverFor(rt).OperatorFor(ctx, addr); ok {
+	// would act on an unknown operator).
+	operator := dec.Address
+	if op, ok := d.resolverFor(rt).OperatorFor(ctx, dec.Address); ok {
 		operator = op
 	} else {
-		d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, addr)
+		d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, dec.Address)
 		return
 	}
 
@@ -124,16 +144,23 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		ChainKey:        rt.Key,
 		ChainID:         rt.ChainID,
 		RPC:             rt.RPCEndpoint,
-		Moniker:         moniker,
-		Address:         addr,
+		Moniker:         dec.Moniker,
+		Address:         dec.Address,
 		OperatorAddress: operator,
-		Reason:          reason,
+		Reason:          dec.Reason,
+		Action:          dec.Action,
+		Score:           dec.Score,
+		Tier:            dec.Tier,
+		Window:          dec.Window,
+		CurrentPower:    dec.CurrentPower,
+		TargetPower:     dec.TargetPower,
 	}, rt.Proposal, rt.Gnokey)
 
 	rec := store.ProposalRecord{
-		CreatedAt: d.now(), Chain: rt.Key, ChainID: rt.ChainID, Address: addr,
-		Moniker: moniker, Reason: reason, Title: built.Title,
+		CreatedAt: d.now(), Chain: rt.Key, ChainID: rt.ChainID, Address: dec.Address,
+		Moniker: dec.Moniker, Reason: dec.Reason, Title: built.Title,
 		RealmPath: built.RealmPath, Function: built.Function, Args: built.Args,
+		Action: dec.Action, TargetPower: dec.TargetPower, CurrentPower: dec.CurrentPower,
 	}
 
 	// Re-assert chain identity immediately before acting: a genesis reset can
@@ -142,8 +169,14 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		return
 	}
 
+	vpDeltaPercent := 0.0
+	if totalWindowVP > 0 {
+		vpDeltaPercent = float64(dec.TargetPower-dec.CurrentPower) / float64(totalWindowVP) * 100
+	}
+	nt := notifyTarget{Address: dec.Address, Moniker: dec.Moniker, Action: dec.Action, CurrentPower: dec.CurrentPower, TargetPower: dec.TargetPower}
+
 	if rt.DryRun {
-		d.dryRun(ctx, rt, built, rec, operator, moniker, addr)
+		d.dryRun(ctx, rt, built, rec, operator, nt, vpDeltaPercent)
 		return
 	}
 
@@ -156,31 +189,40 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	}
 	id, recErr := d.st.RecordProposal(ctx, rec)
 	if err != nil {
-		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, addr, err)
+		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, dec.Address, err)
 		return
 	}
 	if recErr != nil {
 		// The proposal is already on-chain but we failed to persist it: the
 		// lifecycle gate has no record and will re-broadcast an identical
-		// ejection next cycle. Surface this loudly rather than silently spam.
-		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, addr, recErr)
+		// proposal next cycle. Surface this loudly rather than silently spam.
+		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, dec.Address, recErr)
 	}
-	d.logger.Printf("[%s][eval] BROADCAST ok for %s (proposal id=%q)", rt.Key, addr, rec.OnchainID)
-	d.dispatch(ctx, notify.EventSent, rt, id, addr, moniker, rec.OnchainID, observePayload{})
+	d.logger.Printf("[%s][eval] BROADCAST ok for %s action=%s (proposal id=%q)", rt.Key, dec.Address, dec.Action, rec.OnchainID)
+	d.dispatch(ctx, notify.EventSent, rt, id, nt, rec.OnchainID, vpDeltaPercent, observePayload{})
+}
+
+// notifyTarget carries the validator/action identity dispatch needs to build
+// a notify.Info, independent of whether the caller is the eval path
+// (produce/dryRun, from a rules.Decision) or the vote-watcher (voteCycle,
+// from a store.ProposalRecord).
+type notifyTarget struct {
+	Address, Moniker, Action  string
+	CurrentPower, TargetPower int64
 }
 
 // dryRun records, logs, and notifies the proposal a dry_run chain would have
-// broadcast: the ejection script/expression, a filename to attach it under,
-// and a ready-to-run gnokey command — the same manual-approval hand-off a
+// broadcast: the script/expression, a filename to attach it under, and a
+// ready-to-run gnokey command — the same manual-approval hand-off a
 // broadcast-capable chain's operator would get if sending failed and they had
 // to act by hand. The record carries store.StatusDryRun and counts toward the
 // real lifecycle gate like any other proposal record.
-func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.Built, rec store.ProposalRecord, operator, moniker, addr string) {
+func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.Built, rec store.ProposalRecord, operator string, nt notifyTarget, vpDeltaPercent float64) {
 	code := built.Script
 	if built.Submit == "call" {
 		code = fmt.Sprintf("%s.%s(%s)", built.RealmPath, built.Function, strings.Join(built.Args, ", "))
 	}
-	filename := ejectFilename(disp(moniker, addr))
+	filename := actionFilename(nt.Action, disp(nt.Moniker, nt.Address))
 	command := built.Command(rt.Gnokey, filename)
 
 	rec.Status = store.StatusDryRun
@@ -190,9 +232,9 @@ func (d *Daemon) dryRun(ctx context.Context, rt config.Runtime, built proposal.B
 	if recErr != nil {
 		d.logger.Printf("[%s][eval] recording dry-run proposal failed for %s: %v — expect this rehearsal to repeat next cycle", rt.Key, rec.Address, recErr)
 	}
-	d.logger.Printf("[%s][eval] WARN [DRY-RUN] would broadcast valset-ejection proposal: validator=%q addr=%s operator=%s chain_id=%s conditions=%q title=%q description=%q",
-		rt.Key, moniker, addr, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
-	d.dispatch(ctx, notify.EventWouldEject, rt, id, addr, moniker, "", observePayload{code: code, filename: filename, command: command})
+	d.logger.Printf("[%s][eval] WARN [DRY-RUN] would broadcast %s proposal: validator=%q addr=%s operator=%s chain_id=%s conditions=%q title=%q description=%q",
+		rt.Key, nt.Action, nt.Moniker, nt.Address, operator, rt.ChainID, rec.Reason, built.Title, built.Description)
+	d.dispatch(ctx, notify.EventWouldEject, rt, id, nt, "", vpDeltaPercent, observePayload{code: code, filename: filename, command: command})
 }
 
 // assertChainID confirms the node behind rt.RPCEndpoint still reports the
@@ -235,50 +277,22 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) {
 			d.logger.Printf("[%s][vote] status query failed for proposal %s: %v", rt.Key, p.OnchainID, err)
 			continue
 		}
+		nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
 		switch status {
 		case govdao.Accepted:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusAccepted, d.now())
-			d.logger.Printf("[%s][vote] proposal %s ACCEPTED — %s removed from valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, p.Address, p.Moniker, p.OnchainID, observePayload{})
+			d.logger.Printf("[%s][vote] proposal %s ACCEPTED — %s action=%s", rt.Key, p.OnchainID, disp(p.Moniker, p.Address), p.Action)
+			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
 		case govdao.Rejected:
 			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusRejected, d.now())
-			d.logger.Printf("[%s][vote] proposal %s REJECTED — %s kept in valset", rt.Key, p.OnchainID, disp(p.Moniker, p.Address))
-			d.dispatch(ctx, notify.EventRejected, rt, p.ID, p.Address, p.Moniker, p.OnchainID, observePayload{})
+			d.logger.Printf("[%s][vote] proposal %s REJECTED — %s action=%s", rt.Key, p.OnchainID, disp(p.Moniker, p.Address), p.Action)
+			d.dispatch(ctx, notify.EventRejected, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
 		default:
 			// pending / unknown: leave as pending, retry next tick.
 		}
 	}
 }
 
-// fetchMetrics pulls missed blocks and CRITICAL alert counts for a chain.
-func (d *Daemon) fetchMetrics(ctx context.Context, rt config.Runtime) (missed map[string]int, monikers map[string]string, critical map[string]int, err error) {
-	cond := rt.Conditions
-	missed = map[string]int{}
-	monikers = map[string]string{}
-	critical = map[string]int{}
-
-	if cond.MissedBlocks.Enabled {
-		rows, e := d.gnomon.MissedBlocks(ctx, rt.GnomonitoringChain, cond.MissedBlocks.Interval)
-		if e != nil {
-			return nil, nil, nil, e
-		}
-		for _, r := range rows {
-			missed[r.Addr] = r.MissingBlock
-			monikers[r.Addr] = r.Moniker
-		}
-	}
-	if cond.CriticalAlerts.Enabled {
-		dur, _ := cond.CriticalAlerts.Duration()
-		counts, e := d.gnomon.CriticalAlertCounts(ctx, rt.GnomonitoringChain, d.now().Add(-dur))
-		if e != nil {
-			return nil, nil, nil, e
-		}
-		critical = counts
-	}
-	return missed, monikers, critical, nil
-}
-
-// dispatch sends a notification and records each channel result.
 // observePayload carries the extra fields a would_eject (observe) notification
 // needs: the proposal script, the filename it is attached under, and the
 // ready-to-run gnokey command. Zero value = not an observe notification.
@@ -286,17 +300,22 @@ type observePayload struct {
 	code, filename, command string
 }
 
-func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, addr, moniker, onchainID string, obs observePayload) {
+// dispatch sends a notification and records each channel result.
+func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Runtime, proposalID int64, nt notifyTarget, onchainID string, vpDeltaPercent float64, obs observePayload) {
 	if !d.notifier.Enabled() {
 		return
 	}
 	results := d.notifier.Dispatch(ctx, event, notify.Info{
 		Chain:            rt.Key,
-		Moniker:          moniker,
-		Address:          addr,
+		Moniker:          nt.Moniker,
+		Address:          nt.Address,
 		GnowebURL:        rt.GnowebURL,
 		ProposalID:       onchainID,
 		RejectedBackoff:  rt.Proposal.RejectedBackoffDur(),
+		Action:           nt.Action,
+		CurrentPower:     nt.CurrentPower,
+		TargetPower:      nt.TargetPower,
+		VPDeltaPercent:   vpDeltaPercent,
 		ProposalCode:     obs.code,
 		ProposalFilename: obs.filename,
 		GnokeyCommand:    obs.command,
@@ -308,7 +327,7 @@ func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Run
 			d.logger.Printf("[%s][notify] %s failed: %s", rt.Key, r.Channel, r.Err)
 		}
 		_ = d.st.RecordNotification(ctx, store.NotifRecord{
-			CreatedAt: d.now(), Chain: rt.Key, Address: addr, Moniker: moniker,
+			CreatedAt: d.now(), Chain: rt.Key, Address: nt.Address, Moniker: nt.Moniker,
 			Channel: r.Channel, Target: r.Target, Event: string(event),
 			Status: status, Error: r.Err, ProposalID: proposalID,
 		})
@@ -322,11 +341,13 @@ func disp(moniker, addr string) string {
 	return addr
 }
 
-// ejectFilename builds a safe .gno filename for the attached ejection script,
-// replacing any character outside [A-Za-z0-9-_] so it is a valid attachment name.
-func ejectFilename(name string) string {
+// actionFilename builds a safe .gno filename for the attached proposal
+// script, prefixed by the action name, replacing any character outside
+// [A-Za-z0-9-_] so it is a valid attachment name.
+func actionFilename(action, name string) string {
 	var b strings.Builder
-	b.WriteString("eject-")
+	b.WriteString(action)
+	b.WriteString("-")
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':

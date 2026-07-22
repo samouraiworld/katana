@@ -23,11 +23,12 @@ PG_USER      := gnomonitoring
 PG_DB        := gnomonitoring
 DEV_CHAIN    := dev
 
-.PHONY: help up up-validator4 ensure-bootstrap down reinit regen-genesis full-reinit clean-db clean-all status logs \
+.PHONY: help up up-validator4 ensure-bootstrap down reinit regen-genesis full-reinit full-reinit-4 wait-chain clean-db clean-all status logs \
         stop-val1 stop-val2 stop-val3 stop-val4 \
         start-val1 start-val2 start-val3 start-val4 \
         scenario1 scenario2 scenario2-restart scenario3 scenario3-restart \
-        scenario4 scenario4-restart scenario5 scenario-mute add-key accept-govdao
+        scenario4 scenario4-restart scenario5 scenario-mute add-key accept-govdao \
+        stub-render stub-list stub-scenario stub-up
 
 help:
 	@echo "Chain lifecycle:"
@@ -37,6 +38,7 @@ help:
 	@echo "  make reinit            - wipe chain state + purge dev-chain DB rows, restart from existing genesis.json"
 	@echo "  make regen-genesis     - delete + regenerate genesis.json (after editing generate-genesis.sh)"
 	@echo "  make full-reinit       - regen-genesis + reinit + up (use after changing powers/params)"
+	@echo "  make full-reinit-4     - full-reinit + validator4 onboarded via GovDAO (scenario1)"
 	@echo "  make clean-db          - purge local dev-chain rows from the gnomonitoring DB (keeps Telegram subs)"
 	@echo "  make clean-all         - nuke ALL generated state (keys/genesis/config) -> full regen on next full-reinit"
 	@echo "  make status            - docker compose ps + height/catching_up per node"
@@ -65,6 +67,16 @@ help:
 	@echo "                         - import a key + fund it from dev + add it as a GovDAO"
 	@echo "                           member (no genesis reinit). Put the printed MNEMONIC"
 	@echo "                           into katana's gnokey.mnemonic."
+	@echo ""
+	@echo "Stub gnomonitoring (fake scores, no real chain degradation needed):"
+	@echo "  make stub-list          - list available scenarios"
+	@echo "  make stub-scenario NAME=<healthy|eject|lower_vp|raise_vp|multi_eject>"
+	@echo "                           - render + activate a scenario (picked up on katana's"
+	@echo "                             next poll_interval, server does not need a restart)"
+	@echo "  make stub-up             - run the stub server (foreground) on :8989, serving"
+	@echo "                             stub-gnomonitoring/scenarios/current.json. Point"
+	@echo "                             katana's gnomonitoring.base_url at it (see"
+	@echo "                             stub-gnomonitoring/config.katana.stub.yaml.example)."
 
 # add-key: provision a katana-usable signing key on the LIVE devnet, WITHOUT a
 # genesis reinit. Creating a GovDAO proposal requires membership (r/gov/dao
@@ -107,14 +119,17 @@ add-key:
 	  echo "    already a GovDAO member — skipping"; \
 	else \
 	  echo "    proposing $$NEWADDR as a T1 member (dev creates the proposal, votes YES, executes)"; \
-	  SCRIPT=$$(mktemp --suffix=.gno); \
+	  SCRIPTDIR=$$(mktemp -d); SCRIPT="$$SCRIPTDIR/addmember.gno"; \
 	  printf 'package main\n\nimport (\n\t"gno.land/r/gov/dao"\n\t"gno.land/r/gov/dao/v3/impl"\n)\n\nfunc main(cur realm) {\n\tpr := impl.NewAddMemberRequest(cross(cur), address("%s"), "T1", "katana e2e signer")\n\tdao.MustCreateProposal(cross(cur), pr)\n}\n' "$$NEWADDR" > "$$SCRIPT"; \
-	  OUT=$$(echo "$(DEV_PASS)" | gnokey maketx run -gas-fee 1000000ugnot -gas-wanted 100000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev "$$SCRIPT" 2>&1); \
-	  rm -f "$$SCRIPT"; \
+	  OUT=$$(echo "$(DEV_PASS)" | gnokey maketx run -gas-fee 1000000ugnot -gas-wanted 100000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev "$$SCRIPT" 2>&1) || true; \
+	  rm -rf "$$SCRIPTDIR"; \
 	  echo "$$OUT" | grep -q '"type":"ProposalCreated"' || { echo "!! add-member proposal failed:"; echo "$$OUT" | tail -20; exit 1; }; \
 	  PID=$$(echo "$$OUT" | grep -oE '"key":"id","value":"[0-9]+"' | grep -oE '[0-9]+' | head -1); \
-	  echo "    proposal #$$PID created — voting YES + executing as dev"; \
-	  echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func MustVoteOnProposalSimple -args "$$PID" -args YES -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev; \
+	  echo "    proposal #$$PID created — voting YES with every known member + executing"; \
+	  for M in dev katana; do \
+	    echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func MustVoteOnProposalSimple -args "$$PID" -args YES -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin $$M \
+	      || echo "    ($$M vote skipped: not in keybase, already voted, or not a member yet)"; \
+	  done; \
 	  echo "$(DEV_PASS)" | gnokey maketx call -pkgpath gno.land/r/gov/dao -func ExecuteProposal -args "$$PID" -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev; \
 	fi; \
 	echo ">>> done: '$(NAME)' = $$NEWADDR is funded + GovDAO member."; \
@@ -179,6 +194,27 @@ regen-genesis:
 full-reinit: regen-genesis clean-db
 	./reinit-chain.sh
 	docker compose up -d
+
+# wait-chain: block until the chain's RPC is up and has mined at least one
+# block. 'docker compose up -d' returns as soon as containers are Started, but
+# gnoland needs a few seconds to open its RPC port and produce the first
+# block — calling gnokey (scenario1's GovDAO init) before that fails with
+# "connection reset by peer", not a retryable/idempotent error.
+wait-chain:
+	@printf ">>> waiting for chain RPC to be ready"; \
+	for i in $$(seq 1 60); do \
+		h=$$(curl -s http://localhost:26658/status 2>/dev/null | jq -r '.result.sync_info.latest_block_height // empty' 2>/dev/null); \
+		if [ -n "$$h" ] && [ "$$h" -ge 1 ] 2>/dev/null; then echo " ready (height $$h)"; exit 0; fi; \
+		printf "."; sleep 1; \
+	done; \
+	echo " timeout after 60s — check 'docker compose logs validator'"; exit 1
+
+# full-reinit-4: full-reinit alone does NOT bring validator4 up (it's phase2
+# profile-gated, see up-validator4/docker-compose.yml) or onboard it as a
+# valoper. This chains full-reinit -> wait-chain -> scenario1 (which itself
+# depends on up-validator4) so a single command gets you a fresh chain with
+# all 4 validators live and in the valset.
+full-reinit-4: full-reinit wait-chain scenario1
 
 # Purge the local "dev" chain rows from the gnomonitoring backend DB. Chain data
 # only (participation, monikers, govdao proposals, aggregates, alert logs).
@@ -387,3 +423,35 @@ scenario-mute:
 	@echo "And confirm the dedup log line appears:"
 	@echo "  docker logs gnomonitoring-backend | grep 'dedup: skipping'"
 	@echo "Restart with: make scenario2-restart"
+
+# --- Stub gnomonitoring ------------------------------------------------------
+# katana only ever talks to gnomonitoring via GET /api/reports/validators
+# (see internal/gnomonitoring/client.go). This stub serves that exact JSON
+# contract from a local file, so every score band (eject/lower_vp/raise_vp),
+# every lifecycle-gate/exception edge case, and both dry_run values can be
+# exercised deterministically and instantly, without waiting on real chain
+# degradation (stopping containers, downtime windows, etc). It still needs
+# the real validators to exist and be in the live valset (katana's safety
+# check queries /validators over RPC) — so run this against a devnet started
+# with 'make full-reinit-4', not standalone.
+STUB_DIR  := stub-gnomonitoring
+STUB_ADDR := :8989
+
+stub-render:
+	@$(STUB_DIR)/render-scenarios.sh
+
+stub-list: stub-render
+	@ls $(STUB_DIR)/scenarios/*.json.tmpl | xargs -n1 basename | sed 's/\.json\.tmpl$$//'
+
+# make stub-scenario NAME=eject
+stub-scenario: stub-render
+	@test -n "$(NAME)" || { echo "usage: make stub-scenario NAME=<name> (see 'make stub-list')"; exit 1; }
+	@test -f "$(STUB_DIR)/scenarios/$(NAME).json" || { echo "!! unknown scenario '$(NAME)' (see 'make stub-list')"; exit 1; }
+	@cp "$(STUB_DIR)/scenarios/$(NAME).json" "$(STUB_DIR)/scenarios/current.json"
+	@echo ">>> active scenario: $(NAME) — katana picks it up on its next poll_interval, no restart needed"
+
+# Foreground server (like 'make logs'): run in its own terminal, switch
+# scenarios from another one with 'make stub-scenario NAME=...'.
+stub-up:
+	@test -f "$(STUB_DIR)/scenarios/current.json" || $(MAKE) stub-scenario NAME=healthy
+	cd $(STUB_DIR) && go run . -listen $(STUB_ADDR) -file scenarios/current.json

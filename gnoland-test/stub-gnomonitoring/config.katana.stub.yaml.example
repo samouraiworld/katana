@@ -1,0 +1,83 @@
+# katana config for the local gno.land devnet, pointed at stub-gnomonitoring
+# instead of a real gnomonitoring backend (see ../KATANA-E2E.md "Stub
+# gnomonitoring" section). Copy to ../../config.yaml (repo root) and adjust
+# the wallet. Unlike config.katana.local.yaml.example (eject-only, real
+# gnomonitoring), this enables all three score-driven actions so every band
+# (eject/lower_vp/raise_vp) can be exercised via 'make stub-scenario NAME=...'.
+#
+# Requires all 4 validators up and onboarded: `make full-reinit-4`.
+
+log_level: info
+poll_interval: 15s          # fast cadence for testing
+dry_run: false               # flip to true to rehearse without broadcasting
+
+gnomonitoring:
+  base_url: "http://localhost:8989"   # stub-gnomonitoring (make stub-up)
+  api_token: ""
+  reports_path: "/api/reports/validators"
+
+# The devnet `dev` account: sole GovDAO T1 member, funded, unrestricted.
+gnokey:
+  bin: "gnokey"
+  key_name: "dev"
+  home: "./gnoland-test/.gnokey-dev"  # relative to repo root; adjust as needed
+  password: "devpassword123"          # devnet-only throwaway key
+  gas_fee: "1000000ugnot"
+  gas_wanted: 100000000
+
+proposal:
+  action_priority: [eject, lower_vp, raise_vp]
+  # With 4 validators at voting_power=10 each (total=40) and the default VP
+  # step (self -20%/+20%, total -2%/+2% — whichever moves less wins), lower_vp
+  # targets ~9 and raise_vp targets ~11. min_voting_power=1 keeps the floor out
+  # of the way; max_voting_power_share=40 (ceiling=16) keeps the ceiling above
+  # the raise_vp target so it isn't clamped to a no-op. Recompute both if you
+  # change validator count/power.
+  min_voting_power: 1
+  max_voting_power_share: 40
+  cooldown: 1h
+  rejected_backoff: 1h
+  max_rejections: 2
+  submit: run                         # gno.land valset actions need maketx run
+  actions:
+    # Uses the built-in DefaultEjectScript (ValoperChange Power=0 via v3).
+    eject:
+      score_below: 30
+      window: current_month
+    # Uses the built-in DefaultVPChangeScript (dual-cap fixed step).
+    lower_vp:
+      score_below: 60
+      window: current_week
+    raise_vp:
+      score_at_or_above: 85
+      window: current_year
+
+# Uncomment + set to the signing address a scenario targets (see
+# stub-gnomonitoring/scenarios/) to test the exceptions path (A6): the
+# validator stays eligible in the logs but no proposal is produced.
+# exceptions:
+#   - "__V4_ADDR__"
+
+vote_tracking:
+  vote_poll_interval: 15s
+  govdao_realm: "gno.land/r/gov/dao"
+  status_source: rpc
+
+notifications:
+  enabled: false                      # enable + set a webhook to see dry-run/broadcast notifs
+
+storage:
+  driver: sqlite
+  sqlite_path: "./data/katana.db"
+
+web:
+  enabled: true
+  listen: ":8990"
+
+chains:
+  local:
+    rpc_endpoint: "http://localhost:26658"
+    gnoweb_url: "http://localhost:8890"
+    chain_id: "dev"                   # devnet genesis chain_id
+    gnomonitoring_chain: "local"       # ignored by the stub, kept for parity
+    enabled: true

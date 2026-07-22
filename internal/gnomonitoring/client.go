@@ -1,11 +1,11 @@
 // Package gnomonitoring is a thin HTTP client for the gnomonitoring REST API.
 //
-// katana does not compute validator metrics itself; it reads them from a running
-// gnomonitoring instance (https://github.com/samouraiworld/gnomonitoring). Two
-// signals are consumed:
-//
-//   - missed blocks per validator over a reporting window (/missing_block)
-//   - CRITICAL alerts per validator over a rolling window (/admin/alerts)
+// katana does not compute validator metrics itself; it reads a computed
+// per-validator health score from a running gnomonitoring instance
+// (https://github.com/samouraiworld/gnomonitoring), via
+// GET /api/reports/validators?chain=<chain> — a public endpoint listing every
+// validator currently in the chain's valset, with score/tier/sub-metrics over
+// four rolling/calendar windows.
 package gnomonitoring
 
 import (
@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/samouraiworld/katana/internal/config"
@@ -22,78 +21,61 @@ import (
 
 // Client talks to a gnomonitoring backend.
 type Client struct {
-	baseURL    string
-	token      string
-	http       *http.Client
-	missedPath string
-	alertsPath string
+	baseURL     string
+	token       string
+	http        *http.Client
+	reportsPath string
 }
 
 // New builds a Client from the gnomonitoring section of the config.
 func New(cfg config.Gnomonitoring) *Client {
 	return &Client{
-		baseURL:    cfg.BaseURL,
-		token:      cfg.APIToken,
-		missedPath: cfg.MissedBlocksPath,
-		alertsPath: cfg.AlertsPath,
-		http:       &http.Client{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second},
+		baseURL:     cfg.BaseURL,
+		token:       cfg.APIToken,
+		reportsPath: cfg.ReportsPath,
+		http:        &http.Client{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second},
 	}
 }
 
-// MissedBlock mirrors gnomonitoring's MissingBlockMetrics JSON payload.
-type MissedBlock struct {
-	Moniker      string `json:"moniker"`
-	Addr         string `json:"addr"`
-	MissingBlock int    `json:"missingBlock"`
+// PeriodScore is one validator's health metrics over one reporting window
+// (last_24h | current_week | current_month | current_year). ProposerReliability
+// is nil when the validator's expected proposal count is too low to be a
+// meaningful signal (dropped from gnomonitoring's own score in that case).
+type PeriodScore struct {
+	Score               int      `json:"score"`
+	Tier                string   `json:"tier"`
+	SignRate            float64  `json:"sign_rate"`
+	ProposerReliability *float64 `json:"proposer_reliability"`
+	VotingPower         int64    `json:"voting_power"`
+	CriticalCount       int      `json:"critical_count"`
+	WarningCount        int      `json:"warning_count"`
+	IncidentCount       int      `json:"incident_count"`
+	IncidentRatePerWeek float64  `json:"incident_rate_per_week"`
+	DowntimeBlocks      int64    `json:"downtime_blocks"`
+	MissedBlocks        int64    `json:"missed_blocks"`
 }
 
-// Alert mirrors the subset of gnomonitoring's AlertLog JSON payload katana uses.
-type Alert struct {
-	ChainID string    `json:"chain_id"`
-	Addr    string    `json:"addr"`
-	Moniker string    `json:"moniker"`
-	Level   string    `json:"level"`
-	Msg     string    `json:"msg"`
-	SentAt  time.Time `json:"sent_at"`
+// Report is one validator's entry in gnomonitoring's per-validator health
+// report. A validator that has left the valset is excluded entirely by
+// gnomonitoring, so every entry here is a live candidate.
+type Report struct {
+	Addr               string                 `json:"addr"`
+	Moniker            string                 `json:"moniker"`
+	DaysSinceLastAlert *int                   `json:"days_since_last_alert"`
+	Periods            map[string]PeriodScore `json:"periods"`
 }
 
-// MissedBlocks returns, per validator, the number of blocks missed on chain
-// during the given gnomonitoring period (e.g. "current_week").
-func (c *Client) MissedBlocks(ctx context.Context, chain, period string) ([]MissedBlock, error) {
+// FetchReports returns the health report for every validator currently in
+// chain's valset.
+func (c *Client) FetchReports(ctx context.Context, chain string) ([]Report, error) {
 	q := url.Values{}
 	q.Set("chain", chain)
-	q.Set("period", period)
 
-	var out []MissedBlock
-	if err := c.getJSON(ctx, c.missedPath, q, &out); err != nil {
-		return nil, fmt.Errorf("fetching missed blocks: %w", err)
+	var out []Report
+	if err := c.getJSON(ctx, c.reportsPath, q, &out); err != nil {
+		return nil, fmt.Errorf("fetching validator reports: %w", err)
 	}
 	return out, nil
-}
-
-// CriticalAlertCounts returns the number of CRITICAL alerts per validator address
-// on chain since the given time.
-//
-// The alerts endpoint is admin-protected in gnomonitoring; set
-// gnomonitoring.api_token in config.yaml (or KATANA_GNOMON_API_TOKEN) so the
-// request carries a bearer token.
-func (c *Client) CriticalAlertCounts(ctx context.Context, chain string, since time.Time) (map[string]int, error) {
-	q := url.Values{}
-	q.Set("chain", chain)
-	q.Set("level", "CRITICAL")
-	q.Set("from", since.UTC().Format(time.RFC3339))
-	q.Set("limit", strconv.Itoa(10000))
-
-	var alerts []Alert
-	if err := c.getJSON(ctx, c.alertsPath, q, &alerts); err != nil {
-		return nil, fmt.Errorf("fetching critical alerts: %w", err)
-	}
-
-	counts := make(map[string]int, len(alerts))
-	for _, a := range alerts {
-		counts[a.Addr]++
-	}
-	return counts, nil
 }
 
 // getJSON performs a GET against path?query and decodes the JSON body into out.

@@ -32,6 +32,10 @@ config.yaml
 /gnoland-test/genesis.json
 /gnoland-test/genesis_balances.txt
 
+# Stub gnomonitoring: rendered scenario JSON (regenerated from *.json.tmpl by
+# gnoland-test/stub-gnomonitoring/render-scenarios.sh) — keep only the .tmpl.
+/gnoland-test/stub-gnomonitoring/scenarios/*.json
+
 # SQLite history database
 *.db
 

@@ -24,17 +24,25 @@ import (
 	"github.com/samouraiworld/katana/internal/config"
 )
 
-// Target identifies the validator an ejection proposal is built against.
+// Target identifies the validator a proposal is built against and the
+// score-driven action to take.
 type Target struct {
 	ChainKey string
 	ChainID  string
 	RPC      string
 	Moniker  string
-	Address  string // consensus/signing address (from metrics)
-	// OperatorAddress is the valoper operator address the valset proposal must
-	// reference. Falls back to Address when empty.
+	Address  string // consensus/signing address (from the report)
+	// OperatorAddress is the valoper operator address the valset proposal
+	// must reference. Falls back to Address when empty.
 	OperatorAddress string
 	Reason          string
+
+	Action       string // config.ActionEject | ActionLowerVP | ActionRaiseVP
+	Score        int
+	Tier         string
+	Window       string
+	CurrentPower int64
+	TargetPower  int64 // 0 for eject
 }
 
 // Built is a fully rendered proposal.
@@ -49,29 +57,36 @@ type Built struct {
 	Script      string   // run mode (.gno source)
 }
 
-// Build renders the proposal templates for the configured submission method.
+// Build renders the proposal templates for target.Action's configured
+// submission method.
 func Build(t Target, p config.Proposal, gk config.Gnokey) Built {
 	if t.OperatorAddress == "" {
 		t.OperatorAddress = t.Address
 	}
+	ac := p.Actions[t.Action]
 	vars := map[string]string{
 		"address":          t.Address,
 		"operator_address": t.OperatorAddress,
 		"moniker":          t.Moniker,
 		"reason":           t.Reason,
 		"chain":            t.ChainKey,
-		"realm":            p.RealmPkgPath,
+		"realm":            ac.RealmPkgPath,
+		"score":            strconv.Itoa(t.Score),
+		"tier":             t.Tier,
+		"window":           t.Window,
+		"current_power":    strconv.FormatInt(t.CurrentPower, 10),
+		"target_power":     strconv.FormatInt(t.TargetPower, 10),
 	}
-	title := render(p.TitleTemplate, vars)
-	description := render(p.DescriptionTemplate, vars)
+	title := render(ac.TitleTemplate, vars)
+	description := render(ac.DescriptionTemplate, vars)
 
 	b := Built{
 		Target:      t,
 		Submit:      submitMethod(p),
 		Title:       title,
 		Description: description,
-		RealmPath:   p.RealmPkgPath,
-		Function:    p.Function,
+		RealmPath:   ac.RealmPkgPath,
+		Function:    ac.Function,
 	}
 
 	if b.Submit == "run" {
@@ -80,12 +95,12 @@ func Build(t Target, p config.Proposal, gk config.Gnokey) Built {
 		svars := cloneVars(vars)
 		svars["title"] = goInner(title)
 		svars["description"] = goInner(description)
-		b.Script = render(p.RunScriptTemplate, svars)
+		b.Script = render(ac.RunScriptTemplate, svars)
 	} else {
 		vars["title"] = title
 		vars["description"] = description
-		b.Args = make([]string, len(p.Args))
-		for i, a := range p.Args {
+		b.Args = make([]string, len(ac.Args))
+		for i, a := range ac.Args {
 			b.Args[i] = render(a, vars)
 		}
 	}

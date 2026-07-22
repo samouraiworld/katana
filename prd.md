@@ -1,5 +1,5 @@
 # katana — Product Requirements Document (PRD)
-idée # retirer tu voting power systeme de freeze 
+
 Status: **draft for validation** · Owner: Samourai · Last updated: 2026-07-02
 
 This document defines the target behaviour of katana. It is the single source of
@@ -68,8 +68,8 @@ submitted). Each loops on its own ticker.
 ```
                     ┌──────────────────────────── katana service ────────────────────────────┐
  gnomonitoring API ─┼─► eval-worker(chain N) ─► evaluate ─► lifecycle gate ─► proposal ─► notify ─► store
-   /missing_block   │                            (rules)   (state machine)   (broadcast)   (sent)
-   /admin/alerts    │
+   /api/reports/    │                            (rules)   (state machine)   (broadcast)   (sent)
+   validators?chain=│
  gno.land RPC ──────┼─► (valset safety check)
    /validators      │
  GovDAO realm ──────┼─► vote-worker(chain N) ─► poll proposal status ─► on ACCEPTED / REJECTED:
@@ -79,14 +79,22 @@ submitted). Each loops on its own ticker.
 ```
 
 **Evaluation worker** cycle (every `poll_interval`):
-1. Query gnomonitoring for missed blocks (window = condition interval).
-2. Query gnomonitoring for CRITICAL alert counts (window = condition interval).
-3. Build the candidate set (union of observed addresses).
-4. For each candidate: evaluate conditions → check exceptions → **lifecycle gate**
-   (skip if a proposal is pending / accepted / within cooldown or rejection
-   backoff) → valset safety check → build proposal → broadcast via gnokey →
-   notify *proposal sent* → persist evaluation + proposal.
-5. Sleep until next tick.
+1. Query gnomonitoring's single `GET /api/reports/validators?chain=` endpoint
+   for the per-validator report: a computed health score (0-100) plus
+   sub-metrics (`sign_rate`, `incident_rate_per_week`, `downtime_blocks`, …),
+   each broken out per reporting window (`last_24h` | `current_week` |
+   `current_month` | `current_year`) — see §6.4b.
+2. Compute each window's total valset voting power across every reported
+   validator (`rules.TotalVotingPower`), needed to clamp `lower_vp`/`raise_vp`
+   targets against `max_voting_power_share`.
+3. For each candidate (validator in the report): evaluate its score against
+   the configured action thresholds (`rules.Evaluate` — `eject` / `lower_vp` /
+   `raise_vp`, first match in `action_priority` wins) → check exceptions →
+   **lifecycle gate** (skip if a proposal is pending / accepted / within
+   cooldown or rejection backoff) → valset safety check → build proposal →
+   broadcast via gnokey → notify *proposal sent* → persist evaluation +
+   proposal.
+4. Sleep until next tick.
 
 **Vote-watcher worker** cycle (every `vote_poll_interval`):
 1. For each of katana's proposals still `pending`, query the GovDAO realm for its
@@ -138,18 +146,44 @@ submitted). Each loops on its own ticker.
   in `config.yaml` and logs a warning; discovery is best-effort.
 
 ### 6.3 Metrics ingestion `[EXISTS]`
-- **FR-3.1** Missed blocks from `GET /missing_block?chain=&period=`.
-- **FR-3.2** CRITICAL alert counts from `GET /admin/alerts?chain=&level=CRITICAL&from=`
-  (admin-protected → `gnomonitoring.api_token`).
+- **FR-3.1** *(superseded by FR-4b.1)* katana no longer polls raw
+  `GET /missing_block` / `GET /admin/alerts` endpoints. The single metrics
+  source is gnomonitoring's computed per-validator health score via
+  `GET /api/reports/validators?chain=` — see §6.4b for the full model.
 
-### 6.4 Eligibility conditions `[EXISTS]`
-- **FR-4.1** `missed_blocks`: eligible when missed blocks over its window exceed
-  `max`.
-- **FR-4.2** `critical_alerts`: eligible when CRITICAL alerts over its window
-  exceed `max`.
-- **FR-4.3** Each condition is independently toggleable; `require_all` combines
-  enabled conditions as AND (true) or OR (false).
-- **FR-4.4** Conditions can be overridden per chain.
+### 6.4b Score-driven actions `[TO BUILD]`
+
+- **FR-4b.1** katana reads a computed per-validator health score (0-100) from
+  gnomonitoring (`GET /api/reports/validators?chain=`) instead of raw
+  missed-blocks/CRITICAL-alert counts. Three actions are possible: `eject`
+  (Power=0 removal, unchanged from the previous mechanism), `lower_vp`, and
+  `raise_vp` (voting-power adjustments). At most one action applies per
+  validator per cycle.
+- **FR-4b.2** `proposal.action_priority` (default `[eject, lower_vp,
+  raise_vp]`) decides which action wins when more than one action's
+  threshold would match on its own configured window — reordering is a
+  config change, not a code change.
+- **FR-4b.3** Each action reads its score on its own configured window
+  (`last_24h` | `current_week` | `current_month` | `current_year`) and
+  threshold: `eject`/`lower_vp` trigger when `score < score_below`;
+  `raise_vp` triggers when `score >= score_at_or_above`. Default thresholds
+  (30 / 60 / 85) mirror gnomonitoring's own tier boundaries; scores 60-84 are
+  an intentional no-action stability zone.
+- **FR-4b.4** `lower_vp`/`raise_vp` compute a target voting power as the
+  validator's current power plus a step equal to whichever of two caps has
+  the smaller magnitude: `vp_step_percent_of_self` (% of the validator's own
+  current VP) and `vp_step_percent_of_total` (% of the chain's total valset
+  VP). Both are recomputed from live data every cycle, so consecutive
+  triggers don't compound. The result is clamped in the direction of the
+  step — a reducing step floors at `proposal.min_voting_power`, a raising
+  step caps at `proposal.max_voting_power_share`% of total valset VP; a step
+  that would already be a no-op at a bound produces no proposal that cycle.
+- **FR-4b.5** gnomonitoring's sub-metrics (`sign_rate`, `proposer_reliability`,
+  `incident_rate_per_week`, `downtime_blocks`) are never used as eligibility
+  conditions — only the score is. `sign_rate`, `incident_rate_per_week` and
+  `downtime_blocks` are surfaced as human-readable context in the proposal
+  description/reason text (via `{reason}`); notification text carries only
+  action and voting-power before/after, not the score or sub-metrics.
 
 ### 6.5 Exceptions `[EXISTS]`
 - **FR-5.1** Validators in `exceptions` are never proposed. Matched by address
@@ -174,11 +208,13 @@ submitted). Each loops on its own ticker.
   - The wallet is used on every cycle: katana has no other run path.
 - **FR-6.6** katana broadcasts on-chain by default. `dry_run` (default `false`,
   global with per-chain override) is the sole toggle for the opposite: when
-  `true`, katana still evaluates candidates and sends a `would_eject`
-  notification, and records the proposal row (`status: dry-run`) so the real
-  lifecycle cooldown gate prevents re-notification and does not reset once
-  `dry_run` is disabled. The notification is a **manual-approval hand-off**: it
-  attaches the ejection script as a downloadable `.gno` file (Discord/Telegram;
+  `true`, katana still evaluates candidates (whichever of eject / lower_vp /
+  raise_vp matched) and sends a `would_eject`-event notification — the event
+  name is historical and covers all three actions — and records the proposal
+  row (`status: dry-run`) so the real lifecycle cooldown gate prevents
+  re-notification and does not reset once `dry_run` is disabled. The
+  notification is a **manual-approval hand-off**: it attaches the proposal
+  script (eject or VP-change) as a downloadable `.gno` file (Discord/Telegram;
   Slack falls back to inline code) and includes the ready-to-run `gnokey`
   command (password piped, never embedded), so an operator can review and
   broadcast it themselves. Serves both onboarding rehearsal and a standing
@@ -205,22 +241,33 @@ submitted). Each loops on its own ticker.
 ### 6.7 Proposal lifecycle gate (dedup) `[TO BUILD]`
 
 katana tracks a per-`(chain, validator)` state machine, derived from the
-`proposals` history, and consults it before creating any new proposal:
+`proposals` history, and consults it before creating any new proposal (eject /
+lower_vp / raise_vp):
 
 ```
-        none ──propose──► pending ──accepted──► accepted (terminal; validator ejected)
+        none ──propose──► pending ──accepted──► accepted*
          ▲                   │
          │                   └──rejected──► rejected ──(rejected_backoff elapsed)──► none
          └──(cooldown elapsed, still eligible)──────────────────────────────────────┘
 ```
 
+`*` — terminal only when the accepted proposal was `eject` (the validator is
+gone). An accepted `lower_vp`/`raise_vp` is **not** terminal: once `cooldown`
+elapses, katana falls back to `none` and may propose again (any of the three
+actions) if the validator's score still qualifies — see FR-7.2.
+
 - **FR-7.1** If a proposal for the validator is **pending** (vote in progress),
-  never create another one.
-- **FR-7.2** If the last proposal was **accepted**, the validator has been
-  ejected → do not re-propose (and the valset safety check blocks it anyway).
-- **FR-7.3** If the last proposal was **rejected** (GovDAO kept the validator),
-  do not re-propose until `rejected_backoff` has elapsed; then, if still eligible,
-  propose again. *(decision D1 / D11)*
+  never create another one, regardless of action type.
+- **FR-7.2** If the last proposal was **accepted**: for `eject`, the validator
+  has been ejected → terminal, never re-propose (the valset safety check
+  blocks it anyway). For `lower_vp`/`raise_vp`, acceptance is **not**
+  terminal — the VP change already took effect on-chain, but `cooldown`
+  (FR-7.4) still applies before katana may propose again for the same
+  validator (any action), so a later score change can trigger a further
+  `lower_vp`, `raise_vp`, or `eject`.
+- **FR-7.3** If the last proposal was **rejected** (GovDAO kept the validator
+  or its voting power unchanged), do not re-propose until `rejected_backoff`
+  has elapsed; then, if still eligible, propose again. *(decision D1 / D11)*
 - **FR-7.4** `cooldown` is a global minimum interval between two proposals for
   the same validator, applied in all cases as a floor. Both `cooldown` and
   `rejected_backoff` are configurable (`proposal.cooldown`,
@@ -229,7 +276,8 @@ katana tracks a per-`(chain, validator)` state machine, derived from the
 - **FR-7.5** Suppressed validators are still evaluated and recorded, logged with
   the reason (`pending` / `cooldown` / `rejection backoff`), but emit no proposal.
 - **FR-7.6** Cap on repeated rejections (`proposal.max_rejections`, per-chain
-  overridable): after N GovDAO rejections for the same validator, stop
+  overridable, **shared across action types**): after N GovDAO rejections for
+  the same validator, stop
   auto-proposing and require manual intervention, to avoid fighting a standing
   GovDAO decision. **Default `2`**; `0` = unlimited. *(decision D12 — confirmed.)*
 
@@ -265,12 +313,16 @@ katana tracks a per-`(chain, validator)` state machine, derived from the
 Notifications never fire on a failed/errored broadcast; they follow the on-chain
 lifecycle. Three events, all in English (decision D3):
 
-- **FR-8.1** *Proposal sent* — after a **successful broadcast**:
-  > `A proposal for validator <moniker> (<address>) on <chain> has been sent to remove it from the valset.`
-- **FR-8.2** *Proposal accepted* — when GovDAO accepts (validator ejected):
-  > `GovDAO accepted the proposal for validator <moniker> (<address>) on <chain>: it has been removed from the valset.`
-- **FR-8.3** *Proposal rejected* — when GovDAO votes to keep the validator:
-  > `GovDAO rejected the proposal for validator <moniker> (<address>) on <chain>: it stays in the valset. A new proposal may be sent after <rejected_backoff>.`
+- **FR-8.1** *Proposal sent* — after a **successful broadcast** of a proposal
+  (eject / lower_vp / raise_vp):
+  > `A proposal for validator <moniker> (<address>) on <chain> has been sent to remove it from the valset.` (eject)
+  > `A proposal for validator <moniker> (<address>) on <chain> has been sent to lower/raise its voting power from <current> to <target> (<±%> of total valset VP).` (lower_vp / raise_vp)
+- **FR-8.2** *Proposal accepted* — when GovDAO accepts:
+  > `GovDAO accepted the proposal for validator <moniker> (<address>) on <chain>: it has been removed from the valset.` (eject)
+  > `GovDAO accepted the proposal for validator <moniker> (<address>) on <chain>: its voting power has been lowered/raised from <current> to <target>.` (lower_vp / raise_vp)
+- **FR-8.3** *Proposal rejected* — when GovDAO votes to keep the validator/current voting power:
+  > `GovDAO rejected the proposal for validator <moniker> (<address>) on <chain>: it stays in the valset. A new proposal may be sent after <rejected_backoff>.` (eject)
+  > `GovDAO rejected the proposal for validator <moniker> (<address>) on <chain> to lower/raise its voting power: it stays at <current>. A new proposal may be sent after <rejected_backoff>.` (lower_vp / raise_vp)
 - **FR-8.4** Sent to every enabled channel among Discord, Telegram, Slack
   (webhook URL for Discord/Slack; bot token + chat id for Telegram). A gnoweb
   link to the proposal is appended when the chain's `gnoweb_url` is known.
@@ -304,8 +356,7 @@ gnomonitoring:
   base_url: "http://localhost:8989"     # repo: https://github.com/samouraiworld/gnomonitoring
   api_token: ""
   timeout_seconds: 10
-  missed_blocks_path: "/missing_block"
-  alerts_path: "/admin/alerts"
+  reports_path: "/api/reports/validators"   # [CHANGE] computed per-validator health score (replaces missed_blocks_path/alerts_path)
   info_path: "/info"                    # [NEW] chain discovery endpoint
   discover_chains: true                 # [NEW] validate config against /info only; URLs stay in chains.* (D8)
 
@@ -323,34 +374,59 @@ gnokey:
   gas_fee: "1000000ugnot"
   gas_wanted: 20000000
 
-conditions:
-  require_all: false
-  missed_blocks:
-    enabled: true
-    max: 100
-    interval: current_week        # CONDITION WINDOW (gnomonitoring period)
-  critical_alerts:
-    enabled: true
-    max: 3
-    interval: 168h                 # CONDITION WINDOW (rolling duration)
-
 exceptions:
   - "g1protected..."
 
-# [NEW] Proposal creation + lifecycle. katana is broadcast-only: every produced
-# proposal is signed and submitted on-chain via gnokey (no dry-run/mode field).
+# [CHANGE] Score-driven actions (§6.4b). katana is broadcast-only: every
+# produced proposal is signed and submitted on-chain via gnokey (no
+# dry-run/mode field). Replaces the old conditions:/missed_blocks/
+# critical_alerts eligibility model.
 proposal:
+  action_priority: [eject, lower_vp, raise_vp]   # [NEW] which action wins when >1 matches (FR-4b.2)
+
+  min_voting_power: 100             # [NEW] absolute floor for lower_vp targets (FR-4b.4)
+  max_voting_power_share: 15        # [NEW] ceiling as % of chain's total valset VP, for raise_vp targets
+
   cooldown: 720h                   # [NEW] min interval between two proposals for the same validator (D1)
   rejected_backoff: 720h           # [NEW] wait after a GovDAO rejection before re-proposing (D11, per-chain overridable)
   max_rejections: 2                # [NEW] stop after N GovDAO rejections; 0 = unlimited (D12, per-chain overridable)
-  realm_pkg_path: "gno.land/r/gnoland/valopers_proposal"
-  function: "ProposeRemoveValidator"
-  args: ["{address}"]
-  title_template: "Eject validator {moniker} ({address}) from the valset"
-  description_template: |
-    Automated ejection proposal generated by katana.
-    Validator: {moniker} ({address})
-    Reason: {reason}
+  submit: run                      # run (default; required for lower_vp/raise_vp) | call (eject only)
+
+  actions:                          # [NEW] one block per action; thresholds default to
+                                     # gnomonitoring's own tier boundaries (FR-4b.3)
+    eject:
+      score_below: 30
+      window: current_month         # ACTION WINDOW (gnomonitoring period)
+      title_template: "Eject validator {moniker} ({address}) from the valset"
+      description_template: |
+        Automated ejection proposal generated by katana.
+        Validator: {moniker} ({address})
+        Score: {score}/100 (tier {tier}) over {window}
+        Reason: {reason}
+    lower_vp:
+      score_below: 60
+      window: current_week
+      vp_step_percent_of_self: -20  # step = smaller-magnitude of the two caps (FR-4b.4)
+      vp_step_percent_of_total: -2
+      title_template: "Lower voting power of validator {moniker} ({address})"
+      description_template: |
+        Automated voting-power reduction generated by katana.
+        Validator: {moniker} ({address})
+        Score: {score}/100 (tier {tier}) over {window}
+        Voting power: {current_power} -> {target_power}
+        Reason: {reason}
+    raise_vp:
+      score_at_or_above: 85
+      window: current_year
+      vp_step_percent_of_self: 20
+      vp_step_percent_of_total: 2
+      title_template: "Raise voting power of validator {moniker} ({address})"
+      description_template: |
+        Automated voting-power increase generated by katana.
+        Validator: {moniker} ({address})
+        Score: {score}/100 (tier {tier}) over {window}
+        Voting power: {current_power} -> {target_power}
+        Reason: {reason}
 
 # [NEW] Vote tracking — follows the GovDAO outcome of broadcast proposals.
 vote_tracking:
@@ -413,18 +489,27 @@ chains:
 
 > **Two different "interval" notions — do not confuse:**
 > - `poll_interval` = **how often katana runs** a cycle (the daemon cadence).
-> - `conditions.*.interval` = **the time window over which a metric is counted**
->   to decide eligibility (e.g. "3 CRITICAL alerts over the last 168h").
+> - `proposal.actions.*.window` = **the gnomonitoring reporting period a
+>   score is read over** to decide eligibility (`last_24h` | `current_week` |
+>   `current_month` | `current_year`).
 
 ## 8. Data model (SQLite) `[EXISTS + extend]`
 
 - `evaluations(id, created_at, chain, address, moniker, missed_blocks,
-  critical_alerts, eligible, excepted, reason)` — one row per candidate per cycle.
-- `proposals(id, created_at, chain, chain_id, address, moniker, reason,
-  title, realm_path, function, args, output, success,
-  onchain_proposal_id, status, resolved_at)` — one row per produced (broadcast)
-  proposal. `[EXTEND]` `onchain_proposal_id` (GovDAO id, captured after every
-  successful broadcast), `status`
+  critical_alerts, eligible, excepted, reason, score, tier)` — one row per
+  candidate per cycle. `[EXTEND]` `score` and `tier` are the real signal now
+  (§6.4b); `missed_blocks`/`critical_alerts` remain in the schema as
+  legacy, always-`0` columns (kept rather than dropped, so existing rows and
+  readers of the table don't break) since katana no longer calls the
+  raw missed-blocks/CRITICAL-alerts endpoints.
+- `proposals(id, created_at, chain, chain_id, address, moniker, action,
+  target_power, current_power, reason, title, realm_path, function, args,
+  output, success, onchain_proposal_id, status, resolved_at)` — one row per
+  produced (broadcast) proposal. `[EXTEND]` `action` (`eject` | `lower_vp` |
+  `raise_vp`, defaults to `eject` for rows written before this column
+  existed), `target_power`/`current_power` (voting-power before/after for
+  `lower_vp`/`raise_vp`, §6.4b), `onchain_proposal_id` (GovDAO id, captured
+  after every successful broadcast), `status`
   (`pending` | `accepted` | `rejected`), `resolved_at`. Source of truth for the
   lifecycle gate (cooldown, rejection backoff, rejection count) per
   `(chain, address)`.
@@ -633,6 +718,19 @@ supermajority alone). This is where katana is exercised as it will run in prod.
   manual-approval mode (see README "Rehearsal / dry-run"); broadcast remains
   the default.*
 - **D10 — Per-chain wallet.** ✅ Global `gnokey` + optional per-chain override.
+- **D15 — Score as the sole eligibility signal.** ✅ gnomonitoring's computed
+  score (not raw missed-blocks/alert counts, and not its sub-metrics) is the
+  only input to `eject`/`lower_vp`/`raise_vp` eligibility — sub-metrics are
+  display-only context in the proposal description text. Rationale: the score
+  already blends sign rate, proposer reliability, incident frequency and
+  downtime with tunable weights/caps on the gnomonitoring side; re-deriving
+  eligibility from the raw sub-metrics in katana would duplicate that tuning
+  surface. The VP step for `lower_vp`/`raise_vp` uses two caps (% of the
+  validator's own VP, % of the chain's total valset VP) and takes the
+  smaller-magnitude one: this avoids both a disproportionate single move for a
+  small validator and an unbounded absolute move for a large one, without
+  persisting any state across cycles (see
+  `docs/superpowers/specs/2026-07-20-score-driven-vp-actions-design.md`).
 
 ### Resolved — GovDAO vote tracking
 
@@ -668,6 +766,11 @@ All decisions are now settled; the PRD is ready to implement.
 6. **M6 — Preprod / e2e:** opt-in end-to-end suite against the `gnoland-test`
    devnet (§12.5); confirm and pin the ejection realm/function/args (PP-5); full
    detect → broadcast → vote → accepted/rejected flow.
+7. **M7 — Score-driven actions:** replace `conditions.missed_blocks`/
+   `critical_alerts` with gnomonitoring's computed health score;
+   `eject`/`lower_vp`/`raise_vp` via a configurable `action_priority`, a
+   dual-cap fixed-step VP delta, and `min_voting_power`/
+   `max_voting_power_share` bounds.
 
 > **Tests are not a separate milestone.** Per §12, each milestone ships with the
 > unit tests for the code it introduces, and M1 additionally backfills tests for
@@ -699,11 +802,18 @@ All decisions are now settled; the PRD is ready to implement.
 
 - **gnomonitoring** (metrics source): <https://github.com/samouraiworld/gnomonitoring>
 - gnomonitoring endpoints katana consumes:
-  - `GET /missing_block?chain=&period=` — missed blocks per validator.
-  - `GET /admin/alerts?chain=&level=CRITICAL&from=` — CRITICAL alerts (admin, needs token).
+  - `GET /api/reports/validators?chain=` — the single metrics source (§6.4b):
+    per-validator computed health score (0-100) plus sub-metrics, broken out
+    per reporting window (`last_24h` | `current_week` | `current_month` |
+    `current_year`).
   - `GET /info` — **chain discovery**: returns `enabled_chains` and, per chain,
     `rpc_endpoints` / `graphqls` / `gnowebs`. Public, no token. **Confirmed
     available** in the current backend.
+  - Superseded (no longer consumed, kept here for historical reference):
+    `GET /missing_block?chain=&period=` (raw missed blocks) and
+    `GET /admin/alerts?chain=&level=CRITICAL&from=` (raw CRITICAL alerts,
+    admin, needs token) — replaced end-to-end by the computed-score model
+    above (FR-3.1).
 - GovDAO vote tracking reference impl (to mirror in katana):
   `backend/internal/govdao/govdao.go` — `ProposalCreated` event id extraction
   (`ExtractGovDAOIDs`, `ProcessProposal`) and status render

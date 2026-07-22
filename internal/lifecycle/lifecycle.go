@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/store"
 )
 
@@ -42,7 +43,25 @@ func Gate(last *store.ProposalRecord, rejections int, p Params) Decision {
 
 	switch last.Status {
 	case store.StatusAccepted:
-		return deny("already ejected (proposal accepted)")
+		if last.Action != config.ActionLowerVP && last.Action != config.ActionRaiseVP {
+			// eject (or a legacy/unset row, which predates this field and
+			// was always an eject) — the validator has been ejected.
+			return deny("already ejected (proposal accepted)")
+		}
+		// lower_vp/raise_vp accepted is not terminal: the VP can be
+		// adjusted again later once the score moves and cooldown elapses.
+		// Anchor on ResolvedAt (falling back to CreatedAt), like the
+		// rejected branch below: anchoring on CreatedAt would let a vote
+		// that outlives the cooldown window skip the cooldown entirely the
+		// moment it resolves.
+		base := last.ResolvedAt
+		if base.IsZero() {
+			base = last.CreatedAt
+		}
+		if until := base.Add(p.Cooldown); p.Now.Before(until) {
+			return deny("cooldown until %s", until.UTC().Format(time.RFC3339))
+		}
+		return allow()
 
 	case store.StatusPending:
 		return deny("a proposal is pending GovDAO vote")
@@ -64,9 +83,15 @@ func Gate(last *store.ProposalRecord, rejections int, p Params) Decision {
 		// Failed broadcast or a proposal not yet promoted to an on-chain status:
 		// apply the cooldown floor from the last proposal's creation time so a
 		// failing broadcast is not retried every poll interval.
-		if until := last.CreatedAt.Add(p.Cooldown); p.Now.Before(until) {
+		if until := cooldownFloor(last, p); p.Now.Before(until) {
 			return deny("cooldown until %s", until.UTC().Format(time.RFC3339))
 		}
 		return allow()
 	}
+}
+
+// cooldownFloor is the earliest time a new proposal may be created given
+// last's creation time and the configured cooldown.
+func cooldownFloor(last *store.ProposalRecord, p Params) time.Time {
+	return last.CreatedAt.Add(p.Cooldown)
 }
