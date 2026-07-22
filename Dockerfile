@@ -1,3 +1,8 @@
+# Pin to the SAME gno revision the target network was built from. For the e2e
+# devnet this must match gnoland-test's GNO_REPO_PATH commit; for a real chain,
+# use the network's released gno tag.
+ARG GNO_REF=master
+
 # ── build stage ───────────────────────────────────────────────────────────────
 FROM golang:1.25-alpine AS build
 
@@ -13,10 +18,6 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/katana ./cmd/katana
 
 # ── gnokey stage ──────────────────────────────────────────────────────────────
-# Pin to the SAME gno revision the target network was built from. For the e2e
-# devnet this must match gnoland-test's GNO_REPO_PATH commit; for a real chain,
-# use the network's released gno tag.
-ARG GNO_REF=master
 FROM golang:1.25-alpine AS gnokey
 ARG GNO_REF
 RUN apk add --no-cache git
