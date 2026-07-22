@@ -81,15 +81,15 @@ chains:
 	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
 		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
 	}
-	if rt.Proposal.MinVotingPower != 100 {
-		t.Errorf("MinVotingPower = %d, want default 100", rt.Proposal.MinVotingPower)
+	if *rt.Proposal.MinVotingPower != 100 {
+		t.Errorf("MinVotingPower = %d, want default 100", *rt.Proposal.MinVotingPower)
 	}
-	if rt.Proposal.MaxVotingPowerShare != 15 {
-		t.Errorf("MaxVotingPowerShare = %v, want default 15", rt.Proposal.MaxVotingPowerShare)
+	if *rt.Proposal.MaxVotingPowerShare != 15 {
+		t.Errorf("MaxVotingPowerShare = %v, want default 15", *rt.Proposal.MaxVotingPowerShare)
 	}
 
 	eject := rt.Proposal.Actions[ActionEject]
-	if eject.ScoreBelow != 30 || eject.Window != "current_month" {
+	if *eject.ScoreBelow != 30 || eject.Window != "current_month" {
 		t.Errorf("eject defaults = %+v, want score_below=30 window=current_month", eject)
 	}
 	if eject.RunScriptTemplate != DefaultEjectScript {
@@ -98,10 +98,10 @@ chains:
 
 	// User set only score_below; window/steps/templates must still be defaulted.
 	lower := rt.Proposal.Actions[ActionLowerVP]
-	if lower.ScoreBelow != 55 {
-		t.Errorf("lower_vp.score_below = %d, want overridden 55", lower.ScoreBelow)
+	if *lower.ScoreBelow != 55 {
+		t.Errorf("lower_vp.score_below = %d, want overridden 55", *lower.ScoreBelow)
 	}
-	if lower.Window != "current_week" || lower.VPStepPercentOfSelf != -20 || lower.VPStepPercentOfTotal != -2 {
+	if lower.Window != "current_week" || *lower.VPStepPercentOfSelf != -20 || *lower.VPStepPercentOfTotal != -2 {
 		t.Errorf("lower_vp defaults not filled: %+v", lower)
 	}
 	if lower.RunScriptTemplate != DefaultVPChangeScript {
@@ -109,7 +109,7 @@ chains:
 	}
 
 	raise := rt.Proposal.Actions[ActionRaiseVP]
-	if raise.ScoreAtOrAbove != 85 || raise.Window != "current_year" || raise.VPStepPercentOfSelf != 20 {
+	if *raise.ScoreAtOrAbove != 85 || raise.Window != "current_year" || *raise.VPStepPercentOfSelf != 20 {
 		t.Errorf("raise_vp defaults = %+v", raise)
 	}
 }
@@ -142,6 +142,55 @@ chains:
 `
 	if _, err := Load(writeConfig(t, yaml)); err == nil {
 		t.Fatal("expected an error for an invalid action window")
+	}
+}
+
+// TestVPStepSignMustMatchActionDirection guards against a config typo (a
+// missing minus sign) silently flipping lower_vp into a raise, or vice versa:
+// vpTarget picks the smaller-magnitude of the two step caps with no sign
+// check of its own, so Runtime() must reject a mismatched sign up front.
+func TestVPStepSignMustMatchActionDirection(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    lower_vp: {vp_step_percent_of_self: -20, vp_step_percent_of_total: 2}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	if _, err := Load(writeConfig(t, yaml)); err == nil {
+		t.Fatal("expected an error for lower_vp with a positive vp_step_percent_of_total")
+	}
+}
+
+// TestExplicitZeroActionFieldIsNotOverwrittenByDefault guards against the
+// zero-value/unset ambiguity: an operator setting vp_step_percent_of_total:
+// 0 (meaning "no network-share cap, self-cap only") must not have it
+// silently replaced by the built-in default.
+func TestExplicitZeroActionFieldIsNotOverwrittenByDefault(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: none}
+proposal:
+  actions:
+    lower_vp: {vp_step_percent_of_self: -20, vp_step_percent_of_total: 0}
+chains:
+  test: {rpc_endpoint: "http://x", chain_id: "dev", gnomonitoring_chain: "local", enabled: true, dry_run: true}
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+	lower := rt.Proposal.Actions[ActionLowerVP]
+	if *lower.VPStepPercentOfTotal != 0 {
+		t.Errorf("vp_step_percent_of_total = %v, want explicit 0 preserved (not defaulted to -2)", *lower.VPStepPercentOfTotal)
 	}
 }
 
@@ -278,11 +327,11 @@ chains:
 	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
 		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
 	}
-	if rt.Proposal.MinVotingPower != 100 {
-		t.Errorf("MinVotingPower = %d, want default 100", rt.Proposal.MinVotingPower)
+	if *rt.Proposal.MinVotingPower != 100 {
+		t.Errorf("MinVotingPower = %d, want default 100", *rt.Proposal.MinVotingPower)
 	}
-	if rt.Proposal.MaxVotingPowerShare != 15 {
-		t.Errorf("MaxVotingPowerShare = %v, want default 15", rt.Proposal.MaxVotingPowerShare)
+	if *rt.Proposal.MaxVotingPowerShare != 15 {
+		t.Errorf("MaxVotingPowerShare = %v, want default 15", *rt.Proposal.MaxVotingPowerShare)
 	}
 	for _, name := range []string{ActionEject, ActionLowerVP, ActionRaiseVP} {
 		ac, ok := rt.Proposal.Actions[name]

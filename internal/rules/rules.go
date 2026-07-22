@@ -55,7 +55,7 @@ func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]conf
 
 		switch name {
 		case config.ActionEject:
-			if period.Score < ac.ScoreBelow {
+			if period.Score < *ac.ScoreBelow {
 				d.Action = name
 				d.Score, d.Tier, d.Window = period.Score, period.Tier, ac.Window
 				d.CurrentPower = period.VotingPower
@@ -64,9 +64,14 @@ func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]conf
 			}
 
 		case config.ActionLowerVP, config.ActionRaiseVP:
-			matches := period.Score < ac.ScoreBelow
+			// ScoreBelow/ScoreAtOrAbove are only guaranteed set for the field
+			// each action actually uses (see ActionConfig doc comment) — the
+			// other one may be nil, so only dereference the relevant field.
+			var matches bool
 			if name == config.ActionRaiseVP {
-				matches = period.Score >= ac.ScoreAtOrAbove
+				matches = period.Score >= *ac.ScoreAtOrAbove
+			} else {
+				matches = period.Score < *ac.ScoreBelow
 			}
 			if !matches {
 				continue
@@ -74,8 +79,9 @@ func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]conf
 			total := totalWindowVP[ac.Window]
 			target := vpTarget(period.VotingPower, ac, minVP, maxVPShare, total)
 			if target == period.VotingPower {
-				// Clamped to a no-op: already at a bound, nothing to propose.
-				return d
+				// Clamped to a no-op: already at a bound, nothing to propose
+				// for this action — try the next one in priority.
+				continue
 			}
 			d.Action = name
 			d.Score, d.Tier, d.Window = period.Score, period.Tier, ac.Window
@@ -105,8 +111,8 @@ func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]conf
 // bound), so the target collapses to current, which Evaluate's
 // target == period.VotingPower check then treats as a no-op.
 func vpTarget(current int64, ac config.ActionConfig, minVP int64, maxVPShare float64, total int64) int64 {
-	capSelf := ac.VPStepPercentOfSelf / 100 * float64(current)
-	capTotal := ac.VPStepPercentOfTotal / 100 * float64(total)
+	capSelf := *ac.VPStepPercentOfSelf / 100 * float64(current)
+	capTotal := *ac.VPStepPercentOfTotal / 100 * float64(total)
 	step := capSelf
 	if absf(capTotal) < absf(capSelf) {
 		step = capTotal

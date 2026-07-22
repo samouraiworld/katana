@@ -54,6 +54,18 @@ func TestGate(t *testing.T) {
 			wantAllow: true,
 		},
 		{
+			// The vote took longer to resolve than the cooldown window: if the
+			// cooldown were anchored on CreatedAt, it would already be blown
+			// by the time the proposal is accepted, wrongly allowing an
+			// immediate re-propose. It must anchor on ResolvedAt instead.
+			name: "accepted lower_vp anchors cooldown on ResolvedAt, not CreatedAt",
+			last: &store.ProposalRecord{
+				Status: store.StatusAccepted, Action: config.ActionLowerVP,
+				CreatedAt: now.Add(-800 * time.Hour), ResolvedAt: now.Add(-1 * time.Hour),
+			},
+			wantAllow: false,
+		},
+		{
 			name:      "pending blocks re-proposal",
 			last:      &store.ProposalRecord{Status: store.StatusPending},
 			wantAllow: false,

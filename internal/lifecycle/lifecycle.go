@@ -50,7 +50,15 @@ func Gate(last *store.ProposalRecord, rejections int, p Params) Decision {
 		}
 		// lower_vp/raise_vp accepted is not terminal: the VP can be
 		// adjusted again later once the score moves and cooldown elapses.
-		if until := cooldownFloor(last, p); p.Now.Before(until) {
+		// Anchor on ResolvedAt (falling back to CreatedAt), like the
+		// rejected branch below: anchoring on CreatedAt would let a vote
+		// that outlives the cooldown window skip the cooldown entirely the
+		// moment it resolves.
+		base := last.ResolvedAt
+		if base.IsZero() {
+			base = last.CreatedAt
+		}
+		if until := base.Add(p.Cooldown); p.Now.Before(until) {
 			return deny("cooldown until %s", until.UTC().Format(time.RFC3339))
 		}
 		return allow()

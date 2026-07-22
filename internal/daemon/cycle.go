@@ -44,14 +44,30 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		totalVP[w] = rules.TotalVotingPower(reports, w)
 	}
 
+	// Fetched once per cycle rather than re-queried per eligible candidate:
+	// the score-driven model (raise_vp especially) can make many more
+	// validators eligible per cycle than the old missed-blocks/critical-
+	// alerts subset did, so a per-candidate valset refetch would multiply
+	// RPC calls with the candidate count instead of staying flat per cycle.
+	valset, err := gno.Validators(ctx)
+	if err != nil {
+		d.logger.Printf("[%s][eval] valset fetch failed: %v (skipping cycle)", rt.Key, err)
+		return
+	}
+	inValset := make(map[string]bool, len(valset))
+	for _, v := range valset {
+		inValset[strings.ToLower(v.Address)] = true
+	}
+
 	produced := 0
 	byAction := map[string]int{}
+	evals := make([]store.EvalRecord, 0, len(reports))
 	for _, report := range reports {
 		dec := rules.Evaluate(report, rt.Proposal.ActionPriority, rt.Proposal.Actions,
-			rt.Proposal.MinVotingPower, rt.Proposal.MaxVotingPowerShare, totalVP)
+			*rt.Proposal.MinVotingPower, *rt.Proposal.MaxVotingPowerShare, totalVP)
 
 		excepted := d.cfg.IsException(rt.Key, report.Addr, report.Moniker)
-		_ = d.st.RecordEvaluation(ctx, store.EvalRecord{
+		evals = append(evals, store.EvalRecord{
 			CreatedAt: d.now(), Chain: rt.Key, Address: report.Addr, Moniker: report.Moniker,
 			Score: dec.Score, Tier: dec.Tier, Eligible: dec.Action != "", Excepted: excepted, Reason: dec.Reason,
 		})
@@ -83,10 +99,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		}
 
 		// Safety: confirm the validator is in the live consensus valset.
-		if inSet, err := gno.IsValidator(ctx, report.Addr); err != nil {
-			d.logger.Printf("[%s][eval] valset check failed for %s: %v (skipping)", rt.Key, report.Addr, err)
-			continue
-		} else if !inSet {
+		if !inValset[strings.ToLower(report.Addr)] {
 			d.logger.Printf("[%s][eval] %s not in valset, skipping", rt.Key, report.Addr)
 			continue
 		}
@@ -95,6 +108,10 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		d.produce(ctx, rt, gno, dec, totalVP[dec.Window])
 		produced++
 		byAction[dec.Action]++
+	}
+
+	if err := d.st.RecordEvaluations(ctx, evals); err != nil {
+		d.logger.Printf("[%s][eval] recording evaluations: %v", rt.Key, err)
 	}
 
 	if produced == 0 {

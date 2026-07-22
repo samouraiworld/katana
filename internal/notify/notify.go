@@ -140,29 +140,42 @@ func rejectedText(in Info) string {
 		in.display(), in.Address, in.Chain, in.RejectedBackoff)
 }
 
-func actionNoun(action string) string {
-	switch action {
-	case config.ActionLowerVP:
-		return "a voting-power reduction"
-	case config.ActionRaiseVP:
-		return "a voting-power increase"
-	default:
-		return "ejection"
-	}
+// actionMeta groups every per-action display property (used to render the
+// message noun, the embed/attachment title, and each channel's color/emoji)
+// in one place, so a future action only needs one new map entry instead of
+// five parallel switches that can silently drift out of sync.
+type actionMeta struct {
+	noun  string
+	label string
+	rgb   int
+	hex   string
+	emoji string
 }
 
-func actionLabel(action string) string {
-	switch action {
-	case config.ActionRaiseVP:
-		return "Voting power increase"
-	case config.ActionLowerVP:
-		return "Voting power reduction"
-	case config.ActionEject:
-		return "Validator ejection"
-	default:
-		return "katana event"
-	}
+var actionMetas = map[string]actionMeta{
+	config.ActionEject:   {noun: "ejection", label: "Validator ejection", rgb: 15158332, hex: "#E74C3C", emoji: "🔴"},
+	config.ActionLowerVP: {noun: "a voting-power reduction", label: "Voting power reduction", rgb: 15105570, hex: "#E67E22", emoji: "🟠"},
+	config.ActionRaiseVP: {noun: "a voting-power increase", label: "Voting power increase", rgb: 3066993, hex: "#2ECC71", emoji: "🟢"},
 }
+
+// unknownActionMeta is the fallback for an empty/unrecognized action. The
+// noun still reads as "ejection" (Message's EventWouldEject wording predates
+// the Action field and always assumed eject when unset); colors/label render
+// as a neutral, unbranded event instead.
+var unknownActionMeta = actionMeta{noun: "ejection", label: "katana event", rgb: 9807270, hex: "#95A5A6", emoji: "⚪"}
+
+func metaFor(action string) actionMeta {
+	if m, ok := actionMetas[action]; ok {
+		return m
+	}
+	return unknownActionMeta
+}
+
+func actionNoun(action string) string    { return metaFor(action).noun }
+func actionLabel(action string) string   { return metaFor(action).label }
+func embedColor(action string) int       { return metaFor(action).rgb }
+func slackColorHex(action string) string { return metaFor(action).hex }
+func telegramEmoji(action string) string { return metaFor(action).emoji }
 
 func stageSuffix(event Event) string {
 	switch event {
@@ -186,49 +199,6 @@ func stageSuffix(event Event) string {
 // without reading the body.
 func Title(event Event, in Info) string {
 	return fmt.Sprintf("%s %s — %s (%s)", actionLabel(in.Action), stageSuffix(event), in.display(), in.Chain)
-}
-
-// embedColor returns the Discord embed color (decimal RGB) for action.
-func embedColor(action string) int {
-	switch action {
-	case config.ActionRaiseVP:
-		return 3066993 // #2ECC71 green
-	case config.ActionLowerVP:
-		return 15105570 // #E67E22 orange
-	case config.ActionEject:
-		return 15158332 // #E74C3C red
-	default:
-		return 9807270 // #95A5A6 gray
-	}
-}
-
-// slackColorHex returns the Slack attachment color (hex string) for action.
-func slackColorHex(action string) string {
-	switch action {
-	case config.ActionRaiseVP:
-		return "#2ECC71"
-	case config.ActionLowerVP:
-		return "#E67E22"
-	case config.ActionEject:
-		return "#E74C3C"
-	default:
-		return "#95A5A6"
-	}
-}
-
-// telegramEmoji returns the colored-emoji prefix standing in for color on a
-// channel with no native color concept.
-func telegramEmoji(action string) string {
-	switch action {
-	case config.ActionRaiseVP:
-		return "🟢"
-	case config.ActionLowerVP:
-		return "🟠"
-	case config.ActionEject:
-		return "🔴"
-	default:
-		return "⚪"
-	}
 }
 
 // Result is the per-channel outcome of a Dispatch.

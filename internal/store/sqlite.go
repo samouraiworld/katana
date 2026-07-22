@@ -132,17 +132,49 @@ func (s *SQLite) addColumnIfMissing(table, column, ddl string) error {
 	return nil
 }
 
+const insertEvaluationSQL = `INSERT INTO evaluations
+	 (created_at, chain, address, moniker, missed_blocks, critical_alerts, eligible, excepted, reason, score, tier)
+	 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`
+
 func (s *SQLite) RecordEvaluation(ctx context.Context, r EvalRecord) error {
 	// missed_blocks/critical_alerts are historical columns from the
 	// pre-score model; always 0 going forward, superseded by score/tier.
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO evaluations
-		 (created_at, chain, address, moniker, missed_blocks, critical_alerts, eligible, excepted, reason, score, tier)
-		 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`,
+	_, err := s.db.ExecContext(ctx, insertEvaluationSQL,
 		fmtTime(r.CreatedAt), r.Chain, r.Address, r.Moniker,
 		boolInt(r.Eligible), boolInt(r.Excepted), r.Reason, r.Score, r.Tier,
 	)
 	return err
+}
+
+// RecordEvaluations writes a whole cycle's evaluation rows in a single
+// transaction: an eval cycle now records one row per validator report (not
+// just eligible candidates), so committing one row at a time would mean one
+// fsync per validator per cycle on a single-connection database.
+func (s *SQLite) RecordEvaluations(ctx context.Context, rs []EvalRecord) error {
+	if len(rs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+
+	stmt, err := tx.PrepareContext(ctx, insertEvaluationSQL)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range rs {
+		if _, err := stmt.ExecContext(ctx,
+			fmtTime(r.CreatedAt), r.Chain, r.Address, r.Moniker,
+			boolInt(r.Eligible), boolInt(r.Excepted), r.Reason, r.Score, r.Tier,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLite) RecordProposal(ctx context.Context, r ProposalRecord) (int64, error) {

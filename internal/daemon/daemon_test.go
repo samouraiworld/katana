@@ -21,7 +21,10 @@ import (
 	"github.com/samouraiworld/katana/internal/store"
 )
 
-func boolPtr(b bool) *bool { return &b }
+func boolPtr(b bool) *bool          { return &b }
+func intPtr(i int) *int             { return &i }
+func int64Ptr(i int64) *int64       { return &i }
+func float64Ptr(f float64) *float64 { return &f }
 
 // stubChain serves the minimal gno.land RPC surface an eval cycle touches:
 // /status (chain identity), /validators (consensus valset) and /abci_query
@@ -189,30 +192,30 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 		Proposal: config.Proposal{
 			Cooldown: "720h", RejectedBackoff: "720h", Submit: "run",
 			ActionPriority: []string{config.ActionEject, config.ActionLowerVP, config.ActionRaiseVP},
-			MinVotingPower: 100,
+			MinVotingPower: int64Ptr(100),
 			// Realistic ceiling, matching the config default. The raise_vp
 			// fixture (TestEvalCycleRaisesVotingPower) reports a second,
 			// larger validator alongside g1bad so g1bad's share of total
 			// valset VP stays well under this ceiling and a genuine
 			// (non-clamped) raise occurs.
-			MaxVotingPowerShare: 15,
+			MaxVotingPowerShare: float64Ptr(15),
 			Actions: map[string]config.ActionConfig{
 				config.ActionEject: {
-					ScoreBelow: 30, Window: "current_month",
+					ScoreBelow: intPtr(30), Window: "current_month",
 					RunScriptTemplate:   "{operator_address} eject {title} {description}",
 					TitleTemplate:       "Eject {moniker} ({address})",
 					DescriptionTemplate: "Reason: {reason}",
 				},
 				config.ActionLowerVP: {
-					ScoreBelow: 60, Window: "current_week",
-					VPStepPercentOfSelf: -20, VPStepPercentOfTotal: -50, // wide network cap: self-cap decides in this fixture
+					ScoreBelow: intPtr(60), Window: "current_week",
+					VPStepPercentOfSelf: float64Ptr(-20), VPStepPercentOfTotal: float64Ptr(-50), // wide network cap: self-cap decides in this fixture
 					RunScriptTemplate:   "{operator_address} lower {target_power} {title} {description}",
 					TitleTemplate:       "Lower {moniker} ({address})",
 					DescriptionTemplate: "Reason: {reason}",
 				},
 				config.ActionRaiseVP: {
-					ScoreAtOrAbove: 85, Window: "current_year",
-					VPStepPercentOfSelf: 20, VPStepPercentOfTotal: 50,
+					ScoreAtOrAbove: intPtr(85), Window: "current_year",
+					VPStepPercentOfSelf: float64Ptr(20), VPStepPercentOfTotal: float64Ptr(50),
 					RunScriptTemplate:   "{operator_address} raise {target_power} {title} {description}",
 					TitleTemplate:       "Raise {moniker} ({address})",
 					DescriptionTemplate: "Reason: {reason}",

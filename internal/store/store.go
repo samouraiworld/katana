@@ -88,6 +88,11 @@ type NotifRecord struct {
 // use katana makes of them.
 type Store interface {
 	RecordEvaluation(ctx context.Context, r EvalRecord) error
+	// RecordEvaluations persists a whole cycle's evaluation records in one
+	// batch (a single transaction on SQLite), rather than one commit per
+	// validator — an eval cycle records one row per report, not just per
+	// eligible candidate.
+	RecordEvaluations(ctx context.Context, rs []EvalRecord) error
 	// RecordProposal persists a proposal and returns its row id.
 	RecordProposal(ctx context.Context, r ProposalRecord) (int64, error)
 	// SetOnchainID records the GovDAO id captured after a successful broadcast.
@@ -142,6 +147,7 @@ func boolInt(b bool) int {
 type Noop struct{}
 
 func (Noop) RecordEvaluation(context.Context, EvalRecord) error            { return nil }
+func (Noop) RecordEvaluations(context.Context, []EvalRecord) error         { return nil }
 func (Noop) RecordProposal(context.Context, ProposalRecord) (int64, error) { return 0, nil }
 func (Noop) SetOnchainID(context.Context, int64, string) error             { return nil }
 func (Noop) UpdateStatus(context.Context, int64, string, time.Time) error  { return nil }

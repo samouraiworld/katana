@@ -7,16 +7,19 @@ import (
 	"github.com/samouraiworld/katana/internal/gnomonitoring"
 )
 
+func ip(i int) *int         { return &i }
+func fp(f float64) *float64 { return &f }
+
 func actions() map[string]config.ActionConfig {
 	return map[string]config.ActionConfig{
-		config.ActionEject: {ScoreBelow: 30, Window: "current_month"},
+		config.ActionEject: {ScoreBelow: ip(30), Window: "current_month"},
 		config.ActionLowerVP: {
-			ScoreBelow: 60, Window: "current_week",
-			VPStepPercentOfSelf: -20, VPStepPercentOfTotal: -2,
+			ScoreBelow: ip(60), Window: "current_week",
+			VPStepPercentOfSelf: fp(-20), VPStepPercentOfTotal: fp(-2),
 		},
 		config.ActionRaiseVP: {
-			ScoreAtOrAbove: 85, Window: "current_year",
-			VPStepPercentOfSelf: 20, VPStepPercentOfTotal: 2,
+			ScoreAtOrAbove: ip(85), Window: "current_year",
+			VPStepPercentOfSelf: fp(20), VPStepPercentOfTotal: fp(2),
 		},
 	}
 }
