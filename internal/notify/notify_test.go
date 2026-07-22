@@ -209,7 +209,7 @@ func TestDispatchSlackAttachment(t *testing.T) {
 
 	n := New(config.Notifications{
 		Enabled: true,
-		Slack: config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
+		Slack:   config.WebhookChannel{Enabled: true, WebhookURL: srv.URL},
 	})
 	n.Dispatch(context.Background(), EventSent, Info{
 		Chain: "chain1", Address: "g1x", Action: config.ActionLowerVP,
