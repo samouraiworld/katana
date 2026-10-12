@@ -96,6 +96,32 @@ proposal:
   max_rejections: 2                   # stop after N GovDAO rejections; 0 = unlimited
   submit: run                         # run (default; required for lower_vp/raise_vp) | call (eject only)
 
+  # Run scripts: each action's run_script_template defaults to a script for the
+  # gno.land MAINNET realms (gnolang/gno chain/mainnet tag, the image's default
+  # GNO_REF): `validators "gno.land/r/sys/validators/v0"`. On test13 the realm
+  # is still r/sys/validators/v3 (same API), so override the script there —
+  # e.g. under chains.test13.proposal.actions.eject (a per-chain proposal block
+  # replaces the global one; unset fields fall back to the built-in defaults),
+  # and likewise for lower_vp/raise_vp with {target_power} instead of 0, and
+  # build the image with GNO_REF=f45cc5c88e6a:
+  #
+  #   run_script_template: |
+  #     package main
+  #
+  #     import (
+  #       "gno.land/r/gov/dao"
+  #       validators "gno.land/r/sys/validators/v3"
+  #     )
+  #
+  #     func main(cur realm) {
+  #       pr := validators.NewValidatorProposalRequest(cross(cur),
+  #         []validators.ValoperChange{validators.NewValoperChange(address("{operator_address}"), 0)},
+  #         "{title}",
+  #         "{description}",
+  #       )
+  #       dao.MustCreateProposal(cross(cur), pr)
+  #     }
+
   actions:
     # Thresholds default to gnomonitoring's own tier boundaries (Excellent
     # >=85 / Good >=60 / Watch >=30 / Critical <30); 60-84 is an intentional
@@ -153,7 +179,7 @@ proposal:
         Reason: {reason}
 
 # ── Vote tracking ─────────────────────────────────────────────────────────────
-# Follows the GovDAO outcome of broadcast proposals. GovDAO v3 resolves a
+# Follows the GovDAO outcome of broadcast proposals. GovDAO resolves a
 # proposal only when someone calls ExecuteProposal once YES or NO reaches the
 # 66.66% supermajority; proposals never expire on-chain.
 vote_tracking:
@@ -220,6 +246,9 @@ chains:
     chain_id: "test6"
     gnomonitoring_chain: "test6"
     enabled: true
+    # tx_indexer_url: "https://indexer.test6.testnets.gno.land/graphql/query"
+    #                                   # optional: reconcile `unconfirmed` broadcasts
+    #                                   # that lost their tx hash; requires gnokey.address
     # dry_run: false                  # uncomment to arm this chain (root default: true)
 
   betanet:

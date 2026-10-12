@@ -55,7 +55,9 @@ func TestEvalCycleFailsClosedOnStoreErrors(t *testing.T) {
 			fs.Store = f.st
 			f.d.st = fs
 
-			f.d.evalCycle(context.Background(), f.runtime(t))
+			if err := f.d.evalCycle(context.Background(), f.runtime(t)); err == nil {
+				t.Fatalf("a %s error must fail the cycle for /health", name)
+			}
 
 			if got := f.broadcasts.count(); got != 0 {
 				t.Fatalf("broadcasts = %d, want 0 on a %s error\nlogs:\n%s", got, name, f.logs.String())
@@ -185,7 +187,10 @@ func TestMassEligibilityAbortsCycle(t *testing.T) {
 	f := newValsetFixture(t, 3, 7, nil) // 30% eligible > 25%
 	rt := strict(f.runtime(t))
 
-	f.d.evalCycle(ctx, rt)
+	// A tripped guardrail is a deliberate skip: the cycle still succeeds.
+	if err := f.d.evalCycle(ctx, rt); err != nil {
+		t.Fatalf("tripped guardrail reported as a failed cycle: %v", err)
+	}
 	f.d.evalCycle(ctx, rt)
 	if got := f.broadcasts.count(); got != 0 {
 		t.Fatalf("broadcasts = %d, want 0 (mass eligibility)\nlogs:\n%s", got, f.logs.String())

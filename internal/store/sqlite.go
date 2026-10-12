@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS notifications (
 		{"evaluations", "score", `ALTER TABLE evaluations ADD COLUMN score INTEGER NOT NULL DEFAULT 0`},
 		{"evaluations", "tier", `ALTER TABLE evaluations ADD COLUMN tier TEXT NOT NULL DEFAULT ''`},
 		{"proposals", "tx_hash", `ALTER TABLE proposals ADD COLUMN tx_hash TEXT NOT NULL DEFAULT ''`},
+		{"proposals", "broadcast_height", `ALTER TABLE proposals ADD COLUMN broadcast_height INTEGER NOT NULL DEFAULT 0`},
+		{"proposals", "payload_hash", `ALTER TABLE proposals ADD COLUMN payload_hash TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, c := range cols {
 		if err := s.addColumnIfMissing(c.table, c.name, c.ddl); err != nil {
@@ -185,12 +187,13 @@ func (s *SQLite) RecordProposal(ctx context.Context, r ProposalRecord) (int64, e
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO proposals
-		 (created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power, tx_hash)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power, tx_hash, broadcast_height, payload_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		fmtTime(r.CreatedAt), r.Chain, r.ChainID, r.Address, r.Moniker,
 		r.Reason, r.Title, r.RealmPath, r.Function, string(args), r.Output,
 		boolInt(r.Success), r.OnchainID, r.Status, fmtTime(r.ResolvedAt),
 		r.Action, r.TargetPower, r.CurrentPower, r.TxHash,
+		r.BroadcastHeight, r.PayloadHash,
 	)
 	if err != nil {
 		return 0, err
@@ -202,6 +205,32 @@ func (s *SQLite) SetOnchainID(ctx context.Context, id int64, onchainID string) e
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE proposals SET onchain_proposal_id = ? WHERE id = ?`, onchainID, id)
 	return err
+}
+
+func (s *SQLite) Reconcile(ctx context.Context, id int64, txHash, onchainID string) error {
+	if txHash == "" || onchainID == "" {
+		return fmt.Errorf("reconcile row %d: empty tx hash or GovDAO id", id)
+	}
+	// A single guarded UPDATE: the eligibility check and the write cannot
+	// race with the vote worker's own status updates.
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE proposals
+		 SET tx_hash = ?, onchain_proposal_id = ?,
+		     status = CASE status WHEN ? THEN ? ELSE status END
+		 WHERE id = ? AND status IN (?, ?) AND tx_hash = '' AND onchain_proposal_id = ''`,
+		txHash, onchainID, StatusUnconfirmed, StatusPending,
+		id, StatusUnconfirmed, StatusExpired)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotReconciled
+	}
+	return nil
 }
 
 func (s *SQLite) UpdateStatus(ctx context.Context, id int64, status string, resolvedAt time.Time) error {
@@ -222,7 +251,7 @@ func (s *SQLite) RecordNotification(ctx context.Context, r NotifRecord) error {
 	return err
 }
 
-const proposalCols = `id, created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power, tx_hash`
+const proposalCols = `id, created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power, tx_hash, broadcast_height, payload_hash`
 
 func scanProposal(rows *sql.Rows) (ProposalRecord, error) {
 	var (
@@ -235,7 +264,8 @@ func scanProposal(rows *sql.Rows) (ProposalRecord, error) {
 	if err := rows.Scan(&r.ID, &created, &r.Chain, &r.ChainID, &r.Address, &r.Moniker,
 		&r.Reason, &r.Title, &r.RealmPath, &r.Function, &argsJSON,
 		&r.Output, &success, &r.OnchainID, &r.Status, &resolvedAt,
-		&r.Action, &r.TargetPower, &r.CurrentPower, &r.TxHash); err != nil {
+		&r.Action, &r.TargetPower, &r.CurrentPower, &r.TxHash,
+		&r.BroadcastHeight, &r.PayloadHash); err != nil {
 		return r, err
 	}
 	r.CreatedAt, _ = parseTime(created)

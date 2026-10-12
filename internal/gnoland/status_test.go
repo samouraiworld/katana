@@ -48,3 +48,30 @@ func TestNetworkErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestLatestHeight(t *testing.T) {
+	cases := map[string]struct {
+		body    string
+		want    int64
+		wantErr bool
+	}{
+		"ok":          {body: `{"result":{"sync_info":{"latest_block_height":"1234"}}}`, want: 1234},
+		"missing":     {body: `{"result":{}}`, wantErr: true},
+		"non-numeric": {body: `{"result":{"sync_info":{"latest_block_height":"x"}}}`, wantErr: true},
+		"zero":        {body: `{"result":{"sync_info":{"latest_block_height":"0"}}}`, wantErr: true},
+		"rpc error":   {body: `{"error":{"message":"boom","data":"detail"}}`, wantErr: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+
+			got, err := New(srv.URL).LatestHeight(context.Background())
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Fatalf("LatestHeight = %d, %v; want %d (err %v)", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}

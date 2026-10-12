@@ -80,9 +80,14 @@ the `ProposalCreated` event, or later from the tx itself (RPC `/tx`) when gnokey
 printed none. When gnokey fails *after* sending the tx (RPC timeout, dropped
 connection), the proposal may or may not be on-chain: katana records it as
 **unconfirmed**, sends an alert, and blocks new proposals for that validator
-until it is resolved (an expired unconfirmed row keeps blocking: gnokey prints
-no tx hash in that case, so an operator has to check). Other gnokey errors (simulation, CheckTx, DeliverTx) are plain
-failures.
+until it is resolved. gnokey prints no tx hash in that case, so katana records
+the chain height and a SHA-256 of the exact submitted payload before each
+broadcast; when the chain sets `tx_indexer_url` (and `gnokey.address`), the vote
+worker searches the tx-indexer for a committed tx from katana's key after that
+height carrying the same payload, and on a single match records its tx hash and
+GovDAO id and tracks it normally. Without an indexer, or with no match, the row
+keeps blocking (even once expired) until an operator checks. Other gnokey
+errors (simulation, CheckTx, DeliverTx) are plain failures.
 
 ## Score-driven actions
 
@@ -107,7 +112,9 @@ intentional no-action stability zone.
 whichever of two caps has the smaller magnitude: `vp_step_percent_of_self` (a
 % of the validator's own current VP — protects small validators from an
 oversized single move) and `vp_step_percent_of_total` (a % of the chain's
-total valset VP — keeps a large validator's step bounded). Both recomputed
+total valset VP — keeps a large validator's step bounded). Current and total
+VP come from the chain's live valset (RPC `/validators`), not from
+gnomonitoring; an unreadable RPC voting power skips the cycle. Both recomputed
 fresh from live data every cycle, so repeated triggers don't compound. The
 result is clamped to `[min_voting_power, max_voting_power_share% of total
 valset VP]` (the reducing direction floors at `min_voting_power`, the raising
@@ -256,6 +263,47 @@ docker compose logs -f katana
 The SQLite database persists in the `katana-data` volume; point
 `storage.sqlite_path` under `/app/data`.
 
+### Target network
+
+The image targets the gno.land **mainnet** by default: `gnokey` is built from
+`GNO_REF` = `9c8eb132e483d6fd324d92c193e629ad65a98a37`, the gnolang/gno
+`chain/mainnet` tag commit (also tagged `v1.2.0`; the full SHA is pinned
+because tags can move). The built-in run scripts import the mainnet realm
+`gno.land/r/sys/validators/v0` and create the proposal through
+`gno.land/r/gov/dao`. The ejection flow was confirmed end-to-end on a test13
+devnet (realm `r/sys/validators/v3`, same API) and is pending re-confirmation
+on a devnet built from the mainnet tag.
+
+To target **test13**, build with `GNO_REF=f45cc5c88e6a` and override each
+action's `run_script_template` with the v3 import
+(`validators "gno.land/r/sys/validators/v3"`); `config.yaml.example` has the
+full script next to `proposal.submit`.
+
+### Production deployment
+
+[`docker-compose.prod.yml`](docker-compose.prod.yml) runs a published image
+instead of building one:
+
+```sh
+mkdir -p data && sudo chown 10001:10001 data   # the image runs as uid 10001
+cp config.yaml.example config.yaml             # set storage.sqlite_path: /app/data/katana.db,
+                                               # gnokey.home: /app/data/keybase, web.enabled: true
+export KATANA_IMAGE_TAG=1.0.0                  # required; never `latest`
+docker compose -f docker-compose.prod.yml up -d
+```
+
+- `KATANA_IMAGE_TAG` is mandatory and must name an immutable tag published by
+  the Docker image workflow: `<semver>` for a `v<semver>` git tag, or
+  `sha-<short commit>`.
+- The healthcheck polls `GET /health` with `wget`; any non-2xx answer (e.g.
+  503 when a worker is stale) marks the container unhealthy. Pair it with an
+  external monitor or an autoheal tool, since `restart: unless-stopped` does
+  not restart a container that is merely unhealthy.
+- Port 8990 is published on all interfaces; bind it to `127.0.0.1:8990:8990`
+  if only a local monitor needs it.
+- Start with `dry_run: true` (the default) and arm a chain only after checking
+  the would-be proposals it notifies.
+
 ## Configuration
 
 Everything is in `config.yaml` (see [`config.yaml.example`](config.yaml.example)).
@@ -287,8 +335,16 @@ Secrets/per-deployment values can be overridden from the environment:
 
 ## Health
 
-Enable `web:` in `config.yaml` to expose `GET /health` (200 = alive) for
-liveness monitoring / Grafana alerting.
+Enable `web:` in `config.yaml` to expose `GET /health` for liveness
+monitoring / Grafana alerting. Each worker (eval and vote, per chain) records
+its last successful cycle — one that ran to the end with gnomonitoring, the
+chain RPC and the store answering (a tripped mass-eligibility guardrail still
+counts as a success). `/health` answers 200 while every worker succeeded within
+the last 3 poll intervals, and 503 otherwise; a worker that has never succeeded
+is measured from its start (startup grace). The JSON body lists each worker's
+interval, last success, last failure and last error. A panic inside a cycle is
+recovered and logged with its stack: it counts as a failed cycle and the worker
+keeps running.
 
 ## Testing
 

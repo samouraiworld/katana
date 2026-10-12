@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/proposal"
 	"github.com/samouraiworld/katana/internal/store"
+	"github.com/samouraiworld/katana/internal/txindexer"
 )
 
 // render loads a real GovDAO v3 proposal page from the govdao fixtures.
@@ -360,5 +363,91 @@ func TestVoteCycleGivesUpOnFailingExecute(t *testing.T) {
 	}
 	if got := lastStatus(t, f).Status; got != store.StatusPending {
 		t.Fatalf("status = %q, want pending (the proposal is still open)", got)
+	}
+}
+
+// indexerServer serves the real tx-indexer response fixture and returns the
+// tx it contains, as the txindexer client parses it.
+func indexerServer(t *testing.T) (string, txindexer.Tx) {
+	t.Helper()
+	body, err := os.ReadFile("../txindexer/testdata/indexer_proposals_by_caller.response.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	txs, err := txindexer.New(srv.URL, nil).ProposalsByCaller(context.Background(), "g1katana", 1)
+	if err != nil || len(txs) == 0 {
+		t.Fatalf("fixture: %d txs, err %v", len(txs), err)
+	}
+	return srv.URL, txs[0]
+}
+
+func seedHashless(t *testing.T, f *fixture, status, payloadHash string) int64 {
+	t.Helper()
+	id, err := f.st.RecordProposal(context.Background(), store.ProposalRecord{
+		CreatedAt: f.d.now().Add(-time.Minute), Chain: "test", ChainID: "dev",
+		Address: "g1bad", Moniker: "bad", Action: config.ActionEject, Status: status,
+		BroadcastHeight: 10, PayloadHash: payloadHash,
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	return id
+}
+
+// A hashless unconfirmed broadcast is matched on the tx-indexer by payload
+// hash, and gets its tx hash and GovDAO id back.
+func TestVoteReconcilesHashlessUnconfirmed(t *testing.T) {
+	url, tx := indexerServer(t)
+	f := newFixture(t, "dev", nil)
+	rt := f.runtime(t)
+	rt.TxIndexerURL = url
+	rt.Gnokey.Address = "g1katana"
+	seedHashless(t, f, store.StatusUnconfirmed, tx.PayloadHash())
+	f.chain.setRender(tx.ProposalID, "- **Proposal is open for votes**\n- YES PERCENT: 0%\n- NO PERCENT: 0%\n")
+
+	if err := f.d.voteCycle(context.Background(), rt); err != nil {
+		t.Fatalf("voteCycle: %v\nlogs:\n%s", err, f.logs.String())
+	}
+	got := lastStatus(t, f)
+	if got.TxHash != tx.Hash || got.OnchainID != tx.ProposalID || got.Status != store.StatusPending {
+		t.Fatalf("row = %+v, want tx %s id %s pending\nlogs:\n%s", got, tx.Hash, tx.ProposalID, f.logs.String())
+	}
+}
+
+// No match (or no indexer configured): the row stays unconfirmed and hashless.
+func TestVoteReconcileNoMatch(t *testing.T) {
+	url, _ := indexerServer(t)
+	for name, indexer := range map[string]string{"no match": url, "no indexer": ""} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, "dev", nil)
+			rt := f.runtime(t)
+			rt.TxIndexerURL = indexer
+			rt.Gnokey.Address = "g1katana"
+			seedHashless(t, f, store.StatusUnconfirmed, "deadbeef")
+
+			f.d.voteCycle(context.Background(), rt)
+			if got := lastStatus(t, f); got.TxHash != "" || got.OnchainID != "" || got.Status != store.StatusUnconfirmed {
+				t.Fatalf("row = %+v, want untouched", got)
+			}
+		})
+	}
+}
+
+// A broadcast records what reconcile needs should gnokey lose the tx hash.
+func TestBroadcastRecordsReconcileData(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.evalCycle(context.Background(), f.runtime(t))
+
+	calls := f.broadcasts.calls()
+	if len(calls) != 1 {
+		t.Fatalf("broadcasts = %d, want 1\nlogs:\n%s", len(calls), f.logs.String())
+	}
+	got := lastStatus(t, f)
+	if got.BroadcastHeight != 42 || got.PayloadHash == "" || got.PayloadHash != txindexer.RunPayloadHash(calls[0].Script) {
+		t.Fatalf("row BroadcastHeight=%d PayloadHash=%q, want 42 and the script's hash", got.BroadcastHeight, got.PayloadHash)
 	}
 }

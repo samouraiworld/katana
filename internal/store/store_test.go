@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -192,6 +193,9 @@ CREATE TABLE proposals (
 	if last.TargetPower != 0 || last.CurrentPower != 0 {
 		t.Fatalf("pre-migration row TargetPower/CurrentPower = %d/%d, want 0/0", last.TargetPower, last.CurrentPower)
 	}
+	if last.BroadcastHeight != 0 || last.PayloadHash != "" {
+		t.Fatalf("pre-migration row BroadcastHeight/PayloadHash = %d/%q, want 0/\"\"", last.BroadcastHeight, last.PayloadHash)
+	}
 
 	// Migration must be idempotent: opening it again must not error.
 	st2, err := New(config.Storage{Driver: "sqlite", SQLitePath: path})
@@ -320,4 +324,139 @@ func TestBroadcastsSince(t *testing.T) {
 	if n, err := (Noop{}).BroadcastsSince(ctx, "local", now); err != nil || n != 0 {
 		t.Fatalf("Noop.BroadcastsSince = %d, %v; want 0, nil", n, err)
 	}
+}
+
+func TestBroadcastHeightAndPayloadHashRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	const hash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	id, err := st.RecordProposal(ctx, ProposalRecord{
+		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+		Status: StatusUnconfirmed, BroadcastHeight: 42, PayloadHash: hash,
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	check := func(where string, r ProposalRecord) {
+		t.Helper()
+		if r.ID != id || r.BroadcastHeight != 42 || r.PayloadHash != hash {
+			t.Fatalf("%s: ID/BroadcastHeight/PayloadHash = %d/%d/%q", where, r.ID, r.BroadcastHeight, r.PayloadHash)
+		}
+	}
+	last, err := st.LastProposal(ctx, "local", "g1bad")
+	if err != nil || last == nil {
+		t.Fatalf("LastProposal = %+v, %v", last, err)
+	}
+	check("LastProposal", *last)
+	tracked, err := st.TrackedProposals(ctx, "local")
+	if err != nil || len(tracked) != 1 {
+		t.Fatalf("TrackedProposals = %+v, %v", tracked, err)
+	}
+	check("TrackedProposals", tracked[0])
+	list, err := st.ListProposals(ctx, 10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListProposals = %+v, %v", list, err)
+	}
+	check("ListProposals", list[0])
+}
+
+func TestReconcile(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	record := func(status, txHash, onchainID string) int64 {
+		t.Helper()
+		id, err := st.RecordProposal(ctx, ProposalRecord{
+			CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+			Status: status, TxHash: txHash, OnchainID: onchainID,
+		})
+		if err != nil {
+			t.Fatalf("RecordProposal: %v", err)
+		}
+		return id
+	}
+	get := func(id int64) ProposalRecord {
+		t.Helper()
+		list, err := st.ListProposals(ctx, 100)
+		if err != nil {
+			t.Fatalf("ListProposals: %v", err)
+		}
+		for _, r := range list {
+			if r.ID == id {
+				return r
+			}
+		}
+		t.Fatalf("row %d not found", id)
+		return ProposalRecord{}
+	}
+
+	t.Run("unconfirmed becomes pending", func(t *testing.T) {
+		id := record(StatusUnconfirmed, "", "")
+		if err := st.Reconcile(ctx, id, "q7lHmFF/yLsDJx8hdMiYn+raUZ/0PLMGWdxaspP+qjE=", "7"); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		r := get(id)
+		if r.Status != StatusPending || r.TxHash != "q7lHmFF/yLsDJx8hdMiYn+raUZ/0PLMGWdxaspP+qjE=" || r.OnchainID != "7" {
+			t.Fatalf("after Reconcile = status %q, hash %q, id %q", r.Status, r.TxHash, r.OnchainID)
+		}
+		// A second reconciliation is a no-op: the row now has a tx hash.
+		if err := st.Reconcile(ctx, id, "other", "8"); !errors.Is(err, ErrNotReconciled) {
+			t.Fatalf("second Reconcile err = %v, want ErrNotReconciled", err)
+		}
+		if r := get(id); r.TxHash != "q7lHmFF/yLsDJx8hdMiYn+raUZ/0PLMGWdxaspP+qjE=" || r.OnchainID != "7" {
+			t.Fatalf("second Reconcile overwrote the row: %+v", r)
+		}
+	})
+
+	t.Run("expired keeps its status", func(t *testing.T) {
+		id := record(StatusExpired, "", "")
+		if err := st.Reconcile(ctx, id, "hash", "9"); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		r := get(id)
+		if r.Status != StatusExpired || r.TxHash != "hash" || r.OnchainID != "9" {
+			t.Fatalf("after Reconcile = status %q, hash %q, id %q", r.Status, r.TxHash, r.OnchainID)
+		}
+	})
+
+	refused := []struct {
+		name                      string
+		status, txHash, onchainID string
+	}{
+		{"pending", StatusPending, "", ""},
+		{"accepted", StatusAccepted, "", ""},
+		{"rejected", StatusRejected, "", ""},
+		{"dry-run", StatusDryRun, "", ""},
+		{"failed broadcast", "", "", ""},
+		{"unconfirmed with a tx hash", StatusUnconfirmed, "known", ""},
+		{"expired with a tx hash", StatusExpired, "known", ""},
+		{"unconfirmed with an id", StatusUnconfirmed, "", "3"},
+	}
+	for _, c := range refused {
+		t.Run("refuses "+c.name, func(t *testing.T) {
+			id := record(c.status, c.txHash, c.onchainID)
+			if err := st.Reconcile(ctx, id, "hash", "9"); !errors.Is(err, ErrNotReconciled) {
+				t.Fatalf("Reconcile err = %v, want ErrNotReconciled", err)
+			}
+			if r := get(id); r.Status != c.status || r.TxHash != c.txHash || r.OnchainID != c.onchainID {
+				t.Fatalf("refused Reconcile modified the row: %+v", r)
+			}
+		})
+	}
+
+	t.Run("unknown row", func(t *testing.T) {
+		if err := st.Reconcile(ctx, 9999, "hash", "9"); !errors.Is(err, ErrNotReconciled) {
+			t.Fatalf("Reconcile err = %v, want ErrNotReconciled", err)
+		}
+	})
+
+	t.Run("empty inputs", func(t *testing.T) {
+		id := record(StatusUnconfirmed, "", "")
+		if err := st.Reconcile(ctx, id, "", "9"); err == nil || errors.Is(err, ErrNotReconciled) {
+			t.Fatalf("empty tx hash: err = %v, want a validation error", err)
+		}
+		if err := st.Reconcile(ctx, id, "hash", ""); err == nil || errors.Is(err, ErrNotReconciled) {
+			t.Fatalf("empty id: err = %v, want a validation error", err)
+		}
+	})
 }

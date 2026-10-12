@@ -9,11 +9,17 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/samouraiworld/katana/internal/config"
 )
+
+// ErrNotReconciled is returned by Reconcile when the row is not eligible for
+// reconciliation (unknown id, wrong status, or a tx hash or GovDAO id already
+// recorded). Nothing was written.
+var ErrNotReconciled = errors.New("proposal row not reconcilable")
 
 // Proposal lifecycle statuses.
 const (
@@ -79,6 +85,12 @@ type ProposalRecord struct {
 	TxHash     string    // base64 tx hash printed by gnokey, if any
 	Status     string    // pending | accepted | rejected | expired | unconfirmed ("" for a failed broadcast)
 	ResolvedAt time.Time // zero until accepted/rejected/expired
+	// Reconciliation inputs for a broadcast whose gnokey output carried no
+	// tx hash (see Reconcile): the chain height read just before
+	// broadcasting (0 = unknown) and the hex SHA-256 of the exact submitted
+	// payload (txindexer.RunPayloadHash / CallPayloadHash; "" = unknown).
+	BroadcastHeight int64
+	PayloadHash     string
 }
 
 // NotifRecord is one notification attempt.
@@ -109,6 +121,15 @@ type Store interface {
 	// SetOnchainID records a GovDAO id resolved after the broadcast (from the
 	// tx's events when gnokey's own output did not carry it).
 	SetOnchainID(ctx context.Context, id int64, onchainID string) error
+	// Reconcile attaches the tx hash and GovDAO id recovered from the
+	// tx-indexer to a broadcast that gnokey reported without a tx hash. It
+	// only touches a row whose status is unconfirmed or expired and whose
+	// tx_hash and onchain id are both empty; otherwise it writes nothing and
+	// returns ErrNotReconciled. An unconfirmed row becomes pending. An expired
+	// row stays expired: it is past pending_timeout already (going back to
+	// pending would re-expire it and notify twice) and the vote worker
+	// follows expired rows anyway. txHash and onchainID must be non-empty.
+	Reconcile(ctx context.Context, id int64, txHash, onchainID string) error
 	// UpdateStatus advances a proposal's lifecycle status.
 	UpdateStatus(ctx context.Context, id int64, status string, resolvedAt time.Time) error
 	RecordNotification(ctx context.Context, r NotifRecord) error
@@ -171,6 +192,7 @@ func (Noop) RecordEvaluations(context.Context, []EvalRecord) error         { ret
 func (Noop) RecordProposal(context.Context, ProposalRecord) (int64, error) { return 0, nil }
 func (Noop) SetOnchainID(context.Context, int64, string) error             { return nil }
 func (Noop) UpdateStatus(context.Context, int64, string, time.Time) error  { return nil }
+func (Noop) Reconcile(context.Context, int64, string, string) error        { return nil }
 func (Noop) RecordNotification(context.Context, NotifRecord) error         { return nil }
 func (Noop) LastProposal(context.Context, string, string) (*ProposalRecord, error) {
 	return nil, nil

@@ -72,14 +72,29 @@ func (c *Client) Validators(ctx context.Context) ([]Validator, error) {
 			return nil, fmt.Errorf("RPC error: %s (%s)", body.Error.Message, body.Error.Data)
 		}
 
+		// Fail closed: an unreadable entry must never read as a 0 voting
+		// power or a smaller valset (both feed the VP targets and the
+		// min_valset_size guardrail).
 		for _, v := range body.Result.Validators {
-			power, _ := strconv.ParseInt(v.VotingPower, 10, 64)
+			if v.Address == "" {
+				return nil, fmt.Errorf("validator with an empty address on page %d", page)
+			}
+			power, err := strconv.ParseInt(v.VotingPower, 10, 64)
+			if err != nil || power <= 0 {
+				return nil, fmt.Errorf("validator %s: invalid voting_power %q", v.Address, v.VotingPower)
+			}
 			all = append(all, Validator{Address: v.Address, VotingPower: power})
 		}
 
-		total, _ := strconv.Atoi(body.Result.Total)
-		if len(body.Result.Validators) == 0 || len(all) >= total {
+		total, err := strconv.Atoi(body.Result.Total)
+		if err != nil || total < 0 {
+			return nil, fmt.Errorf("invalid valset total %q", body.Result.Total)
+		}
+		if len(all) >= total {
 			break
+		}
+		if len(body.Result.Validators) == 0 {
+			return nil, fmt.Errorf("valset truncated: %d of %d validators returned", len(all), total)
 		}
 		page++
 	}

@@ -5,8 +5,10 @@ package rules
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/samouraiworld/katana/internal/config"
+	"github.com/samouraiworld/katana/internal/gnoland"
 	"github.com/samouraiworld/katana/internal/gnomonitoring"
 )
 
@@ -23,25 +25,33 @@ type Decision struct {
 	Reason           string
 }
 
-// TotalVotingPower sums every report's voting power for the given window,
-// used to clamp lower_vp/raise_vp targets against a % of the chain's total
-// valset VP. Missing entries for that window contribute 0.
-func TotalVotingPower(reports []gnomonitoring.Report, window string) int64 {
-	var total int64
-	for _, r := range reports {
-		total += r.Periods[window].VotingPower
+// Valset is the live consensus valset read from the chain RPC: the
+// authoritative voting power for VP-change targets. gnomonitoring's per-window
+// voting power is display data only and never feeds a computation.
+type Valset struct {
+	Power map[string]int64 // lower-cased address -> current voting power
+	Total int64            // sum of Power
+}
+
+// NewValset indexes RPC validators by lower-cased address.
+func NewValset(vals []gnoland.Validator) Valset {
+	v := Valset{Power: make(map[string]int64, len(vals))}
+	for _, val := range vals {
+		v.Power[strings.ToLower(val.Address)] = val.VotingPower
+		v.Total += val.VotingPower
 	}
-	return total
+	return v
 }
 
 // Evaluate walks priority in order and returns the first action whose
-// threshold matches on its own configured window. totalWindowVP maps a
-// window name to that window's total valset voting power (TotalVotingPower),
-// needed to clamp lower_vp/raise_vp targets against maxVPShare.
+// threshold matches on its own configured window. Current and total voting
+// power come from the live valset (vs); a validator absent from it gets no
+// lower_vp/raise_vp decision, since it has no voting power to change.
 func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]config.ActionConfig,
-	minVP int64, maxVPShare float64, totalWindowVP map[string]int64) Decision {
+	minVP int64, maxVPShare float64, vs Valset) Decision {
 
 	d := Decision{Address: r.Addr, Moniker: r.Moniker}
+	current, inValset := vs.Power[strings.ToLower(r.Addr)]
 
 	for _, name := range priority {
 		ac, ok := actions[name]
@@ -58,7 +68,7 @@ func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]conf
 			if period.Score < *ac.ScoreBelow {
 				d.Action = name
 				d.Score, d.Tier, d.Window = period.Score, period.Tier, ac.Window
-				d.CurrentPower = period.VotingPower
+				d.CurrentPower = current
 				d.Reason = reason(period, ac.Window)
 				return d
 			}
@@ -73,19 +83,18 @@ func Evaluate(r gnomonitoring.Report, priority []string, actions map[string]conf
 			} else {
 				matches = period.Score < *ac.ScoreBelow
 			}
-			if !matches {
+			if !matches || !inValset {
 				continue
 			}
-			total := totalWindowVP[ac.Window]
-			target := vpTarget(period.VotingPower, ac, minVP, maxVPShare, total)
-			if target == period.VotingPower {
+			target := vpTarget(current, ac, minVP, maxVPShare, vs.Total)
+			if target == current {
 				// Clamped to a no-op: already at a bound, nothing to propose
 				// for this action — try the next one in priority.
 				continue
 			}
 			d.Action = name
 			d.Score, d.Tier, d.Window = period.Score, period.Tier, ac.Window
-			d.CurrentPower = period.VotingPower
+			d.CurrentPower = current
 			d.TargetPower = target
 			d.Reason = reason(period, ac.Window)
 			return d
