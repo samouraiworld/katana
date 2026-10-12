@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/samouraiworld/katana/internal/config"
 )
@@ -67,8 +68,8 @@ func Build(t Target, p config.Proposal, gk config.Gnokey) Built {
 	vars := map[string]string{
 		"address":          t.Address,
 		"operator_address": t.OperatorAddress,
-		"moniker":          t.Moniker,
-		"reason":           t.Reason,
+		"moniker":          singleLine(t.Moniker),
+		"reason":           singleLine(t.Reason),
 		"chain":            t.ChainKey,
 		"realm":            ac.RealmPkgPath,
 		"score":            strconv.Itoa(t.Score),
@@ -184,6 +185,24 @@ func shellArg(a string) string {
 	return a
 }
 
+// ExecuteFunc is the GovDAO proxy entrypoint katana calls to resolve a
+// proposal. Unlike ExecuteProposal, an executor error marks the proposal
+// denied instead of reverting the tx and leaving it open forever.
+const ExecuteFunc = "ExecuteOrRejectProposal"
+
+// ExecuteCall builds the MsgCall that resolves GovDAO proposal pid once a
+// supermajority is reached. Broadcast and Command work on it like on any
+// call-mode proposal.
+func ExecuteCall(chainID, rpc, realm, pid string) Built {
+	return Built{
+		Target:    Target{ChainID: chainID, RPC: rpc},
+		Submit:    "call",
+		RealmPath: realm,
+		Function:  ExecuteFunc,
+		Args:      []string{pid},
+	}
+}
+
 // Broadcast signs and submits the proposal via gnokey. In run mode it writes the
 // script to a temp file first. The combined gnokey output is returned.
 func (b Built) Broadcast(ctx context.Context, gk config.Gnokey) (string, error) {
@@ -216,9 +235,34 @@ func (b Built) Broadcast(ctx context.Context, gk config.Gnokey) (string, error) 
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			// Killed mid-run: the tx may already be on its way to the node.
+			return out.String(), fmt.Errorf("gnokey interrupted: %w", ctx.Err())
+		}
 		return out.String(), fmt.Errorf("gnokey: %w", err)
 	}
 	return out.String(), nil
+}
+
+// singleLine collapses every run of control characters and Unicode line or
+// paragraph separators in s into one space. Templated values that come from
+// outside katana (the validator's moniker) must not be able to start a new
+// line in the GovDAO render, where a whole line can pass for a status marker.
+func singleLine(s string) string {
+	var b strings.Builder
+	sep := false
+	for _, r := range s {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			if !sep {
+				b.WriteByte(' ')
+				sep = true
+			}
+			continue
+		}
+		sep = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // render replaces {key} placeholders in tmpl with values from vars.

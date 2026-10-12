@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/gnoland"
@@ -180,26 +181,42 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		return
 	}
 
-	out, err := d.broadcast(ctx, built, rt.Gnokey)
+	out, err := d.signAndBroadcast(ctx, built, rt.Gnokey)
+	tx := proposal.ParseTxOutput(out)
 	rec.Output = out
-	rec.Success = err == nil
-	if err == nil {
+	rec.TxHash = tx.TxHash
+	outcome := proposal.Classify(out, err)
+	switch outcome {
+	case proposal.Committed:
+		rec.Success = true
 		rec.Status = store.StatusPending
-		rec.OnchainID = govdao.ExtractProposalID(out)
+		rec.OnchainID = govdao.ProposalIDFromEvents([]byte(tx.Events), d.cfg.VoteTracking.GovdaoRealm)
+	case proposal.Ambiguous:
+		// The tx may be on-chain: gate like a pending proposal until the
+		// vote worker resolves or expires it.
+		rec.Status = store.StatusUnconfirmed
 	}
 	id, recErr := d.st.RecordProposal(ctx, rec)
-	if err != nil {
-		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, dec.Address, err)
-		return
-	}
 	if recErr != nil {
-		// The proposal is already on-chain but we failed to persist it: the
+		// The proposal may be on-chain but we failed to persist it: the
 		// lifecycle gate has no record and will re-broadcast an identical
 		// proposal next cycle. Surface this loudly rather than silently spam.
-		d.logger.Printf("[%s][eval] CRITICAL: broadcast ok (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, rec.OnchainID, dec.Address, recErr)
+		d.logger.Printf("[%s][eval] CRITICAL: broadcast %s (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, outcome, rec.OnchainID, dec.Address, recErr)
 	}
-	d.logger.Printf("[%s][eval] BROADCAST ok for %s action=%s (proposal id=%q)", rt.Key, dec.Address, dec.Action, rec.OnchainID)
-	d.dispatch(ctx, notify.EventSent, rt, id, nt, rec.OnchainID, vpDeltaPercent, observePayload{})
+
+	switch outcome {
+	case proposal.Committed:
+		if rec.OnchainID == "" {
+			d.logger.Printf("[%s][eval] broadcast ok for %s but no proposal id in gnokey output (tx %q): resolving it from the tx", rt.Key, dec.Address, rec.TxHash)
+		}
+		d.logger.Printf("[%s][eval] BROADCAST ok for %s action=%s (proposal id=%q)", rt.Key, dec.Address, dec.Action, rec.OnchainID)
+		d.dispatch(ctx, notify.EventSent, rt, id, nt, rec.OnchainID, vpDeltaPercent, observePayload{})
+	case proposal.Ambiguous:
+		d.logger.Printf("[%s][eval] CRITICAL: broadcast outcome unknown for %s action=%s: %v — recorded as unconfirmed, check the chain", rt.Key, dec.Address, dec.Action, err)
+		d.dispatch(ctx, notify.EventUnconfirmed, rt, id, nt, "", vpDeltaPercent, observePayload{})
+	default:
+		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, dec.Address, err)
+	}
 }
 
 // notifyTarget carries the validator/action identity dispatch needs to build
@@ -255,42 +272,117 @@ func (d *Daemon) assertChainID(ctx context.Context, gno *gnoland.Client, rt conf
 	return true
 }
 
-// voteCycle polls the GovDAO outcome of this chain's pending proposals.
+// executeRetry is the minimum delay between two ExecuteOrRejectProposal
+// attempts on the same proposal. A failed call still burns gas, so a call that
+// keeps failing must not be retried on every vote tick.
+const executeRetry = time.Hour
+
+// voteCycle follows this chain's tracked proposals: it resolves missing
+// proposal ids, executes proposals that reached a supermajority, records
+// GovDAO outcomes, and expires proposals left open past pending_timeout.
 func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) {
-	pending, err := d.st.PendingProposals(ctx, rt.Key)
+	tracked, err := d.st.TrackedProposals(ctx, rt.Key)
 	if err != nil {
 		d.logger.Printf("[%s][vote] %v", rt.Key, err)
 		return
 	}
-	if len(pending) == 0 {
+	if len(tracked) == 0 {
 		return
 	}
 	gd := govdao.New(rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm)
+	for _, p := range tracked {
+		d.trackProposal(ctx, rt, gd, p)
+	}
+}
 
-	for _, p := range pending {
-		if p.OnchainID == "" {
-			d.logger.Printf("[%s][vote] proposal row %d has no on-chain id, cannot track", rt.Key, p.ID)
-			continue
-		}
-		status, err := gd.Status(ctx, p.OnchainID)
-		if err != nil {
-			d.logger.Printf("[%s][vote] status query failed for proposal %s: %v", rt.Key, p.OnchainID, err)
-			continue
-		}
-		nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
-		switch status {
-		case govdao.Accepted:
-			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusAccepted, d.now())
-			d.logger.Printf("[%s][vote] proposal %s ACCEPTED — %s action=%s", rt.Key, p.OnchainID, disp(p.Moniker, p.Address), p.Action)
-			d.dispatch(ctx, notify.EventAccepted, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
-		case govdao.Rejected:
-			_ = d.st.UpdateStatus(ctx, p.ID, store.StatusRejected, d.now())
-			d.logger.Printf("[%s][vote] proposal %s REJECTED — %s action=%s", rt.Key, p.OnchainID, disp(p.Moniker, p.Address), p.Action)
-			d.dispatch(ctx, notify.EventRejected, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
-		default:
-			// pending / unknown: leave as pending, retry next tick.
+func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord) {
+	nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
+
+	if p.OnchainID == "" && p.TxHash != "" {
+		if id, err := gd.TxProposalID(ctx, p.TxHash); err != nil {
+			d.logger.Printf("[%s][vote] proposal row %d: resolving id from tx %s: %v", rt.Key, p.ID, p.TxHash, err)
+		} else if err := d.st.SetOnchainID(ctx, p.ID, id); err != nil {
+			d.logger.Printf("[%s][vote] proposal row %d: recording id %s: %v", rt.Key, p.ID, id, err)
+		} else {
+			d.logger.Printf("[%s][vote] proposal row %d: resolved GovDAO id %s from tx %s", rt.Key, p.ID, id, p.TxHash)
+			p.OnchainID = id
 		}
 	}
+	if p.OnchainID == "" {
+		// Nothing to poll: only the timeout can close this row.
+		d.expireIfDue(ctx, rt, p, nt)
+		return
+	}
+
+	prop, err := gd.Proposal(ctx, p.OnchainID)
+	if err != nil {
+		d.logger.Printf("[%s][vote] status query failed for proposal %s: %v", rt.Key, p.OnchainID, err)
+		return
+	}
+	switch prop.Status {
+	case govdao.Accepted:
+		d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
+	case govdao.Rejected:
+		d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
+	case govdao.Pending:
+		if rt.ExecuteProposals && prop.Executable() {
+			d.execute(ctx, rt, p, prop)
+		}
+		d.expireIfDue(ctx, rt, p, nt)
+	default:
+		// Unknown is inert: never terminal, never expired, never notified.
+		d.logger.Printf("[%s][vote] proposal %s: unrecognised render, keeping it %s", rt.Key, p.OnchainID, p.Status)
+	}
+}
+
+// resolve records a GovDAO outcome and notifies it. The notification only
+// goes out once the status is persisted, so a failed write is retried next
+// tick instead of notifying the same outcome repeatedly.
+func (d *Daemon) resolve(ctx context.Context, rt config.Runtime, p store.ProposalRecord, status string, event notify.Event, nt notifyTarget) {
+	if err := d.st.UpdateStatus(ctx, p.ID, status, d.now()); err != nil {
+		d.logger.Printf("[%s][vote] proposal %s: recording %s: %v", rt.Key, p.OnchainID, status, err)
+		return
+	}
+	d.execMu.Lock()
+	delete(d.executed, p.ID)
+	d.execMu.Unlock()
+	d.logger.Printf("[%s][vote] proposal %s %s — %s action=%s", rt.Key, p.OnchainID, strings.ToUpper(status), disp(p.Moniker, p.Address), p.Action)
+	d.dispatch(ctx, event, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
+}
+
+// expireIfDue marks a still-open proposal expired once pending_timeout has
+// passed since it was broadcast. Expired rows stay tracked for a late outcome.
+func (d *Daemon) expireIfDue(ctx context.Context, rt config.Runtime, p store.ProposalRecord, nt notifyTarget) {
+	if p.Status == store.StatusExpired || d.now().Sub(p.CreatedAt) < rt.PendingTimeout {
+		return
+	}
+	if err := d.st.UpdateStatus(ctx, p.ID, store.StatusExpired, d.now()); err != nil {
+		d.logger.Printf("[%s][vote] proposal row %d: recording expiry: %v", rt.Key, p.ID, err)
+		return
+	}
+	d.logger.Printf("[%s][vote] proposal %q (row %d) EXPIRED after %s — %s action=%s", rt.Key, p.OnchainID, p.ID, rt.PendingTimeout, disp(p.Moniker, p.Address), p.Action)
+	d.dispatch(ctx, notify.EventExpired, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
+}
+
+// execute calls ExecuteOrRejectProposal on a proposal that reached a
+// supermajority, at most once per executeRetry. The outcome is read from the
+// render on a later tick, like any other vote.
+func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.ProposalRecord, prop govdao.Proposal) {
+	d.execMu.Lock()
+	if last, ok := d.executed[p.ID]; ok && d.now().Sub(last) < executeRetry {
+		d.execMu.Unlock()
+		return
+	}
+	d.executed[p.ID] = d.now()
+	d.execMu.Unlock()
+
+	b := proposal.ExecuteCall(rt.ChainID, rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm, p.OnchainID)
+	out, err := d.signAndBroadcast(ctx, b, rt.Gnokey)
+	if outcome := proposal.Classify(out, err); outcome != proposal.Committed {
+		d.logger.Printf("[%s][vote] EXECUTE %s for proposal %s (yes=%.2f%% no=%.2f%%): %v\n%s", rt.Key, outcome, p.OnchainID, prop.YesPercent, prop.NoPercent, err, out)
+		return
+	}
+	d.logger.Printf("[%s][vote] EXECUTE ok for proposal %s (yes=%.2f%% no=%.2f%%)", rt.Key, p.OnchainID, prop.YesPercent, prop.NoPercent)
 }
 
 // observePayload carries the extra fields a would_eject (observe) notification
@@ -312,6 +404,7 @@ func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Run
 		GnowebURL:        rt.GnowebURL,
 		ProposalID:       onchainID,
 		RejectedBackoff:  rt.Proposal.RejectedBackoffDur(),
+		PendingTimeout:   rt.PendingTimeout,
 		Action:           nt.Action,
 		CurrentPower:     nt.CurrentPower,
 		TargetPower:      nt.TargetPower,

@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 		{"proposals", "current_power", `ALTER TABLE proposals ADD COLUMN current_power INTEGER NOT NULL DEFAULT 0`},
 		{"evaluations", "score", `ALTER TABLE evaluations ADD COLUMN score INTEGER NOT NULL DEFAULT 0`},
 		{"evaluations", "tier", `ALTER TABLE evaluations ADD COLUMN tier TEXT NOT NULL DEFAULT ''`},
+		{"proposals", "tx_hash", `ALTER TABLE proposals ADD COLUMN tx_hash TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, c := range cols {
 		if err := s.addColumnIfMissing(c.table, c.name, c.ddl); err != nil {
@@ -184,12 +185,12 @@ func (s *SQLite) RecordProposal(ctx context.Context, r ProposalRecord) (int64, e
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO proposals
-		 (created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power, tx_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		fmtTime(r.CreatedAt), r.Chain, r.ChainID, r.Address, r.Moniker,
 		r.Reason, r.Title, r.RealmPath, r.Function, string(args), r.Output,
 		boolInt(r.Success), r.OnchainID, r.Status, fmtTime(r.ResolvedAt),
-		r.Action, r.TargetPower, r.CurrentPower,
+		r.Action, r.TargetPower, r.CurrentPower, r.TxHash,
 	)
 	if err != nil {
 		return 0, err
@@ -221,7 +222,7 @@ func (s *SQLite) RecordNotification(ctx context.Context, r NotifRecord) error {
 	return err
 }
 
-const proposalCols = `id, created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power`
+const proposalCols = `id, created_at, chain, chain_id, address, moniker, reason, title, realm_path, function, args, output, success, onchain_proposal_id, status, resolved_at, action, target_power, current_power, tx_hash`
 
 func scanProposal(rows *sql.Rows) (ProposalRecord, error) {
 	var (
@@ -234,7 +235,7 @@ func scanProposal(rows *sql.Rows) (ProposalRecord, error) {
 	if err := rows.Scan(&r.ID, &created, &r.Chain, &r.ChainID, &r.Address, &r.Moniker,
 		&r.Reason, &r.Title, &r.RealmPath, &r.Function, &argsJSON,
 		&r.Output, &success, &r.OnchainID, &r.Status, &resolvedAt,
-		&r.Action, &r.TargetPower, &r.CurrentPower); err != nil {
+		&r.Action, &r.TargetPower, &r.CurrentPower, &r.TxHash); err != nil {
 		return r, err
 	}
 	r.CreatedAt, _ = parseTime(created)
@@ -264,10 +265,10 @@ func (s *SQLite) LastProposal(ctx context.Context, chain, address string) (*Prop
 	return &r, nil
 }
 
-func (s *SQLite) PendingProposals(ctx context.Context, chain string) ([]ProposalRecord, error) {
+func (s *SQLite) TrackedProposals(ctx context.Context, chain string) ([]ProposalRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+proposalCols+` FROM proposals WHERE chain = ? AND status = ? ORDER BY id`,
-		chain, StatusPending)
+		`SELECT `+proposalCols+` FROM proposals WHERE chain = ? AND status IN (?, ?, ?) ORDER BY id`,
+		chain, StatusPending, StatusUnconfirmed, StatusExpired)
 	if err != nil {
 		return nil, err
 	}
@@ -278,8 +279,8 @@ func (s *SQLite) PendingProposals(ctx context.Context, chain string) ([]Proposal
 func (s *SQLite) RejectionCount(ctx context.Context, chain, address string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM proposals WHERE chain = ? AND address = ? AND status = ?`,
-		chain, address, StatusRejected).Scan(&n)
+		`SELECT COUNT(*) FROM proposals WHERE chain = ? AND address = ? AND status IN (?, ?)`,
+		chain, address, StatusRejected, StatusExpired).Scan(&n)
 	return n, err
 }
 

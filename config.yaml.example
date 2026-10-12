@@ -125,11 +125,18 @@ proposal:
         Reason: {reason}
 
 # ── Vote tracking ─────────────────────────────────────────────────────────────
-# Follows the GovDAO outcome of broadcast proposals.
+# Follows the GovDAO outcome of broadcast proposals. GovDAO v3 resolves a
+# proposal only when someone calls ExecuteProposal once YES or NO reaches the
+# 66.66% supermajority; proposals never expire on-chain.
 vote_tracking:
   vote_poll_interval: 5m
   govdao_realm: "gno.land/r/gov/dao"
   status_source: rpc                  # rpc (vm/qrender) | graphql
+  execute_proposals: true             # katana calls ExecuteOrRejectProposal on its own proposals
+                                      # once a supermajority is reached. Overridable per chain.
+  pending_timeout: 336h               # 14d. A proposal still open after this is marked
+                                      # expired: notified once, gated like a rejection, and
+                                      # still watched for a late outcome. Overridable per chain.
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 # Sent only after a successful broadcast (and accepted/rejected outcomes).

@@ -31,6 +31,13 @@ type Daemon struct {
 	// broadcast signs and submits a built proposal via gnokey. It is a field so
 	// tests can substitute a double; production uses proposal.Built.Broadcast.
 	broadcast func(ctx context.Context, b proposal.Built, gk config.Gnokey) (string, error)
+	// txMu serializes every gnokey transaction: the eval and vote workers
+	// sign with the same key, and two concurrent txs would race on the
+	// account sequence (the loser fails CheckTx).
+	txMu sync.Mutex
+
+	execMu   sync.Mutex
+	executed map[int64]time.Time // proposal row id → last ExecuteOrRejectProposal attempt
 
 	resolversMu sync.Mutex
 	resolvers   map[string]*valopers.Resolver // chain key → operator resolver
@@ -49,7 +56,15 @@ func New(cfg *config.Config, st store.Store, logger *log.Logger) *Daemon {
 			return b.Broadcast(ctx, gk)
 		},
 		resolvers: map[string]*valopers.Resolver{},
+		executed:  map[int64]time.Time{},
 	}
+}
+
+// signAndBroadcast runs one gnokey transaction at a time.
+func (d *Daemon) signAndBroadcast(ctx context.Context, b proposal.Built, gk config.Gnokey) (string, error) {
+	d.txMu.Lock()
+	defer d.txMu.Unlock()
+	return d.broadcast(ctx, b, gk)
 }
 
 // resolverFor lazily builds and caches the operator resolver for a chain.

@@ -47,11 +47,37 @@ independent tickers:
    chain, log + notify the would-be proposal without broadcasting (see
    [Rehearsal / dry-run](#rehearsal--dry-run)).
 
-**Vote worker** (every `vote_poll_interval`): polls the GovDAO status of each
-pending proposal katana broadcast, and on resolution notifies + updates state:
+**Vote worker** (every `vote_poll_interval`): polls the GovDAO page of each
+proposal katana broadcast, and on resolution notifies + updates state:
 - **accepted** → validator removed from the valset;
-- **rejected** → validator kept; re-proposal suppressed for `rejected_backoff`,
-  and stopped entirely after `max_rejections`.
+- **rejected** (the realm says *denied*) → validator kept; re-proposal
+  suppressed for `rejected_backoff`, and stopped entirely after `max_rejections`.
+
+GovDAO v3 only decides a proposal when someone calls
+`gno.land/r/gov/dao.ExecuteProposal` after YES or NO reached the 66.66%
+supermajority; a NO majority alone resolves nothing, and proposals never expire
+on-chain. So the vote worker also:
+- calls `ExecuteOrRejectProposal(pid)` with katana's key when the page shows a
+  supermajority (`vote_tracking.execute_proposals`, default `true`, per-chain
+  override; retried at most hourly). An executor error marks the proposal denied
+  instead of leaving it open;
+- marks a proposal still open after `vote_tracking.pending_timeout` (default
+  `336h` = 14d) as **expired**: notified once, gated like a rejection, and still
+  watched — a late on-chain outcome updates it.
+
+The status is read only from the realm's marker lines
+(`**PROPOSAL HAS BEEN ACCEPTED**`, `**PROPOSAL HAS BEEN DENIED**`,
+`**Proposal is open for votes**`). A page with no marker or with several (the
+description is not escaped, so it could forge one) is *unknown*: kept pending,
+never resolved, never expired.
+
+**Broadcast outcome.** katana reads gnokey's output: the proposal id comes from
+the `ProposalCreated` event, or later from the tx itself (RPC `/tx`) when gnokey
+printed none. When gnokey fails *after* sending the tx (RPC timeout, dropped
+connection), the proposal may or may not be on-chain: katana records it as
+**unconfirmed**, sends an alert, and blocks new proposals for that validator
+until it expires. Other gnokey errors (simulation, CheckTx, DeliverTx) are plain
+failures.
 
 ## Score-driven actions
 
@@ -105,13 +131,15 @@ Validators under `exceptions:` are **never** proposed, matched by address
 Because katana runs continuously, a per-`(chain, validator)` state machine
 (backed by SQLite) prevents duplicate proposals:
 
-- a **pending** proposal blocks new ones until the vote resolves;
+- a **pending** or **unconfirmed** proposal blocks new ones until it resolves
+  or expires;
 - an **accepted eject** is terminal (the validator is gone); an **accepted
   `lower_vp`/`raise_vp`** is not terminal — once `proposal.cooldown` elapses, a
   new action (eject / lower_vp / raise_vp) may be proposed if the validator's
   score still qualifies;
-- **rejected** suppresses re-proposal for `proposal.rejected_backoff`, and stops
-  after `proposal.max_rejections` (default `2`, shared across action types);
+- **rejected** or **expired** suppresses re-proposal for
+  `proposal.rejected_backoff`, and stops after `proposal.max_rejections`
+  (default `2`, shared across action types, expiries included);
 - `proposal.cooldown` (default `720h` = 30d) is a floor between any two proposals
   for the same validator.
 

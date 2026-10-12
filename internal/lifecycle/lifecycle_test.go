@@ -89,6 +89,29 @@ func TestGate(t *testing.T) {
 			wantAllow:  false,
 		},
 		{
+			name:      "unconfirmed broadcast blocks re-proposal",
+			last:      &store.ProposalRecord{Status: store.StatusUnconfirmed, CreatedAt: now.Add(-800 * time.Hour)},
+			wantAllow: false,
+		},
+		{
+			name:       "expired within backoff is blocked",
+			last:       &store.ProposalRecord{Status: store.StatusExpired, ResolvedAt: now.Add(-1 * time.Hour)},
+			rejections: 1,
+			wantAllow:  false,
+		},
+		{
+			name:       "expired after backoff is allowed",
+			last:       &store.ProposalRecord{Status: store.StatusExpired, ResolvedAt: now.Add(-800 * time.Hour)},
+			rejections: 1,
+			wantAllow:  true,
+		},
+		{
+			name:       "expired counts toward the rejection cap",
+			last:       &store.ProposalRecord{Status: store.StatusExpired, ResolvedAt: now.Add(-800 * time.Hour)},
+			rejections: 2,
+			wantAllow:  false,
+		},
+		{
 			name:      "empty-status within cooldown is blocked",
 			last:      &store.ProposalRecord{Status: "", CreatedAt: now.Add(-1 * time.Hour)},
 			wantAllow: false,

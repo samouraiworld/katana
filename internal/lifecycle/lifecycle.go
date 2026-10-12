@@ -35,7 +35,7 @@ func deny(f string, a ...any) Decision {
 // Gate decides whether a new proposal may be created for a validator.
 //
 //	last       — the validator's most recent proposal on this chain, or nil.
-//	rejections — how many of its past proposals were rejected by GovDAO.
+//	rejections — how many of its past proposals were rejected by GovDAO or expired.
 func Gate(last *store.ProposalRecord, rejections int, p Params) Decision {
 	if last == nil {
 		return allow()
@@ -66,7 +66,12 @@ func Gate(last *store.ProposalRecord, rejections int, p Params) Decision {
 	case store.StatusPending:
 		return deny("a proposal is pending GovDAO vote")
 
-	case store.StatusRejected:
+	case store.StatusUnconfirmed:
+		return deny("the last broadcast is unconfirmed (may be on-chain)")
+
+	case store.StatusRejected, store.StatusExpired:
+		// An expired proposal went unresolved for pending_timeout: treat it
+		// like a rejection so an ignored proposal is not re-filed forever.
 		if p.MaxRejections > 0 && rejections >= p.MaxRejections {
 			return deny("max rejections reached (%d)", rejections)
 		}

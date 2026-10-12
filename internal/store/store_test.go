@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,9 +37,9 @@ func TestSQLiteLifecycle(t *testing.T) {
 	}
 
 	// It should show up as pending.
-	pending, err := st.PendingProposals(ctx, "local")
+	pending, err := st.TrackedProposals(ctx, "local")
 	if err != nil || len(pending) != 1 || pending[0].OnchainID != "3" {
-		t.Fatalf("PendingProposals = %+v, err %v", pending, err)
+		t.Fatalf("TrackedProposals = %+v, err %v", pending, err)
 	}
 
 	// LastProposal returns it.
@@ -54,7 +55,7 @@ func TestSQLiteLifecycle(t *testing.T) {
 	if n, _ := st.RejectionCount(ctx, "local", "g1bad"); n != 1 {
 		t.Fatalf("RejectionCount = %d, want 1", n)
 	}
-	if p, _ := st.PendingProposals(ctx, "local"); len(p) != 0 {
+	if p, _ := st.TrackedProposals(ctx, "local"); len(p) != 0 {
 		t.Fatalf("expected no pending after rejection, got %d", len(p))
 	}
 
@@ -88,8 +89,8 @@ func TestDryRunRecordCountsTowardLifecycle(t *testing.T) {
 
 	// It is not pending and not a rejection, so it doesn't show up in those
 	// queries — same as any other non-pending, non-rejected record.
-	if pending, _ := st.PendingProposals(ctx, "local"); len(pending) != 0 {
-		t.Fatalf("PendingProposals = %+v; want none", pending)
+	if pending, _ := st.TrackedProposals(ctx, "local"); len(pending) != 0 {
+		t.Fatalf("TrackedProposals = %+v; want none", pending)
 	}
 	if n, _ := st.RejectionCount(ctx, "local", "g1bad"); n != 0 {
 		t.Fatalf("RejectionCount = %d, want 0", n)
@@ -211,5 +212,72 @@ func TestNoopStore(t *testing.T) {
 	}
 	if last, _ := st.LastProposal(ctx, "c", "a"); last != nil {
 		t.Fatalf("Noop LastProposal should be nil")
+	}
+}
+
+// TestTrackedProposalsAndRejectionCount: an expired proposal is still open
+// on-chain, so the vote worker keeps polling it, and the gate counts it like a
+// rejection. An unconfirmed broadcast is tracked until it resolves or expires.
+func TestTrackedProposalsAndRejectionCount(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	rec := func(onchainID, status string) int64 {
+		id, err := st.RecordProposal(ctx, ProposalRecord{
+			CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+			Status: StatusPending, OnchainID: onchainID, Success: true,
+		})
+		if err != nil {
+			t.Fatalf("RecordProposal: %v", err)
+		}
+		if status != StatusPending {
+			if err := st.UpdateStatus(ctx, id, status, time.Now()); err != nil {
+				t.Fatalf("UpdateStatus: %v", err)
+			}
+		}
+		return id
+	}
+	rec("1", StatusPending)
+	rec("2", StatusExpired)
+	rec("3", StatusRejected)
+	rec("4", StatusAccepted)
+	rec("5", StatusUnconfirmed)
+
+	tracked, err := st.TrackedProposals(ctx, "local")
+	if err != nil {
+		t.Fatalf("TrackedProposals: %v", err)
+	}
+	var ids []string
+	for _, p := range tracked {
+		ids = append(ids, p.OnchainID)
+	}
+	if strings.Join(ids, ",") != "1,2,5" {
+		t.Fatalf("TrackedProposals ids = %v, want [1 2 5]", ids)
+	}
+	if n, err := st.RejectionCount(ctx, "local", "g1bad"); err != nil || n != 2 {
+		t.Fatalf("RejectionCount = %d, %v; want 2 (rejected + expired)", n, err)
+	}
+}
+
+func TestTxHashAndOnchainIDRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	id, err := st.RecordProposal(ctx, ProposalRecord{
+		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+		Status: StatusPending, TxHash: "q2Vh0z3D+Jm2nSx0Zl1Q0Q==", Success: true,
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	if err := st.SetOnchainID(ctx, id, "12"); err != nil {
+		t.Fatalf("SetOnchainID: %v", err)
+	}
+	last, err := st.LastProposal(ctx, "local", "g1bad")
+	if err != nil || last == nil {
+		t.Fatalf("LastProposal = %+v, %v", last, err)
+	}
+	if last.TxHash != "q2Vh0z3D+Jm2nSx0Zl1Q0Q==" || last.OnchainID != "12" {
+		t.Fatalf("TxHash, OnchainID = %q, %q", last.TxHash, last.OnchainID)
 	}
 }

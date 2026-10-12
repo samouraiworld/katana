@@ -286,14 +286,18 @@ actions) if the validator's score still qualifies — see FR-7.2.
 - **FR-VT.1** For every proposal katana **broadcasts**, it captures the resulting
   **on-chain GovDAO proposal id** from the `ProposalCreated` event emitted by
   `gno.land/r/gov/dao` (attr `key: "id"`). *(decision D13 — resolved.)* The id is
-  read from the broadcast tx response events; if unavailable there (e.g. gnokey
-  CLI broadcast without event capture), fall back to querying the GraphQL indexer
-  for that tx (same query gnomonitoring uses — see references). Reference impl:
-  gnomonitoring `ExtractGovDAOIDs` / `ProcessProposal`.
+  read from the broadcast tx response events (gnokey's `EVENTS` line); if
+  unavailable there, it is read back from the committed tx by hash (RPC
+  `/tx?hash=`, always available). The GraphQL indexer fallback (same query
+  gnomonitoring uses) is only needed for a broadcast with no tx hash at all — see
+  FR-VT.8. Reference impl: gnomonitoring `ExtractGovDAOIDs` / `ProcessProposal`.
 - **FR-VT.2** The vote-watcher worker polls each pending proposal's status on
   `vote_poll_interval` via RPC `vm/qrender` on `gno.land/r/gov/dao:<id>` and maps
-  the rendered status to katana states: `ACCEPTED → accepted`,
-  `ACTIVE` / vote-in-progress `→ pending`, otherwise `→ rejected`. *(decision D14
+  the realm's status marker line to katana states:
+  `**PROPOSAL HAS BEEN ACCEPTED** → accepted`,
+  `**PROPOSAL HAS BEEN DENIED** → rejected`,
+  `**Proposal is open for votes** → pending`, anything else (no marker, or more
+  than one) `→ unknown`, handled per FR-VT.2b. *(decision D14
   — resolved: RPC render, mirroring gnomonitoring `ExtractProposalRender`; the
   GraphQL indexer remains an optional fallback for id/discovery.)*
 - **FR-VT.2b** Status parsing is render-string-based and **realm-version
@@ -307,6 +311,20 @@ actions) if the validator's score still qualifies — see FR-7.2.
   removed.
 - **FR-VT.5** Vote tracking always applies: every produced proposal is a real
   on-chain broadcast, so every one has a GovDAO id to follow.
+- **FR-VT.6** GovDAO v3 decides a proposal only inside an `ExecuteProposal`
+  call made once YES or NO reaches the supermajority (66.66 %); a NO majority
+  alone resolves nothing. When `execute_proposals` is on (default, per-chain
+  override), katana calls `ExecuteOrRejectProposal(pid)` with its own key once
+  the render shows a supermajority, at most once per hour per proposal.
+- **FR-VT.7** Proposals never expire on-chain. A proposal still open after
+  `pending_timeout` (default 14 d, per-chain override) becomes `expired`:
+  notified once, gated like a rejection (backoff, counts toward
+  `max_rejections`), and still polled so a late outcome is recorded.
+  *(decisions confirmed 2026-10-12.)*
+- **FR-VT.8** A gnokey failure after the tx was sent (RPC timeout, dropped
+  connection) leaves the outcome unknown: the record is `unconfirmed`, an alert
+  is sent, and the gate blocks the validator until the proposal resolves or
+  expires.
 
 ### 6.9 Notifications `[TO BUILD]`
 

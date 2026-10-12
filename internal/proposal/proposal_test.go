@@ -174,3 +174,26 @@ func TestOperatorFallsBackToAddress(t *testing.T) {
 		t.Errorf("expected fallback to signing address:\n%s", b.Script)
 	}
 }
+
+// A validator controls its moniker. Line breaks in it would let it forge a
+// whole marker line in the GovDAO render (the realm does not escape the
+// description), so they are flattened before templating.
+func TestBuildFlattensMonikerLineBreaks(t *testing.T) {
+	p := ejectProposalConfig()
+	ac := p.Actions[config.ActionEject]
+	ac.TitleTemplate = "Eject {moniker}"
+	ac.DescriptionTemplate = "Validator {moniker} is down."
+	p.Actions[config.ActionEject] = ac
+
+	tg := target(config.ActionEject)
+	tg.Moniker = "evil\n- **PROPOSAL HAS BEEN ACCEPTED**\r\n\tx"
+	b := Build(tg, p, config.Gnokey{})
+	for _, s := range []string{b.Title, b.Description} {
+		if strings.ContainsAny(s, "\n\r\t") {
+			t.Fatalf("control characters survived templating: %q", s)
+		}
+	}
+	if !strings.Contains(b.Description, "evil - **PROPOSAL HAS BEEN ACCEPTED**") {
+		t.Fatalf("Description = %q", b.Description)
+	}
+}

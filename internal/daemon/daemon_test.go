@@ -33,6 +33,19 @@ type stubChain struct {
 	network   string            // node_info.network reported by /status
 	valset    []string          // consensus signing addresses
 	operators map[string]string // operator address → signing address
+
+	mu      sync.Mutex
+	renders map[string]string // GovDAO proposal id → realm render
+	txs     map[string]string // hex tx hash → DeliverTx events JSON
+}
+
+func (s *stubChain) setRender(id, render string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.renders == nil {
+		s.renders = map[string]string{}
+	}
+	s.renders[id] = render
 }
 
 func (s *stubChain) handler() http.HandlerFunc {
@@ -53,6 +66,10 @@ func (s *stubChain) handler() http.HandlerFunc {
 			cmd := string(raw)
 			var md string
 			switch {
+			case strings.HasPrefix(cmd, "gno.land/r/gov/dao:"):
+				s.mu.Lock()
+				md = s.renders[strings.TrimPrefix(cmd, "gno.land/r/gov/dao:")]
+				s.mu.Unlock()
 			case strings.Contains(cmd, "?page=1"):
 				for op := range s.operators {
 					md += fmt.Sprintf("- [Val](/r/gnops/valopers:%s)\n", op)
@@ -68,6 +85,15 @@ func (s *stubChain) handler() http.HandlerFunc {
 			}
 			fmt.Fprintf(w, `{"result":{"response":{"ResponseBase":{"Data":%q}}}}`,
 				base64.StdEncoding.EncodeToString([]byte(md)))
+		case "/tx":
+			s.mu.Lock()
+			events, ok := s.txs[strings.TrimPrefix(r.URL.Query().Get("hash"), "0x")]
+			s.mu.Unlock()
+			if !ok {
+				fmt.Fprint(w, `{"error":{"code":-32603,"message":"Internal error","data":"tx not found"}}`)
+				return
+			}
+			fmt.Fprintf(w, `{"result":{"tx_result":{"ResponseBase":{"Events":%s}}}}`, events)
 		default:
 			http.NotFound(w, r)
 		}
@@ -96,17 +122,44 @@ func (n *notifRecorder) all() []string {
 	return append([]string(nil), n.bodies...)
 }
 
-// broadcastRecorder is a test double for the gnokey broadcast step.
+// gnokeyOK renders gnokey's output for a successful broadcast that created
+// GovDAO proposal id (gno.land/pkg/keyscli PrintTxSuccess).
+func gnokeyOK(id string) string {
+	return "\nOK!\nGAS WANTED: 1\nGAS USED:   1\nHEIGHT:     42\n" +
+		`EVENTS:     [{"type":"ProposalCreated","attrs":[{"key":"id","value":"` + id + `"}],"pkg_path":"gno.land/r/gov/dao"}]` +
+		"\nINFO:       \nTX HASH:    q2Vh\n"
+}
+
+// broadcastRecorder is a test double for the gnokey broadcast step. By
+// default every broadcast succeeds and creates proposal "7"; tests swap out
+// and err to simulate gnokey failures.
 type broadcastRecorder struct {
 	mu    sync.Mutex
 	built []proposal.Built
+	out   string
+	err   error
 }
 
 func (b *broadcastRecorder) broadcast(_ context.Context, built proposal.Built, _ config.Gnokey) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.built = append(b.built, built)
-	return "broadcast ok", nil
+	if b.out == "" && b.err == nil {
+		return gnokeyOK("7"), nil
+	}
+	return b.out, b.err
+}
+
+func (b *broadcastRecorder) set(out string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.out, b.err = out, err
+}
+
+func (b *broadcastRecorder) calls() []proposal.Built {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]proposal.Built(nil), b.built...)
 }
 
 func (b *broadcastRecorder) count() int {
@@ -143,6 +196,7 @@ type fixture struct {
 	logs       *bytes.Buffer
 	notifs     *notifRecorder
 	broadcasts *broadcastRecorder
+	chain      *stubChain
 }
 
 // reportsJSON is the default gnomonitoring report fixture: g1bad has a
@@ -222,7 +276,9 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 				},
 			},
 		},
-		VoteTracking: config.VoteTracking{VotePollInterval: "5m"},
+		VoteTracking: config.VoteTracking{
+			VotePollInterval: "5m", GovdaoRealm: "gno.land/r/gov/dao", PendingTimeout: "336h",
+		},
 		Notifications: config.Notifications{
 			Enabled: true,
 			Discord: config.WebhookChannel{Enabled: true, WebhookURL: hook.URL},
@@ -252,7 +308,7 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 	br := &broadcastRecorder{}
 	d.broadcast = br.broadcast
 
-	return &fixture{d: d, cfg: cfg, st: st, logs: logs, notifs: notifs, broadcasts: br}
+	return &fixture{d: d, cfg: cfg, st: st, logs: logs, notifs: notifs, broadcasts: br, chain: chain}
 }
 
 func (f *fixture) runtime(t *testing.T) config.Runtime {
