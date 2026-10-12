@@ -105,7 +105,7 @@ func (s *stubChain) handler() http.HandlerFunc {
 			events, ok := s.txs[strings.TrimPrefix(r.URL.Query().Get("hash"), "0x")]
 			s.mu.Unlock()
 			if !ok {
-				fmt.Fprint(w, `{"error":{"code":-32603,"message":"Internal error","data":"tx not found"}}`)
+				fmt.Fprint(w, `{"error":{"code":-32603,"message":"Internal error","data":"Could not find tx result for hash #00"}}`)
 				return
 			}
 			fmt.Fprintf(w, `{"result":{"tx_result":{"ResponseBase":{"Events":%s}}}}`, events)

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -378,7 +379,7 @@ func indexerServer(t *testing.T) (string, txindexer.Tx) {
 		w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
-	txs, err := txindexer.New(srv.URL, nil).ProposalsByCaller(context.Background(), "g1katana", 1)
+	txs, err := txindexer.New(srv.URL, "gno.land/r/gov/dao", nil).ProposalsByCaller(context.Background(), "g1katana", 1)
 	if err != nil || len(txs) == 0 {
 		t.Fatalf("fixture: %d txs, err %v", len(txs), err)
 	}
@@ -415,6 +416,29 @@ func TestVoteReconcilesHashlessUnconfirmed(t *testing.T) {
 	got := lastStatus(t, f)
 	if got.TxHash != tx.Hash || got.OnchainID != tx.ProposalID || got.Status != store.StatusPending {
 		t.Fatalf("row = %+v, want tx %s id %s pending\nlogs:\n%s", got, tx.Hash, tx.ProposalID, f.logs.String())
+	}
+}
+
+// Reconcile asks the indexer for the configured GovDAO realm, not a
+// hard-coded one.
+func TestVoteReconcileUsesConfiguredRealm(t *testing.T) {
+	var reqBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqBody, _ = io.ReadAll(r.Body)
+		w.Write([]byte(`{"data":{"getTransactions":null}}`))
+	}))
+	t.Cleanup(srv.Close)
+	f := newFixture(t, "dev", nil)
+	f.d.cfg.VoteTracking.GovdaoRealm = "gno.land/r/gov/dao/custom"
+	rt := f.runtime(t)
+	rt.TxIndexerURL, rt.Gnokey.Address = srv.URL, "g1katana"
+	seedHashless(t, f, store.StatusUnconfirmed, "deadbeef")
+
+	if err := f.d.voteCycle(context.Background(), rt); err != nil {
+		t.Fatalf("voteCycle: %v", err)
+	}
+	if !strings.Contains(string(reqBody), `"realm":"gno.land/r/gov/dao/custom"`) {
+		t.Fatalf("indexer request does not use the configured realm: %s", reqBody)
 	}
 }
 

@@ -323,7 +323,7 @@ func indexerFindProposal(t *testing.T, caller string, afterHeight int64, marker 
 	}
 	body, _ := json.Marshal(map[string]any{
 		"query":     string(q),
-		"variables": map[string]any{"caller": caller, "afterHeight": afterHeight},
+		"variables": map[string]any{"caller": caller, "afterHeight": afterHeight, "realm": realm},
 	})
 	resp, err := http.Post(dn.indexer, "application/json", bytes.NewReader(body))
 	if err != nil {

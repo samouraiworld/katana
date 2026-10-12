@@ -27,9 +27,6 @@ import (
 	"github.com/samouraiworld/katana/internal/govdao"
 )
 
-// GovDAORealm is the realm whose ProposalCreated event carries the id.
-const GovDAORealm = "gno.land/r/gov/dao"
-
 // proposalsByCallerQuery is the query verified against the gnoland-test
 // devnet tx-indexer (copy of e2e/testdata/indexer_proposals_by_caller.graphql).
 //
@@ -42,17 +39,19 @@ const maxResponseBytes = 16 << 20
 // Client talks to a tx-indexer GraphQL endpoint (e.g.
 // http://indexer:8546/graphql/query).
 type Client struct {
-	url  string
-	http *http.Client
+	url   string
+	realm string
+	http  *http.Client
 }
 
-// New returns a Client for the GraphQL endpoint url. A nil httpClient gets a
-// 15s timeout.
-func New(url string, httpClient *http.Client) *Client {
+// New returns a Client for the GraphQL endpoint url. realm is the GovDAO realm
+// whose ProposalCreated event carries the id (vote_tracking.govdao_realm). A
+// nil httpClient gets a 15s timeout.
+func New(url, realm string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &Client{url: url, http: httpClient}
+	return &Client{url: url, realm: realm, http: httpClient}
 }
 
 // File is one file of a MsgRun package, as submitted.
@@ -85,7 +84,7 @@ type Tx struct {
 	Index       int
 	Messages    []Msg
 	// ProposalID is the id attr of the tx's single ProposalCreated event
-	// from GovDAORealm; "" when there is none or more than one
+	// from the client's realm; "" when there is none or more than one
 	// (govdao.ProposalIDFromEvents semantics).
 	ProposalID string
 }
@@ -128,7 +127,7 @@ type gqlResponse struct {
 }
 
 // ProposalsByCaller returns the successful txs signed by caller at a block
-// height >= minHeight that emitted a ProposalCreated event from GovDAORealm,
+// height >= minHeight that emitted a ProposalCreated event from the realm,
 // in indexer order. An empty result is (nil, nil). Any GraphQL error, even
 // alongside partial data, is returned as an error. minHeight must be >= 1:
 // an unknown broadcast height (0) would scan the signer's whole history.
@@ -142,7 +141,7 @@ func (c *Client) ProposalsByCaller(ctx context.Context, caller string, minHeight
 	reqBody, err := json.Marshal(map[string]any{
 		"query": proposalsByCallerQuery,
 		// FilterInt has only eq/gt/lt: "> minHeight-1" is ">= minHeight".
-		"variables": map[string]any{"caller": caller, "afterHeight": minHeight - 1},
+		"variables": map[string]any{"caller": caller, "afterHeight": minHeight - 1, "realm": c.realm},
 	})
 	if err != nil {
 		return nil, err
@@ -194,7 +193,7 @@ func (c *Client) ProposalsByCaller(ctx context.Context, caller string, minHeight
 			}
 			tx.Messages = append(tx.Messages, msg)
 		}
-		tx.ProposalID = govdao.ProposalIDFromEvents(g.Response.Events, GovDAORealm)
+		tx.ProposalID = govdao.ProposalIDFromEvents(g.Response.Events, c.realm)
 		txs = append(txs, tx)
 	}
 	return txs, nil

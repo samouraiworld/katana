@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -233,9 +234,26 @@ type txResponse struct {
 	} `json:"error"`
 }
 
+// ErrTxNotFound: the node has no committed tx for the hash (not included yet,
+// or never). An expected state for an ambiguous broadcast, not an RPC failure.
+var ErrTxNotFound = errors.New("tx not found")
+
+// ErrNoProposalCreated: the tx is committed but carries no single
+// ProposalCreated event from the realm (e.g. it failed in DeliverTx).
+var ErrNoProposalCreated = errors.New("no single ProposalCreated event")
+
+// isTxNotFound matches the RPC error data of a missing tx: tm2's
+// state.NoTxResultForHashError on the chain/mainnet tag ("Could not find tx
+// result for hash #<HEX>"), and the older "tx (<HEX>) not found".
+func isTxNotFound(data string) bool {
+	return strings.HasPrefix(data, "Could not find tx result for hash") ||
+		(strings.HasPrefix(data, "tx (") && strings.HasSuffix(data, ") not found"))
+}
+
 // TxProposalID looks a committed tx up by its base64 hash (as gnokey prints
 // it) via RPC /tx and returns the proposal id from its events. A tx that is
-// not committed yet comes back as an error.
+// not committed yet is ErrTxNotFound, a committed one without the event is
+// ErrNoProposalCreated; any other error is an RPC or response failure.
 func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(txHash)
 	if err != nil {
@@ -249,6 +267,9 @@ func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error
 		return "", err
 	}
 	if body.Error != nil {
+		if isTxNotFound(body.Error.Data) {
+			return "", fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+		}
 		return "", fmt.Errorf("RPC error: %s %s", body.Error.Message, body.Error.Data)
 	}
 	if body.Result == nil {
@@ -260,7 +281,7 @@ func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error
 	}
 	id := ProposalIDFromEvents(events, c.realm)
 	if id == "" {
-		return "", fmt.Errorf("tx %s: no single ProposalCreated event from %s", txHash, c.realm)
+		return "", fmt.Errorf("tx %s: %w from %s", txHash, ErrNoProposalCreated, c.realm)
 	}
 	return id, nil
 }

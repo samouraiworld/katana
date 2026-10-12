@@ -476,8 +476,9 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) error {
 
 // trackProposal advances one tracked proposal. It returns an operational
 // error for /health: the GovDAO status or a configured tx-indexer could not be
-// read, or lifecycle state could not be persisted. A /tx lookup that finds
-// nothing is not one (an ambiguous broadcast may simply never have landed).
+// read, /tx could not be queried, or lifecycle state could not be persisted.
+// A /tx lookup that finds no tx, or a committed tx without a ProposalCreated
+// event, is not one (an ambiguous broadcast may simply never have landed).
 func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord) error {
 	nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
 	var opErr error
@@ -493,6 +494,9 @@ func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govda
 	if p.OnchainID == "" && p.TxHash != "" {
 		if id, err := gd.TxProposalID(ctx, p.TxHash); err != nil {
 			d.logger.Printf("[%s][vote] proposal row %d: resolving id from tx %s: %v", rt.Key, p.ID, p.TxHash, err)
+			if !errors.Is(err, govdao.ErrTxNotFound) && !errors.Is(err, govdao.ErrNoProposalCreated) {
+				opErr = errors.Join(opErr, fmt.Errorf("resolving proposal id from tx %s: %w", p.TxHash, err))
+			}
 		} else if err := d.st.SetOnchainID(ctx, p.ID, id); err != nil {
 			d.logger.Printf("[%s][vote] proposal row %d: recording id %s: %v", rt.Key, p.ID, id, err)
 			opErr = fmt.Errorf("recording proposal id: %w", err)
@@ -547,7 +551,7 @@ func (d *Daemon) reconcile(ctx context.Context, rt config.Runtime, p store.Propo
 	}
 	// BroadcastHeight was already committed when the broadcast started: the
 	// tx can only land in a later block.
-	txs, err := txindexer.New(rt.TxIndexerURL, nil).ProposalsByCaller(ctx, rt.Gnokey.Address, p.BroadcastHeight+1)
+	txs, err := txindexer.New(rt.TxIndexerURL, d.cfg.VoteTracking.GovdaoRealm, nil).ProposalsByCaller(ctx, rt.Gnokey.Address, p.BroadcastHeight+1)
 	if err != nil {
 		d.logger.Printf("[%s][vote] proposal row %d: tx-indexer lookup: %v", rt.Key, p.ID, err)
 		return p, fmt.Errorf("tx-indexer lookup: %w", err)

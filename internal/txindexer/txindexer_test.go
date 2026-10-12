@@ -15,7 +15,10 @@ import (
 	"github.com/samouraiworld/katana/internal/proposal"
 )
 
-const caller = "g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek"
+const (
+	caller = "g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek"
+	realm  = "gno.land/r/gov/dao"
+)
 
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
@@ -47,7 +50,7 @@ func TestProposalsByCallerFixture(t *testing.T) {
 	var reqBody []byte
 	srv := serve(t, http.StatusOK, fixture(t, "indexer_proposals_by_caller.response.json"), &reqBody)
 
-	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 7)
+	txs, err := New(srv.URL, realm, nil).ProposalsByCaller(context.Background(), caller, 7)
 	if err != nil {
 		t.Fatalf("ProposalsByCaller: %v", err)
 	}
@@ -68,8 +71,8 @@ func TestProposalsByCallerFixture(t *testing.T) {
 	if got.Query != want.Query {
 		t.Fatalf("query differs from the verified fixture:\n%s", got.Query)
 	}
-	if got.Variables["caller"] != caller || got.Variables["afterHeight"] != float64(6) {
-		t.Fatalf("variables = %v, want caller %s afterHeight 6", got.Variables, caller)
+	if got.Variables["caller"] != caller || got.Variables["afterHeight"] != float64(6) || got.Variables["realm"] != realm {
+		t.Fatalf("variables = %v, want caller %s afterHeight 6 realm %s", got.Variables, caller, realm)
 	}
 
 	if len(txs) != 3 {
@@ -107,7 +110,7 @@ func TestProposalsByCallerFixture(t *testing.T) {
 // tx's SHA-256), which is what katana stores in proposals.tx_hash.
 func TestHashMatchesGnokeyTxHash(t *testing.T) {
 	srv := serve(t, http.StatusOK, fixture(t, "indexer_proposals_by_caller.response.json"), nil)
-	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 7)
+	txs, err := New(srv.URL, realm, nil).ProposalsByCaller(context.Background(), caller, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,13 +125,40 @@ func TestHashMatchesGnokeyTxHash(t *testing.T) {
 	}
 }
 
+// A custom GovDAO realm is both the query's event filter and the realm the
+// proposal id is read from: the fixture's gno.land/r/gov/dao events then
+// carry no id.
+func TestProposalsByCallerUsesConfiguredRealm(t *testing.T) {
+	const other = "gno.land/r/gov/dao/custom"
+	var reqBody []byte
+	srv := serve(t, http.StatusOK, fixture(t, "indexer_proposals_by_caller.response.json"), &reqBody)
+	txs, err := New(srv.URL, other, nil).ProposalsByCaller(context.Background(), caller, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Variables map[string]any `json:"variables"`
+	}
+	if err := json.Unmarshal(reqBody, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Variables["realm"] != other {
+		t.Fatalf("realm variable = %v, want %s", got.Variables["realm"], other)
+	}
+	for i, tx := range txs {
+		if tx.ProposalID != "" {
+			t.Fatalf("tx %d: id %q read from a realm other than %s", i, tx.ProposalID, other)
+		}
+	}
+}
+
 func TestProposalsByCallerEmpty(t *testing.T) {
 	for _, body := range []string{
 		`{"data":{"getTransactions":null}}`,
 		`{"data":{"getTransactions":[]}}`,
 	} {
 		srv := serve(t, http.StatusOK, []byte(body), nil)
-		txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 1)
+		txs, err := New(srv.URL, realm, nil).ProposalsByCaller(context.Background(), caller, 1)
 		if err != nil || len(txs) != 0 {
 			t.Fatalf("%s: txs %+v, err %v", body, txs, err)
 		}
@@ -150,14 +180,14 @@ func TestProposalsByCallerErrors(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			srv := serve(t, c.status, []byte(c.body), nil)
-			if txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 1); err == nil {
+			if txs, err := New(srv.URL, realm, nil).ProposalsByCaller(context.Background(), caller, 1); err == nil {
 				t.Fatalf("want an error, got txs %+v", txs)
 			}
 		})
 	}
 
 	t.Run("invalid arguments", func(t *testing.T) {
-		c := New("http://127.0.0.1:1", nil)
+		c := New("http://127.0.0.1:1", realm, nil)
 		if _, err := c.ProposalsByCaller(context.Background(), "", 1); err == nil {
 			t.Fatal("empty caller: want an error")
 		}
@@ -177,7 +207,7 @@ func TestProposalIDFailsClosed(t *testing.T) {
 	 {"hash":"c","block_height":7,"messages":[],"response":{"events":null}}
 	]}}`
 	srv := serve(t, http.StatusOK, []byte(body), nil)
-	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 1)
+	txs, err := New(srv.URL, realm, nil).ProposalsByCaller(context.Background(), caller, 1)
 	if err != nil || len(txs) != 3 {
 		t.Fatalf("txs %+v, err %v", txs, err)
 	}
@@ -216,7 +246,7 @@ func main(cur realm) {
 // returns for that tx, whatever the file name.
 func TestRunPayloadHashMatchesIndexerBody(t *testing.T) {
 	srv := serve(t, http.StatusOK, fixture(t, "indexer_proposals_by_caller.response.json"), nil)
-	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 7)
+	txs, err := New(srv.URL, realm, nil).ProposalsByCaller(context.Background(), caller, 7)
 	if err != nil {
 		t.Fatal(err)
 	}

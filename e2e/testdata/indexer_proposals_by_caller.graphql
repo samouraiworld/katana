@@ -1,13 +1,13 @@
 # Successful txs signed by $caller at or above $minHeight that emitted a
-# ProposalCreated event from gno.land/r/gov/dao. Returns the message content
-# (MsgRun package body or MsgCall args) so a caller can match the tx to the
-# proposal it intended to create (e.g. katana recovering the id of an
+# ProposalCreated event from $realm (the GovDAO realm). Returns the message
+# content (MsgRun package body or MsgCall args) so a caller can match the tx to
+# the proposal it intended to create (e.g. katana recovering the id of an
 # `unconfirmed` broadcast whose gnokey output carried no TX HASH).
 #
 # Verified against the gnoland-test devnet (gno chain/mainnet tag) tx-indexer
 # (ghcr.io/gnolang/tx-indexer@sha256:174d52f2...) on 2026-10-12.
 # FilterInt has only eq/gt/lt (no gte): pass minHeight-1 as $afterHeight.
-query proposalsByCaller($caller: String!, $afterHeight: Int!) {
+query proposalsByCaller($caller: String!, $afterHeight: Int!, $realm: String!) {
   getTransactions(
     where: {
       success: { eq: true }
@@ -24,7 +24,7 @@ query proposalsByCaller($caller: String!, $afterHeight: Int!) {
         events: {
           GnoEvent: {
             type: { eq: "ProposalCreated" }
-            pkg_path: { eq: "gno.land/r/gov/dao" }
+            pkg_path: { eq: $realm }
           }
         }
       }

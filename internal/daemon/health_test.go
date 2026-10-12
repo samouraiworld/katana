@@ -208,6 +208,25 @@ func TestVoteCycleOutcome(t *testing.T) {
 	}
 }
 
+// Resolving a missing id from the tx hash: a tx not committed (yet) is an
+// expected state, but an RPC that cannot answer /tx reaches /health.
+func TestVoteCycleTxLookupErrors(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "dev", nil)
+	rt := f.runtime(t)
+	seed(t, f, "", "q2Vh", store.StatusUnconfirmed, time.Minute)
+	if err := f.d.voteCycle(ctx, rt); err != nil {
+		t.Fatalf("tx not found reported as a failure: %v\nlogs:\n%s", err, f.logs.String())
+	}
+
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	rt.RPCEndpoint = down.URL
+	if err := f.d.voteCycle(ctx, rt); err == nil {
+		t.Fatal("unreachable /tx not reported")
+	}
+}
+
 type failUpdateStore struct{ store.Store }
 
 func (failUpdateStore) UpdateStatus(context.Context, int64, string, time.Time) error {
