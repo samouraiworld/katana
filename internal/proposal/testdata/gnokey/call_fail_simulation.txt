@@ -1,26 +1,31 @@
 Enter password.
+GAS WANTED: 100000000
+GAS USED:   9909365
+HEIGHT:     0
+EVENTS:     []
+INFO:       vm.version=dev, suggested gas-wanted (gas used + 5%): 10404834
 TX HASH:    
-INFO:       vm.version=dev
 --= Error =--
 Data: proposal already executed. Accepted: true
 Msg Traces:
-    0  github.com/gnolang/gno/tm2/pkg/errors/errors.go:103 - deliver transaction failed: log:msg:0,success:false,log:--= Error =--
+    0  gno/tm2/pkg/errors/errors.go:103 - deliver transaction failed: log:msg:0,success:false,log:--= Error =--
 Data: errors.FmtError{format:"proposal already executed. Accepted: true", args:[]interface {}(nil)}
 Msg Traces:
     0  /gnoroot/tm2/pkg/errors/errors.go:103 - VM panic: proposal already executed. Accepted: true
 Stacktrace:
 panic: proposal already executed. Accepted: true
 executeProposal at gno.land/r/gov/dao/proxy.gno:54
-ExecuteOrRejectProposal at gno.land/r/gov/dao/proxy.gno:60
+ExecuteOrRejectProposal at gno.land/r/gov/dao/proxy.gno:61
 
 
 Stack Trace:
     0  /gnoroot/tm2/pkg/errors/errors.go:88
     1  /gnoroot/tm2/pkg/errors/errors.go:103
-    2  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:1015
-    3  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:988
+    2  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:1453
+    3  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:1426
     4  /usr/local/go/src/runtime/panic.go:783
 ... 29 more lines elided,events:[]
 --= /Error =--
+
 
 exit=1

@@ -37,7 +37,7 @@ halt_height = 0
 home = ""
 
 # A custom human readable name for this node
-moniker = "635a97be4bff"
+moniker = "bb7c2685b074"
 
 # Path to the JSON file containing the private key to use for node authentication in the p2p protocol
 node_key_file = "secrets/node_key.json"
@@ -167,6 +167,12 @@ wal_dir = ""
 ##### peer to peer configuration options #####
 [p2p]
 
+# Path to the address book file used to persist discovered peers across restarts
+addr_book_file = "config/addrbook.json"
+
+# Toggle to disable guard against peers connecting from the same ip
+allow_duplicate_ip = false
+
 # Address to advertise to peers for them to dial
 # If empty, will use the same port as the laddr,
 # and will introspect on the listener or use UPnP
@@ -189,6 +195,11 @@ max_num_outbound_peers = 10
 # Maximum size of a message packet payload, in bytes
 max_packet_msg_payload_size = 1024
 
+# Maximum total bytes buffered for incomplete incoming messages, across all of a connection's channels.
+# This is the per-connection bound on memory a peer can pin, so the node's worst case is this times the peer limits.
+# 0 disables the budget, leaving only each channel's own capacity.
+max_recv_buffer_bytes = 20971520
+
 # Comma separated list of nodes to keep persistent connections to
 persistent_peers = ""
 
@@ -197,6 +208,11 @@ pex = true
 
 # Comma separated list of peer IDs to keep private (will not be gossiped to other peers)
 private_peer_ids = ""
+
+# Maximum time a single incoming message may spend being assembled from partial packets.
+# The deadline is anchored to the first partial packet of a message and is not extended by later ones,
+# so a peer cannot hold buffer space indefinitely by dribbling packets. 0 disables the deadline.
+recv_assembly_timeout = "30s"
 
 # Rate at which packets can be received, in bytes/second
 recv_rate = 5120000
@@ -234,6 +250,12 @@ grpc_laddr = ""
 # 1024 - 40 - 10 - 50 = 924 = ~900
 grpc_max_open_connections = 900
 home = ""
+
+# How long a keep-alive HTTP connection may sit idle between requests
+# before the server closes it. Zero falls back to the read timeout (10s).
+# Set it larger than the idle timeout of any reverse proxy in front of
+# the node to avoid intermittent 502s from reuse of closed connections.
+idle_timeout = "0s"
 
 # TCP or UNIX socket address for the RPC server to listen on
 laddr = "tcp://127.0.0.1:26657"

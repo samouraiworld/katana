@@ -15,7 +15,7 @@ import (
 	"github.com/samouraiworld/katana/internal/proposal"
 )
 
-const caller = "g1q2myr825pvw02es0srq0f66r4djyxsvqkh0x5a"
+const caller = "g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek"
 
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
@@ -47,7 +47,7 @@ func TestProposalsByCallerFixture(t *testing.T) {
 	var reqBody []byte
 	srv := serve(t, http.StatusOK, fixture(t, "indexer_proposals_by_caller.response.json"), &reqBody)
 
-	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 11)
+	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 7)
 	if err != nil {
 		t.Fatalf("ProposalsByCaller: %v", err)
 	}
@@ -68,8 +68,8 @@ func TestProposalsByCallerFixture(t *testing.T) {
 	if got.Query != want.Query {
 		t.Fatalf("query differs from the verified fixture:\n%s", got.Query)
 	}
-	if got.Variables["caller"] != caller || got.Variables["afterHeight"] != float64(10) {
-		t.Fatalf("variables = %v, want caller %s afterHeight 10", got.Variables, caller)
+	if got.Variables["caller"] != caller || got.Variables["afterHeight"] != float64(6) {
+		t.Fatalf("variables = %v, want caller %s afterHeight 6", got.Variables, caller)
 	}
 
 	if len(txs) != 3 {
@@ -81,9 +81,9 @@ func TestProposalsByCallerFixture(t *testing.T) {
 		id     string
 		file   string
 	}{
-		{"q7lHmFF/yLsDJx8hdMiYn+raUZ/0PLMGWdxaspP+qjE=", 15, "1", "eject1.gno"},
-		{"15GaIoNEHNDu3tn1Vrd13G9bdQBHkf6qjoNo4jlSsB4=", 17, "2", "eject2.gno"},
-		{"08bHJ7RCaOMIgZLixeq/w4MqYPytRdJumuOMLMmmhr4=", 37, "3", "eject3.gno"},
+		{"KKUJRcbwg7obrJEwkJJbvOP3MdwSt30RGFAhBgCkaJE=", 7, "1", "eject1.gno"},
+		{"j6iKhwYrUpu1zZw4AEwHRyPvx9HrPqghSZAEUTuAR8Q=", 8, "2", "eject2.gno"},
+		{"x/3en1gygPnR103c136yFFJT2Z/E7et3pSUNEb+cpxk=", 9, "3", "eject3.gno"},
 	}
 	for i, w := range wantTx {
 		tx := txs[i]
@@ -107,7 +107,7 @@ func TestProposalsByCallerFixture(t *testing.T) {
 // tx's SHA-256), which is what katana stores in proposals.tx_hash.
 func TestHashMatchesGnokeyTxHash(t *testing.T) {
 	srv := serve(t, http.StatusOK, fixture(t, "indexer_proposals_by_caller.response.json"), nil)
-	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 11)
+	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,8 @@ func TestProposalIDFailsClosed(t *testing.T) {
 }
 
 // fixtureEjectScript is config.DefaultEjectScript as it was when the indexer
-// fixture was captured (r/sys/validators/v3). Pinned here so the test checks
+// fixture was captured (gno.land mainnet realms, chain/mainnet tag:
+// r/sys/validators/v0). Pinned here so the test checks
 // the rendering path (proposal.Build: placeholder substitution, Go-literal
 // escaping, trailing newline) against real indexer output, independently of
 // later template changes.
@@ -197,7 +198,7 @@ const fixtureEjectScript = `package main
 
 import (
 	"gno.land/r/gov/dao"
-	validators "gno.land/r/sys/validators/v3"
+	validators "gno.land/r/sys/validators/v0"
 )
 
 func main(cur realm) {
@@ -215,7 +216,7 @@ func main(cur realm) {
 // returns for that tx, whatever the file name.
 func TestRunPayloadHashMatchesIndexerBody(t *testing.T) {
 	srv := serve(t, http.StatusOK, fixture(t, "indexer_proposals_by_caller.response.json"), nil)
-	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 11)
+	txs, err := New(srv.URL, nil).ProposalsByCaller(context.Background(), caller, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,8 +230,8 @@ func TestRunPayloadHashMatchesIndexerBody(t *testing.T) {
 	}}
 	b := proposal.Build(proposal.Target{
 		Moniker:         "samourai-crew-4",
-		Address:         "g1g646r47fzalv5wde6fcfh2x856zeas358z4ewd",
-		OperatorAddress: "g1ps3yvz3fjkmpng8p5jaysjd92uh73z5s6trv59",
+		Address:         "g155yu85dl2rygemkxcvn3g26nfw0rr5y2dkj6m0",
+		OperatorAddress: "g1xqwtx7typgztlwtqzqqungq6lpy5k3a9p8djxp",
 		Action:          config.ActionEject,
 		Score:           12,
 		Window:          "current_week",
@@ -245,7 +246,7 @@ func TestRunPayloadHashMatchesIndexerBody(t *testing.T) {
 			got, h, b.Script, txs[1].Messages[0].Files[0].Body)
 	}
 	tx, ok := Match(txs, h)
-	if !ok || tx.ProposalID != "2" || tx.Hash != "15GaIoNEHNDu3tn1Vrd13G9bdQBHkf6qjoNo4jlSsB4=" {
+	if !ok || tx.ProposalID != "2" || tx.Hash != "j6iKhwYrUpu1zZw4AEwHRyPvx9HrPqghSZAEUTuAR8Q=" {
 		t.Fatalf("Match = %+v, %v", tx, ok)
 	}
 }

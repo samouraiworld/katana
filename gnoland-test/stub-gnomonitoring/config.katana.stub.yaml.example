@@ -40,7 +40,7 @@ proposal:
   max_rejections: 2
   submit: run                         # gno.land valset actions need maketx run
   actions:
-    # Uses the built-in DefaultEjectScript (ValoperChange Power=0 via v3).
+    # Uses the built-in DefaultEjectScript (ValoperChange Power=0 via r/sys/validators/v0).
     eject:
       score_below: 30
       window: current_month

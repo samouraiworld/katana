@@ -305,12 +305,12 @@ func (r Runtime) ActionMode(action string) string {
 // Direct MsgCall is unsupported (the builder returns a ProposalRequest that
 // must be handed to dao.MustCreateProposal), so a crossing script is required.
 //
-// Confirmed end-to-end on the test13 gnoland-test devnet (PP-5), where the
-// realm was r/sys/validators/v3 with the same API: an accepted and executed
-// proposal emitted ValidatorRemoved and dropped the operator from the consensus
-// valset (RPC /validators), via `make accept-govdao` (see issue #2). Pending
-// re-confirmation on a devnet built from the chain/mainnet tag. On test13,
-// override run_script_template with the v3 import (see config.yaml.example).
+// Confirmed end-to-end on the gnoland-test devnet built from the chain/mainnet
+// tag (e2e suite, `accept` scenario): an accepted and executed proposal emits
+// ValidatorRemoved and drops the operator from the consensus valset (RPC
+// /validators). It was first confirmed on test13 (PP-5, issue #2), where the
+// realm is r/sys/validators/v3 with the same API: on test13, override
+// run_script_template with the v3 import (see config.yaml.example).
 const DefaultEjectScript = `package main
 
 import (

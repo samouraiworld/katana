@@ -1,0 +1,31 @@
+Enter password.
+GAS WANTED: 100000000
+GAS USED:   20558218
+HEIGHT:     0
+EVENTS:     []
+INFO:       vm.version=dev, suggested gas-wanted (gas used + 5%): 21586129
+TX HASH:    
+--= Error =--
+Data: validator does not exist: g155yu85dl2rygemkxcvn3g26nfw0rr5y2dkj6m0
+Msg Traces:
+    0  gno/tm2/pkg/errors/errors.go:103 - deliver transaction failed: log:msg:0,success:false,log:--= Error =--
+Data: errors.FmtError{format:"validator does not exist: g155yu85dl2rygemkxcvn3g26nfw0rr5y2dkj6m0", args:[]interface {}(nil)}
+Msg Traces:
+    0  /gnoroot/tm2/pkg/errors/errors.go:103 - VM panic: validator does not exist: g155yu85dl2rygemkxcvn3g26nfw0rr5y2dkj6m0
+Stacktrace:
+panic: validator does not exist: g155yu85dl2rygemkxcvn3g26nfw0rr5y2dkj6m0
+(anonymous) at gno.land/r/sys/validators/v0/proposal.gno:157
+(*gno.land/r/gov/dao.SimpleExecutor).Execute at gno.land/r/gov/dao/types.gno:232
+(*gno.land/r/gov/dao/impl/v0.GovDAO).ExecuteProposal at gno.land/r/gov/dao/impl/v0/govdao.gno:162
+executeProposal at gno.land/r/gov/dao/proxy.gno:260
+ExecuteOrRejectProposal at gno.land/r/gov/dao/proxy.gno:61
+
+
+Stack Trace:
+    0  /gnoroot/tm2/pkg/errors/errors.go:88
+    1  /gnoroot/tm2/pkg/errors/errors.go:103
+... 32 more lines elided,events:[]
+--= /Error =--
+
+
+exit=1

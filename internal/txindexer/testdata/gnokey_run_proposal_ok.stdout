@@ -1,11 +1,11 @@
 
 OK!
 GAS WANTED: 100000000
-GAS USED:   25358885
-HEIGHT:     15
+GAS USED:   29034099
+HEIGHT:     7
 STORAGE DELTA:  43282 bytes
 STORAGE FEE:    4328200ugnot
 TOTAL TX COST:  5328200ugnot
-EVENTS:     [{"type":"ProposalCreated","attrs":[{"key":"id","value":"1"}],"pkg_path":"gno.land/r/gov/dao"},{"bytes_delta":3279,"fee_delta":{"denom":"ugnot","amount":327900},"pkg_path":"gno.land/r/gov/dao"},{"bytes_delta":2531,"fee_delta":{"denom":"ugnot","amount":253100},"pkg_path":"gno.land/r/gov/dao/v3/impl"},{"bytes_delta":36204,"fee_delta":{"denom":"ugnot","amount":3620400},"pkg_path":"gno.land/r/gov/dao/v3/memberstore"},{"bytes_delta":1268,"fee_delta":{"denom":"ugnot","amount":126800},"pkg_path":"gno.land/r/sys/validators/v3"}]
+EVENTS:     [{"type":"ProposalCreated","attrs":[{"key":"id","value":"1"}],"pkg_path":"gno.land/r/gov/dao"},{"bytes_delta":3279,"fee_delta":{"denom":"ugnot","amount":327900},"pkg_path":"gno.land/r/gov/dao"},{"bytes_delta":2531,"fee_delta":{"denom":"ugnot","amount":253100},"pkg_path":"gno.land/r/gov/dao/impl/v0"},{"bytes_delta":36204,"fee_delta":{"denom":"ugnot","amount":3620400},"pkg_path":"gno.land/r/gov/dao/memberstore/v0"},{"bytes_delta":1268,"fee_delta":{"denom":"ugnot","amount":126800},"pkg_path":"gno.land/r/sys/validators/v0"}]
 INFO:       
-TX HASH:    q7lHmFF/yLsDJx8hdMiYn+raUZ/0PLMGWdxaspP+qjE=
+TX HASH:    KKUJRcbwg7obrJEwkJJbvOP3MdwSt30RGFAhBgCkaJE=

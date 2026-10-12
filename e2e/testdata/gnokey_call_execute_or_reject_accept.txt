@@ -1,0 +1,14 @@
+Enter password.
+(true bool)
+
+
+OK!
+GAS WANTED: 100000000
+GAS USED:   22378776
+HEIGHT:     13
+STORAGE DELTA:  -8 bytes
+STORAGE REFUND: 800ugnot
+TOTAL TX COST:  999200ugnot
+EVENTS:     [{"type":"ValidatorRemoved","attrs":[{"key":"op","value":"g1xqwtx7typgztlwtqzqqungq6lpy5k3a9p8djxp"},{"key":"signingAddr","value":"g155yu85dl2rygemkxcvn3g26nfw0rr5y2dkj6m0"}],"pkg_path":"gno.land/r/sys/validators/v0"},{"bytes_delta":-8,"fee_refund":{"denom":"ugnot","amount":800},"pkg_path":"gno.land/r/gov/dao/impl/v0","refund_withheld":false}]
+INFO:       
+TX HASH:    EbA9qCpV3TrCH4vFMXXmnh/Nyt/4jgIWBb+BlYfaRho=

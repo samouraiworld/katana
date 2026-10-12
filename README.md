@@ -270,9 +270,10 @@ The image targets the gno.land **mainnet** by default: `gnokey` is built from
 `chain/mainnet` tag commit (also tagged `v1.2.0`; the full SHA is pinned
 because tags can move). The built-in run scripts import the mainnet realm
 `gno.land/r/sys/validators/v0` and create the proposal through
-`gno.land/r/gov/dao`. The ejection flow was confirmed end-to-end on a test13
-devnet (realm `r/sys/validators/v3`, same API) and is pending re-confirmation
-on a devnet built from the mainnet tag.
+`gno.land/r/gov/dao`. Ejection and voting-power changes are confirmed
+end-to-end by the e2e suite on a devnet built from the mainnet tag (see
+`gnoland-test/README.md`); the ejection flow was first confirmed on test13
+(realm `r/sys/validators/v3`, same API).
 
 To target **test13**, build with `GNO_REF=f45cc5c88e6a` and override each
 action's `run_script_template` with the v3 import

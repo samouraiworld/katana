@@ -4,7 +4,7 @@
 # proposal it intended to create (e.g. katana recovering the id of an
 # `unconfirmed` broadcast whose gnokey output carried no TX HASH).
 #
-# Verified against the gnoland-test devnet tx-indexer
+# Verified against the gnoland-test devnet (gno chain/mainnet tag) tx-indexer
 # (ghcr.io/gnolang/tx-indexer@sha256:174d52f2...) on 2026-10-12.
 # FilterInt has only eq/gt/lt (no gte): pass minHeight-1 as $afterHeight.
 query proposalsByCaller($caller: String!, $afterHeight: Int!) {

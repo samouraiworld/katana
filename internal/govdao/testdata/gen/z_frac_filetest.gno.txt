@@ -8,7 +8,7 @@ import (
 
 	"gno.land/p/nt/testutils/v0"
 	"gno.land/r/gov/dao"
-	daov3init "gno.land/r/gov/dao/v3/init"
+	govdaoinit "gno.land/r/gov/dao/init/v0"
 )
 
 var (
@@ -19,7 +19,7 @@ var (
 
 func init(cur realm) {
 	testing.SetHeight(123)
-	daov3init.InitWithUsers(cross(cur), c, alice, bob)
+	govdaoinit.InitWithUsers(cross(cur), c, alice, bob)
 	testing.SetOriginCaller(c)
 	testing.SetRealm(testing.NewUserRealm(c))
 	ex := dao.NewSimpleExecutor(0, cur, func(realm) error { return nil }, "")

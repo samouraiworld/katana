@@ -2,13 +2,20 @@
 # One-shot setup for the local Gno devnet (3 genesis validators + a 4th
 # identity reserved for the Phase 2 "new validator via GovDAO" scenario).
 #
+# Target: gno.land mainnet, i.e. gnolang/gno tag `chain/mainnet`
+# (9c8eb132e483). GNO_REPO_PATH must be a checkout of that tag: the realms
+# the devnet and katana rely on (r/gov/dao/impl/v0, r/gov/dao/init/v0,
+# r/gov/dao/memberstore/v0, r/sys/validators/v0) only exist there. A plain
+# upstream checkout is enough; no fork-specific patch is needed.
+#
 # Safe to re-run: every step is idempotent and skips work that was already
 # done (images already built, secrets/genesis/dev account already
 # generated). Nothing generated here is committed to git. To wipe everything
 # and regenerate from scratch (fresh keys + addresses), run `make clean-all`.
 #
 # Usage:
-#   GNO_REPO_PATH=/path/to/gno ./bootstrap.sh
+#   git -C /path/to/gno worktree add --detach ../gno-mainnet chain/mainnet
+#   GNO_REPO_PATH=/path/to/gno-mainnet ./bootstrap.sh
 #
 # GNO_REPO_PATH defaults to /home/louis/gno.
 set -euo pipefail
@@ -18,22 +25,22 @@ cd "$(dirname "$0")"
 GNO_REPO_PATH="${GNO_REPO_PATH:-/home/$USER/gno}"
 # Runtime image used by docker-compose for all 4 validators.
 # Priority: env var > existing .env value > default.
-# Override: GNO_IMAGE=chain:test-13 ./bootstrap.sh
+# Override: GNO_IMAGE=<prebuilt image> ./bootstrap.sh
 if [ -z "${GNO_IMAGE:-}" ] && [ -f .env ]; then
   GNO_IMAGE="$(grep -E '^GNO_IMAGE=' .env | cut -d= -f2- | head -1)"
 fi
-GNO_IMAGE="${GNO_IMAGE:-gno-validator:local}"
+GNO_IMAGE="${GNO_IMAGE:-gno-validator:mainnet}"
 
 # Image providing the gnogenesis binary + /gnoroot/examples for genesis generation.
 # MUST be built from the same source as GNO_IMAGE (same branch/commit).
-# When GNO_IMAGE is a custom build (e.g. chain:test-13), build the matching
-# contribs image first and set GNO_CONTRIBS_IMAGE accordingly:
-#   docker build --target gnocontribs -t gno-contribs:test-13 /path/to/gno
-#   GNO_CONTRIBS_IMAGE=gno-contribs:test-13 ./bootstrap.sh
+# When GNO_IMAGE is a custom build, build the matching contribs image first
+# and set GNO_CONTRIBS_IMAGE accordingly:
+#   docker build --target gnocontribs -t gno-contribs:custom /path/to/gno
+#   GNO_CONTRIBS_IMAGE=gno-contribs:custom ./bootstrap.sh
 if [ -z "${GNO_CONTRIBS_IMAGE:-}" ] && [ -f .env ]; then
   GNO_CONTRIBS_IMAGE="$(grep -E '^GNO_CONTRIBS_IMAGE=' .env | cut -d= -f2- | head -1)"
 fi
-GNO_CONTRIBS_IMAGE="${GNO_CONTRIBS_IMAGE:-gno-contribs:local}"
+GNO_CONTRIBS_IMAGE="${GNO_CONTRIBS_IMAGE:-gno-contribs:mainnet}"
 DOCKER_USER="$(id -u):$(id -g)"
 NODES=(validator validator2 validator3 validator4)
 
@@ -44,19 +51,20 @@ NODES=(validator validator2 validator3 validator4)
 DEV_PASSPHRASE="devpassword123"
 
 echo "==> [1/7] Building bootstrap images"
-if [ "$GNO_IMAGE" = "gno-validator:local" ]; then
-  echo "    GNO_IMAGE=gno-validator:local → building gnoland from $GNO_REPO_PATH"
-  docker build --target gnoland -t gno-validator:local "$GNO_REPO_PATH"
+if [ "$GNO_IMAGE" = "gno-validator:mainnet" ]; then
+  echo "    GNO_IMAGE=gno-validator:mainnet → building gnoland from $GNO_REPO_PATH"
+  docker build --target gnoland -t gno-validator:mainnet "$GNO_REPO_PATH"
 else
   echo "    GNO_IMAGE=$GNO_IMAGE → skipping local gnoland build"
 fi
-if [ "$GNO_CONTRIBS_IMAGE" = "gno-contribs:local" ]; then
-  echo "    GNO_CONTRIBS_IMAGE=gno-contribs:local → building gnocontribs from $GNO_REPO_PATH"
-  docker build --target gnocontribs -t gno-contribs:local "$GNO_REPO_PATH"
+if [ "$GNO_CONTRIBS_IMAGE" = "gno-contribs:mainnet" ]; then
+  echo "    GNO_CONTRIBS_IMAGE=gno-contribs:mainnet → building gnocontribs from $GNO_REPO_PATH"
+  docker build --target gnocontribs -t gno-contribs:mainnet "$GNO_REPO_PATH"
 else
   echo "    GNO_CONTRIBS_IMAGE=$GNO_CONTRIBS_IMAGE → using pre-built contribs image"
 fi
-docker build --target gnokey -t gno-gnokey:local "$GNO_REPO_PATH"
+docker build --target gnokey -t gno-gnokey:mainnet "$GNO_REPO_PATH"
+docker build --target gnoweb -t gno-gnoweb:mainnet "$GNO_REPO_PATH"
 
 echo "==> [2/7] Generating node secrets"
 for node in "${NODES[@]}"; do
@@ -137,12 +145,12 @@ DOCKER_USER=${DOCKER_USER}
 
 # Gnoland validator image used by docker-compose.yml.
 # Override to pin a specific build instead of the locally built image.
-# Example: GNO_IMAGE=chain:test-13 ./bootstrap.sh
+# Example: GNO_IMAGE=<prebuilt image> ./bootstrap.sh
 GNO_IMAGE=${GNO_IMAGE}
 
 # Gnogenesis + examples image used for genesis generation.
 # Must be built from the same source as GNO_IMAGE.
-# Example: docker build --target gnocontribs -t gno-contribs:test-13 /path/to/gno
+# Example: docker build --target gnocontribs -t gno-contribs:custom /path/to/gno
 GNO_CONTRIBS_IMAGE=${GNO_CONTRIBS_IMAGE}
 EOF
 
@@ -156,13 +164,13 @@ else
   mkdir -p .gnokey-dev
   printf '%s\n%s\n' "$DEV_PASSPHRASE" "$DEV_PASSPHRASE" | docker run --rm -i --user "$DOCKER_USER" \
     -v "$PWD/.gnokey-dev:/gnoroot/keybase" \
-    gno-gnokey:local add -insecure-password-stdin -home /gnoroot/keybase dev
+    gno-gnokey:mainnet add -insecure-password-stdin -home /gnoroot/keybase dev
   printf '%s\n%s\n' "$DEV_PASSPHRASE" "$DEV_PASSPHRASE" | docker run --rm -i --user "$DOCKER_USER" \
     -v "$PWD/.gnokey-dev:/gnoroot/keybase" \
-    gno-gnokey:local add -insecure-password-stdin -home /gnoroot/keybase v4op
+    gno-gnokey:mainnet add -insecure-password-stdin -home /gnoroot/keybase v4op
 fi
 KEYLIST=$(docker run --rm --user "$DOCKER_USER" -v "$PWD/.gnokey-dev:/gnoroot/keybase" \
-  gno-gnokey:local list -home /gnoroot/keybase 2>/dev/null)
+  gno-gnokey:mainnet list -home /gnoroot/keybase 2>/dev/null)
 DEV_ADDR=$(echo "$KEYLIST" | grep " dev (" | sed -n 's/.*addr: \(g1[a-z0-9]*\).*/\1/p')
 V4OP_ADDR=$(echo "$KEYLIST" | grep " v4op (" | sed -n 's/.*addr: \(g1[a-z0-9]*\).*/\1/p')
 echo "    dev  addr=$DEV_ADDR"
