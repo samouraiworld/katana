@@ -201,6 +201,21 @@ func (s *SQLite) RecordProposal(ctx context.Context, r ProposalRecord) (int64, e
 	return res.LastInsertId()
 }
 
+func (s *SQLite) RecordBroadcastOutcome(ctx context.Context, id int64, o ProposalRecord) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE proposals SET output = ?, success = ?, status = ?, tx_hash = ?, onchain_proposal_id = ? WHERE id = ?`,
+		o.Output, boolInt(o.Success), o.Status, o.TxHash, o.OnchainID, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n != 1 {
+		return fmt.Errorf("proposal row %d not found", id)
+	}
+	return nil
+}
+
 func (s *SQLite) SetOnchainID(ctx context.Context, id int64, onchainID string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE proposals SET onchain_proposal_id = ? WHERE id = ?`, onchainID, id)

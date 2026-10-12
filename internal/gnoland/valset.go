@@ -34,7 +34,8 @@ func New(rpcURL string) *Client {
 	}
 }
 
-// tmValidatorsResponse models the /validators RPC response.
+// tmValidatorsResponse models the tm2 /validators RPC response. tm2 returns
+// the whole set in one response: no pagination and no total.
 type tmValidatorsResponse struct {
 	Result struct {
 		BlockHeight string `json:"block_height"`
@@ -42,7 +43,6 @@ type tmValidatorsResponse struct {
 			Address     string `json:"address"`
 			VotingPower string `json:"voting_power"`
 		} `json:"validators"`
-		Total string `json:"total"`
 	} `json:"result"`
 	Error *struct {
 		Message string `json:"message"`
@@ -50,53 +50,36 @@ type tmValidatorsResponse struct {
 	} `json:"error"`
 }
 
-// Validators returns the current consensus validator set, following pagination
-// until every entry has been collected.
+// Validators returns the current consensus validator set.
+//
+// It fails closed: an unreadable entry, a non-positive voting power or a
+// duplicate address is an error, never a 0 voting power or a miscounted set
+// (both feed the VP targets and the min_valset_size guardrail).
 func (c *Client) Validators(ctx context.Context) ([]Validator, error) {
-	const perPage = 100
-	var (
-		all  []Validator
-		page = 1
-	)
+	var body tmValidatorsResponse
+	if err := c.getJSON(ctx, "/validators", nil, &body); err != nil {
+		return nil, err
+	}
+	if body.Error != nil {
+		return nil, fmt.Errorf("RPC error: %s (%s)", body.Error.Message, body.Error.Data)
+	}
 
-	for {
-		q := url.Values{}
-		q.Set("per_page", strconv.Itoa(perPage))
-		q.Set("page", strconv.Itoa(page))
-
-		var body tmValidatorsResponse
-		if err := c.getJSON(ctx, "/validators", q, &body); err != nil {
-			return nil, err
+	all := make([]Validator, 0, len(body.Result.Validators))
+	seen := make(map[string]bool, len(body.Result.Validators))
+	for _, v := range body.Result.Validators {
+		if v.Address == "" {
+			return nil, fmt.Errorf("validator with an empty address")
 		}
-		if body.Error != nil {
-			return nil, fmt.Errorf("RPC error: %s (%s)", body.Error.Message, body.Error.Data)
+		key := strings.ToLower(v.Address)
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate validator %s", v.Address)
 		}
-
-		// Fail closed: an unreadable entry must never read as a 0 voting
-		// power or a smaller valset (both feed the VP targets and the
-		// min_valset_size guardrail).
-		for _, v := range body.Result.Validators {
-			if v.Address == "" {
-				return nil, fmt.Errorf("validator with an empty address on page %d", page)
-			}
-			power, err := strconv.ParseInt(v.VotingPower, 10, 64)
-			if err != nil || power <= 0 {
-				return nil, fmt.Errorf("validator %s: invalid voting_power %q", v.Address, v.VotingPower)
-			}
-			all = append(all, Validator{Address: v.Address, VotingPower: power})
+		seen[key] = true
+		power, err := strconv.ParseInt(v.VotingPower, 10, 64)
+		if err != nil || power <= 0 {
+			return nil, fmt.Errorf("validator %s: invalid voting_power %q", v.Address, v.VotingPower)
 		}
-
-		total, err := strconv.Atoi(body.Result.Total)
-		if err != nil || total < 0 {
-			return nil, fmt.Errorf("invalid valset total %q", body.Result.Total)
-		}
-		if len(all) >= total {
-			break
-		}
-		if len(body.Result.Validators) == 0 {
-			return nil, fmt.Errorf("valset truncated: %d of %d validators returned", len(all), total)
-		}
-		page++
+		all = append(all, Validator{Address: v.Address, VotingPower: power})
 	}
 	return all, nil
 }

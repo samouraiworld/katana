@@ -207,3 +207,39 @@ func TestVoteCycleOutcome(t *testing.T) {
 		t.Fatal("vote cycle with an unreachable RPC returned nil")
 	}
 }
+
+type failUpdateStore struct{ store.Store }
+
+func (failUpdateStore) UpdateStatus(context.Context, int64, string, time.Time) error {
+	return errors.New("disk full")
+}
+
+// Vote-side operational failures reach /health: an unreachable tx-indexer and
+// a status write that fails. A clean "no match yet" does not.
+func TestVoteCycleOperationalErrors(t *testing.T) {
+	ctx := context.Background()
+
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	f := newFixture(t, "dev", nil)
+	rt := f.runtime(t)
+	rt.TxIndexerURL, rt.Gnokey.Address = down.URL, "g1katana"
+	seedHashless(t, f, store.StatusUnconfirmed, "deadbeef")
+	if err := f.d.voteCycle(ctx, rt); err == nil {
+		t.Fatal("unreachable tx-indexer not reported")
+	}
+
+	url, _ := indexerServer(t)
+	rt.TxIndexerURL = url
+	if err := f.d.voteCycle(ctx, rt); err != nil {
+		t.Fatalf("no match reported as a failure: %v", err)
+	}
+
+	f = newFixture(t, "dev", nil)
+	f.d.st = failUpdateStore{f.st}
+	seed(t, f, "7", "", store.StatusPending, time.Minute)
+	f.chain.setRender("7", "- **PROPOSAL HAS BEEN ACCEPTED**\n- YES PERCENT: 100%\n- NO PERCENT: 0%\n")
+	if err := f.d.voteCycle(ctx, f.runtime(t)); err == nil {
+		t.Fatal("failed status write not reported")
+	}
+}

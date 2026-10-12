@@ -8,20 +8,17 @@ import (
 	"testing"
 )
 
-func TestValidatorsPaginates(t *testing.T) {
+// The response shape is tm2's (see e2e/testdata/rpc_validators.json): the
+// whole set at once, no pagination, no total.
+func TestValidators(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/validators" {
 			http.NotFound(w, r)
 			return
 		}
-		switch r.URL.Query().Get("page") {
-		case "1":
-			fmt.Fprint(w, `{"result":{"validators":[{"address":"g1a","voting_power":"10"}],"total":"2"}}`)
-		case "2":
-			fmt.Fprint(w, `{"result":{"validators":[{"address":"g1b","voting_power":"5"}],"total":"2"}}`)
-		default:
-			t.Errorf("unexpected page %q", r.URL.Query().Get("page"))
-		}
+		fmt.Fprint(w, `{"jsonrpc":"2.0","id":"","result":{"block_height":"77","validators":[
+			{"address":"g1a","pub_key":{"@type":"/tm.PubKeyEd25519","value":"x"},"voting_power":"10","proposer_priority":"0"},
+			{"address":"g1b","pub_key":{"@type":"/tm.PubKeyEd25519","value":"y"},"voting_power":"5","proposer_priority":"-5"}]}}`)
 	}))
 	defer srv.Close()
 
@@ -46,8 +43,7 @@ func TestValidatorsFailsClosed(t *testing.T) {
 		"negative power":    `{"result":{"validators":[{"address":"g1a","voting_power":"-1"}],"total":"1"}}`,
 		"zero power":        `{"result":{"validators":[{"address":"g1a","voting_power":"0"}],"total":"1"}}`,
 		"empty address":     `{"result":{"validators":[{"address":"","voting_power":"1"}],"total":"1"}}`,
-		"missing total":     `{"result":{"validators":[{"address":"g1a","voting_power":"1"}]}}`,
-		"non-numeric total": `{"result":{"validators":[{"address":"g1a","voting_power":"1"}],"total":"x"}}`,
+		"duplicate address": `{"result":{"validators":[{"address":"g1a","voting_power":"1"},{"address":"G1A","voting_power":"1"}]}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -60,22 +56,5 @@ func TestValidatorsFailsClosed(t *testing.T) {
 				t.Fatalf("expected an error, got %+v", got)
 			}
 		})
-	}
-}
-
-// A total larger than what the pages return must not loop forever nor return
-// a silently truncated set.
-func TestValidatorsShortPagesFail(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("page") == "1" {
-			fmt.Fprint(w, `{"result":{"validators":[{"address":"g1a","voting_power":"1"}],"total":"3"}}`)
-			return
-		}
-		fmt.Fprint(w, `{"result":{"validators":[],"total":"3"}}`)
-	}))
-	defer srv.Close()
-
-	if got, err := New(srv.URL).Validators(context.Background()); err == nil {
-		t.Fatalf("expected an error for a truncated valset, got %+v", got)
 	}
 }

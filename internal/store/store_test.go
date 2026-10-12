@@ -460,3 +460,34 @@ func TestReconcile(t *testing.T) {
 		}
 	})
 }
+
+// A broadcast is recorded as an unconfirmed intent first, then completed with
+// gnokey's outcome.
+func TestRecordBroadcastOutcome(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	id, err := st.RecordProposal(ctx, ProposalRecord{
+		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+		Status: StatusUnconfirmed, BroadcastHeight: 9, PayloadHash: "abc",
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	if err := st.RecordBroadcastOutcome(ctx, id, ProposalRecord{
+		Output: "OK!", Success: true, Status: StatusPending, TxHash: "h=", OnchainID: "4",
+	}); err != nil {
+		t.Fatalf("RecordBroadcastOutcome: %v", err)
+	}
+	last, err := st.LastProposal(ctx, "local", "g1bad")
+	if err != nil || last == nil {
+		t.Fatalf("LastProposal: %+v, %v", last, err)
+	}
+	if last.Output != "OK!" || !last.Success || last.Status != StatusPending || last.TxHash != "h=" ||
+		last.OnchainID != "4" || last.BroadcastHeight != 9 || last.PayloadHash != "abc" {
+		t.Fatalf("row = %+v", last)
+	}
+
+	if err := st.RecordBroadcastOutcome(ctx, id+100, ProposalRecord{Status: StatusPending}); err == nil {
+		t.Fatal("updating a missing row must fail")
+	}
+}

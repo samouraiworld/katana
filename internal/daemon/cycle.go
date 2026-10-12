@@ -191,7 +191,10 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) error {
 		}
 
 		d.logger.Printf("[%s][eval] ELIGIBLE %s action=%s mode=%s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, mode, dec.Reason)
-		res := d.produce(ctx, rt, gno, dec, vs.Total, mode == config.ModeManual)
+		res, err := d.produce(ctx, rt, gno, dec, vs.Total, mode == config.ModeManual)
+		if err != nil {
+			cycleErr = err
+		}
 		if res == skipped {
 			continue
 		}
@@ -264,7 +267,7 @@ const (
 // command attached, without touching the chain. totalWindowVP is
 // dec.Window's total valset VP this cycle, used to compute the
 // notification's VPDeltaPercent.
-func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalVP int64, manual bool) produceResult {
+func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalVP int64, manual bool) (produceResult, error) {
 	// A valset action is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
 	// would act on an unknown operator).
@@ -273,7 +276,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		operator = op
 	} else {
 		d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, dec.Address)
-		return skipped
+		return skipped, nil
 	}
 
 	built := proposal.Build(proposal.Target{
@@ -302,7 +305,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	// Re-assert chain identity immediately before acting: a genesis reset can
 	// land mid-cycle, after the check that opened this pass.
 	if !d.assertChainID(ctx, gno, rt) {
-		return skipped
+		return skipped, nil
 	}
 
 	vpDeltaPercent := 0.0
@@ -313,7 +316,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 
 	if manual {
 		d.dryRun(ctx, rt, built, rec, operator, nt, vpDeltaPercent)
-		return handedOff
+		return handedOff, nil
 	}
 
 	// Recovery data in case gnokey loses the tx hash (see reconcile): the
@@ -326,27 +329,39 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		rec.BroadcastHeight = h
 	}
 
+	// Record the intent before gnokey runs, as unconfirmed: it closes the
+	// gate whatever happens next (crash, failed outcome write), and carries
+	// the reconcile data. No durable record, no broadcast.
+	rec.Status = store.StatusUnconfirmed
+	id, recErr := d.st.RecordProposal(ctx, rec)
+	if recErr != nil {
+		d.logger.Printf("[%s][eval] NOT broadcasting %s for %s: recording the broadcast intent failed: %v", rt.Key, dec.Action, dec.Address, recErr)
+		return skipped, fmt.Errorf("recording broadcast intent: %w", recErr)
+	}
+
 	out, err := d.signAndBroadcast(ctx, built, rt.Gnokey)
 	tx := proposal.ParseTxOutput(out)
-	rec.Output = out
-	rec.TxHash = tx.TxHash
+	result := store.ProposalRecord{Output: out, TxHash: tx.TxHash}
 	outcome := proposal.Classify(out, err)
 	switch outcome {
 	case proposal.Committed:
-		rec.Success = true
-		rec.Status = store.StatusPending
-		rec.OnchainID = govdao.ProposalIDFromEvents([]byte(tx.Events), d.cfg.VoteTracking.GovdaoRealm)
+		result.Success = true
+		result.Status = store.StatusPending
+		result.OnchainID = govdao.ProposalIDFromEvents([]byte(tx.Events), d.cfg.VoteTracking.GovdaoRealm)
 	case proposal.Ambiguous:
 		// The tx may be on-chain: gate like a pending proposal until the
-		// vote worker resolves or expires it.
-		rec.Status = store.StatusUnconfirmed
+		// vote worker resolves, reconciles or expires it.
+		result.Status = store.StatusUnconfirmed
+	default:
+		result.Status = "" // definitive failure: nothing on-chain, no gate
 	}
-	id, recErr := d.st.RecordProposal(ctx, rec)
-	if recErr != nil {
-		// The proposal may be on-chain but we failed to persist it: the
-		// lifecycle gate has no record and will re-broadcast an identical
-		// proposal next cycle. Surface this loudly rather than silently spam.
-		d.logger.Printf("[%s][eval] CRITICAL: broadcast %s (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, outcome, rec.OnchainID, dec.Address, recErr)
+	rec.OnchainID, rec.TxHash = result.OnchainID, result.TxHash
+	var cycleErr error
+	if err := d.st.RecordBroadcastOutcome(ctx, id, result); err != nil {
+		// The intent row stays unconfirmed: the gate holds and the vote
+		// worker can still reconcile it from the tx-indexer.
+		d.logger.Printf("[%s][eval] CRITICAL: broadcast %s for %s but recording the outcome failed: %v — row %d stays unconfirmed (gate closed)", rt.Key, outcome, dec.Address, err, id)
+		cycleErr = fmt.Errorf("recording broadcast outcome: %w", err)
 	}
 
 	switch outcome {
@@ -361,9 +376,9 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		d.dispatch(ctx, notify.EventUnconfirmed, rt, id, nt, "", vpDeltaPercent, observePayload{})
 	default:
 		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, dec.Address, err)
-		return broadcastFailed
+		return broadcastFailed, cycleErr
 	}
-	return broadcastOnChain
+	return broadcastOnChain, cycleErr
 }
 
 // notifyTarget carries the validator/action identity dispatch needs to build
@@ -459,10 +474,13 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) error {
 	return cycleErr
 }
 
-// trackProposal advances one tracked proposal. It returns an error only when
-// the GovDAO status could not be read (the RPC is failing), for /health.
+// trackProposal advances one tracked proposal. It returns an operational
+// error for /health: the GovDAO status or a configured tx-indexer could not be
+// read, or lifecycle state could not be persisted. A /tx lookup that finds
+// nothing is not one (an ambiguous broadcast may simply never have landed).
 func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord) error {
 	nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
+	var opErr error
 
 	if p.TxHash == "" {
 		// Rows recorded before the tx_hash column existed: the hash is in
@@ -470,13 +488,14 @@ func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govda
 		p.TxHash = proposal.ParseTxOutput(p.Output).TxHash
 	}
 	if p.OnchainID == "" && p.TxHash == "" {
-		p = d.reconcile(ctx, rt, p)
+		p, opErr = d.reconcile(ctx, rt, p)
 	}
 	if p.OnchainID == "" && p.TxHash != "" {
 		if id, err := gd.TxProposalID(ctx, p.TxHash); err != nil {
 			d.logger.Printf("[%s][vote] proposal row %d: resolving id from tx %s: %v", rt.Key, p.ID, p.TxHash, err)
 		} else if err := d.st.SetOnchainID(ctx, p.ID, id); err != nil {
 			d.logger.Printf("[%s][vote] proposal row %d: recording id %s: %v", rt.Key, p.ID, id, err)
+			opErr = fmt.Errorf("recording proposal id: %w", err)
 		} else {
 			d.logger.Printf("[%s][vote] proposal row %d: resolved GovDAO id %s from tx %s", rt.Key, p.ID, id, p.TxHash)
 			p.OnchainID = id
@@ -484,39 +503,37 @@ func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govda
 	}
 	if p.OnchainID == "" {
 		// Nothing to poll: only the timeout can close this row.
-		d.expireIfDue(ctx, rt, p, nt)
-		return nil
+		return errors.Join(opErr, d.expireIfDue(ctx, rt, p, nt))
 	}
 
 	prop, err := gd.Proposal(ctx, p.OnchainID)
 	if err != nil {
 		d.logger.Printf("[%s][vote] status query failed for proposal %s: %v", rt.Key, p.OnchainID, err)
-		return fmt.Errorf("status query for proposal %s: %w", p.OnchainID, err)
+		return errors.Join(opErr, fmt.Errorf("status query for proposal %s: %w", p.OnchainID, err))
 	}
 	switch prop.Status {
 	case govdao.Accepted:
-		d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
+		return errors.Join(opErr, d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt))
 	case govdao.Rejected:
-		d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
+		return errors.Join(opErr, d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt))
 	case govdao.Pending:
 		if rt.ExecuteProposals && prop.Executable() {
 			switch d.execute(ctx, rt, p, prop) {
 			case proposal.Committed:
 				// The call decided the proposal: record the outcome now
 				// rather than expiring it first.
-				d.recordAfterExecute(ctx, rt, gd, p, nt)
-				return nil
+				return errors.Join(opErr, d.recordAfterExecute(ctx, rt, gd, p, nt))
 			case proposal.Ambiguous:
 				// The outcome is on its way; let the next tick read it.
-				return nil
+				return opErr
 			}
 		}
-		d.expireIfDue(ctx, rt, p, nt)
+		return errors.Join(opErr, d.expireIfDue(ctx, rt, p, nt))
 	default:
 		// Unknown is inert: never terminal, never expired, never notified.
 		d.logger.Printf("[%s][vote] proposal %s: unrecognised render, keeping it %s", rt.Key, p.OnchainID, p.Status)
 	}
-	return nil
+	return opErr
 }
 
 // reconcile looks a hashless broadcast (gnokey timed out while sending) up on
@@ -524,29 +541,34 @@ func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govda
 // carrying the exact payload and a ProposalCreated event. On a single match
 // the row gets its tx hash and GovDAO id and is tracked like any other; no
 // indexer, no match or an ambiguous match leaves it as it was (still gating).
-func (d *Daemon) reconcile(ctx context.Context, rt config.Runtime, p store.ProposalRecord) store.ProposalRecord {
+func (d *Daemon) reconcile(ctx context.Context, rt config.Runtime, p store.ProposalRecord) (store.ProposalRecord, error) {
 	if rt.TxIndexerURL == "" || p.BroadcastHeight <= 0 || p.PayloadHash == "" {
-		return p
+		return p, nil
 	}
-	txs, err := txindexer.New(rt.TxIndexerURL, nil).ProposalsByCaller(ctx, rt.Gnokey.Address, p.BroadcastHeight)
+	// BroadcastHeight was already committed when the broadcast started: the
+	// tx can only land in a later block.
+	txs, err := txindexer.New(rt.TxIndexerURL, nil).ProposalsByCaller(ctx, rt.Gnokey.Address, p.BroadcastHeight+1)
 	if err != nil {
 		d.logger.Printf("[%s][vote] proposal row %d: tx-indexer lookup: %v", rt.Key, p.ID, err)
-		return p
+		return p, fmt.Errorf("tx-indexer lookup: %w", err)
 	}
 	tx, ok := txindexer.Match(txs, p.PayloadHash)
 	if !ok {
-		return p
+		return p, nil
 	}
 	if err := d.st.Reconcile(ctx, p.ID, tx.Hash, tx.ProposalID); err != nil {
 		d.logger.Printf("[%s][vote] proposal row %d: recording reconciled tx %s: %v", rt.Key, p.ID, tx.Hash, err)
-		return p
+		if errors.Is(err, store.ErrNotReconciled) {
+			return p, nil // the row moved on meanwhile (e.g. the eval worker recorded the outcome)
+		}
+		return p, fmt.Errorf("recording reconciled tx: %w", err)
 	}
 	d.logger.Printf("[%s][vote] proposal row %d: RECONCILED via tx-indexer — tx %s at height %d, GovDAO id %s", rt.Key, p.ID, tx.Hash, tx.BlockHeight, tx.ProposalID)
 	p.TxHash, p.OnchainID = tx.Hash, tx.ProposalID
 	if p.Status == store.StatusUnconfirmed {
 		p.Status = store.StatusPending
 	}
-	return p
+	return p, nil
 }
 
 // payloadHash fingerprints exactly what a built proposal submits, the way the
@@ -560,47 +582,50 @@ func payloadHash(b proposal.Built) string {
 
 // recordAfterExecute reads the render right after a committed execute call
 // and records the outcome it shows.
-func (d *Daemon) recordAfterExecute(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord, nt notifyTarget) {
+func (d *Daemon) recordAfterExecute(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord, nt notifyTarget) error {
 	prop, err := gd.Proposal(ctx, p.OnchainID)
 	if err != nil {
 		d.logger.Printf("[%s][vote] status query after execute failed for proposal %s: %v", rt.Key, p.OnchainID, err)
-		return
+		return fmt.Errorf("status query after execute for proposal %s: %w", p.OnchainID, err)
 	}
 	switch prop.Status {
 	case govdao.Accepted:
-		d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
+		return d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
 	case govdao.Rejected:
-		d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
+		return d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
 	}
+	return nil
 }
 
 // resolve records a GovDAO outcome and notifies it. The notification only
 // goes out once the status is persisted, so a failed write is retried next
 // tick instead of notifying the same outcome repeatedly.
-func (d *Daemon) resolve(ctx context.Context, rt config.Runtime, p store.ProposalRecord, status string, event notify.Event, nt notifyTarget) {
+func (d *Daemon) resolve(ctx context.Context, rt config.Runtime, p store.ProposalRecord, status string, event notify.Event, nt notifyTarget) error {
 	if err := d.st.UpdateStatus(ctx, p.ID, status, d.now()); err != nil {
 		d.logger.Printf("[%s][vote] proposal %s: recording %s: %v", rt.Key, p.OnchainID, status, err)
-		return
+		return fmt.Errorf("recording %s: %w", status, err)
 	}
 	d.execMu.Lock()
 	delete(d.executed, p.ID)
 	d.execMu.Unlock()
 	d.logger.Printf("[%s][vote] proposal %s %s — %s action=%s", rt.Key, p.OnchainID, strings.ToUpper(status), disp(p.Moniker, p.Address), p.Action)
 	d.dispatch(ctx, event, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
+	return nil
 }
 
 // expireIfDue marks a still-open proposal expired once pending_timeout has
 // passed since it was broadcast. Expired rows stay tracked for a late outcome.
-func (d *Daemon) expireIfDue(ctx context.Context, rt config.Runtime, p store.ProposalRecord, nt notifyTarget) {
+func (d *Daemon) expireIfDue(ctx context.Context, rt config.Runtime, p store.ProposalRecord, nt notifyTarget) error {
 	if p.Status == store.StatusExpired || d.now().Sub(p.CreatedAt) < rt.PendingTimeout {
-		return
+		return nil
 	}
 	if err := d.st.UpdateStatus(ctx, p.ID, store.StatusExpired, d.now()); err != nil {
 		d.logger.Printf("[%s][vote] proposal row %d: recording expiry: %v", rt.Key, p.ID, err)
-		return
+		return fmt.Errorf("recording expiry: %w", err)
 	}
 	d.logger.Printf("[%s][vote] proposal %q (row %d) EXPIRED after %s — %s action=%s", rt.Key, p.OnchainID, p.ID, rt.PendingTimeout, disp(p.Moniker, p.Address), p.Action)
 	d.dispatch(ctx, notify.EventExpired, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
+	return nil
 }
 
 // execute calls ExecuteOrRejectProposal on a proposal that reached a

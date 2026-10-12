@@ -118,6 +118,10 @@ type Store interface {
 	RecordEvaluations(ctx context.Context, rs []EvalRecord) error
 	// RecordProposal persists a proposal and returns its row id.
 	RecordProposal(ctx context.Context, r ProposalRecord) (int64, error)
+	// RecordBroadcastOutcome completes a broadcast intent row (recorded as
+	// unconfirmed before gnokey ran) with gnokey's outcome: output, success,
+	// status, tx hash and GovDAO id. A missing row is an error.
+	RecordBroadcastOutcome(ctx context.Context, id int64, outcome ProposalRecord) error
 	// SetOnchainID records a GovDAO id resolved after the broadcast (from the
 	// tx's events when gnokey's own output did not carry it).
 	SetOnchainID(ctx context.Context, id int64, onchainID string) error
@@ -187,13 +191,14 @@ func boolInt(b bool) int {
 // Noop is a Store that persists nothing. It is the default backend.
 type Noop struct{}
 
-func (Noop) RecordEvaluation(context.Context, EvalRecord) error            { return nil }
-func (Noop) RecordEvaluations(context.Context, []EvalRecord) error         { return nil }
-func (Noop) RecordProposal(context.Context, ProposalRecord) (int64, error) { return 0, nil }
-func (Noop) SetOnchainID(context.Context, int64, string) error             { return nil }
-func (Noop) UpdateStatus(context.Context, int64, string, time.Time) error  { return nil }
-func (Noop) Reconcile(context.Context, int64, string, string) error        { return nil }
-func (Noop) RecordNotification(context.Context, NotifRecord) error         { return nil }
+func (Noop) RecordEvaluation(context.Context, EvalRecord) error                  { return nil }
+func (Noop) RecordEvaluations(context.Context, []EvalRecord) error               { return nil }
+func (Noop) RecordProposal(context.Context, ProposalRecord) (int64, error)       { return 0, nil }
+func (Noop) RecordBroadcastOutcome(context.Context, int64, ProposalRecord) error { return nil }
+func (Noop) SetOnchainID(context.Context, int64, string) error                   { return nil }
+func (Noop) UpdateStatus(context.Context, int64, string, time.Time) error        { return nil }
+func (Noop) Reconcile(context.Context, int64, string, string) error              { return nil }
+func (Noop) RecordNotification(context.Context, NotifRecord) error               { return nil }
 func (Noop) LastProposal(context.Context, string, string) (*ProposalRecord, error) {
 	return nil, nil
 }

@@ -74,8 +74,7 @@ func (s *stubChain) handler() http.HandlerFunc {
 				}
 				entries = append(entries, fmt.Sprintf(`{"address":%q,"voting_power":"%d"}`, a, power))
 			}
-			fmt.Fprintf(w, `{"result":{"block_height":"1","validators":[%s],"total":"%d"}}`,
-				strings.Join(entries, ","), len(s.valset))
+			fmt.Fprintf(w, `{"result":{"block_height":"1","validators":[%s]}}`, strings.Join(entries, ","))
 		case "/abci_query":
 			// vm/qeval render call; the Render argument is hex-encoded in ?data.
 			raw, _ := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("data"), "0x"))

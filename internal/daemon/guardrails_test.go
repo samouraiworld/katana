@@ -19,6 +19,21 @@ import (
 type failStore struct {
 	store.Store
 	lastErr, rejErr, sinceErr error
+	recordErr, outcomeErr     error
+}
+
+func (f *failStore) RecordProposal(ctx context.Context, r store.ProposalRecord) (int64, error) {
+	if f.recordErr != nil {
+		return 0, f.recordErr
+	}
+	return f.Store.RecordProposal(ctx, r)
+}
+
+func (f *failStore) RecordBroadcastOutcome(ctx context.Context, id int64, o store.ProposalRecord) error {
+	if f.outcomeErr != nil {
+		return f.outcomeErr
+	}
+	return f.Store.RecordBroadcastOutcome(ctx, id, o)
 }
 
 func (f *failStore) LastProposal(ctx context.Context, chain, addr string) (*store.ProposalRecord, error) {
@@ -348,5 +363,48 @@ func TestFailedEjectionDoesNotCountAsOpen(t *testing.T) {
 	f.d.evalCycle(ctx, rt)
 	if got := f.broadcasts.count(); got != 2 {
 		t.Fatalf("broadcast attempts = %d, want 2 (failed ejection is not open)\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// No broadcast without a durable record first: if the intent row cannot be
+// written, gnokey is never run (a broadcast nobody recorded would leave the
+// validator ungated and be repeated next cycle).
+func TestBroadcastRequiresIntentRecord(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.st = &failStore{Store: f.st, recordErr: errors.New("disk full")}
+
+	if err := f.d.evalCycle(context.Background(), f.runtime(t)); err == nil {
+		t.Fatal("a failed intent write must fail the cycle")
+	}
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 when the intent cannot be recorded", got)
+	}
+}
+
+// If the outcome cannot be written after a broadcast, the intent row stays
+// unconfirmed (gating, reconcilable) and the cycle fails.
+func TestBroadcastOutcomeWriteFailureKeepsGate(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "dev", nil)
+	f.d.st = &failStore{Store: f.st, outcomeErr: errors.New("disk full")}
+	rt := f.runtime(t)
+
+	if err := f.d.evalCycle(ctx, rt); err == nil {
+		t.Fatal("a failed outcome write must fail the cycle")
+	}
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1", got)
+	}
+	props, err := f.st.ListProposals(ctx, 10)
+	if err != nil || len(props) != 1 {
+		t.Fatalf("proposals = %+v, err %v", props, err)
+	}
+	if p := props[0]; p.Status != store.StatusUnconfirmed || p.PayloadHash == "" || p.BroadcastHeight == 0 {
+		t.Fatalf("intent row = %+v, want unconfirmed with reconcile data", p)
+	}
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d after a second cycle, want still 1 (gate closed)", got)
 	}
 }
