@@ -333,3 +333,32 @@ func TestEvalCycleRecordsBroadcastOutcome(t *testing.T) {
 		})
 	}
 }
+
+// ExecuteOrRejectProposal only rejects when the executor returns an error; a
+// panicking executor (eject of a validator already gone) reverts the call and
+// leaves the proposal open at a supermajority. katana gives up after
+// maxExecuteFailures attempts and alerts once instead of retrying forever.
+func TestVoteCycleGivesUpOnFailingExecute(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+	f.broadcasts.set("TX HASH:    \npanic: validator does not exist: g1bad\n", errors.New("gnokey: exit status 1"))
+
+	start := time.Now()
+	for i := 0; i < maxExecuteFailures+3; i++ {
+		at := start.Add(time.Duration(i) * 2 * executeRetry)
+		f.d.now = func() time.Time { return at }
+		f.d.voteCycle(ctx, f.runtime(t))
+	}
+	if n := len(executeCalls(f)); n != maxExecuteFailures {
+		t.Fatalf("execute calls = %d, want %d", n, maxExecuteFailures)
+	}
+	notifs := f.notifs.all()
+	if len(notifs) != 1 || !strings.Contains(notifs[0], "execution failed") {
+		t.Fatalf("notifications = %v, want one execution-failed alert", notifs)
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending (the proposal is still open)", got)
+	}
+}

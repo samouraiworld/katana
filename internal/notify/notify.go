@@ -34,6 +34,10 @@ const (
 	// EventUnconfirmed: gnokey failed after sending the tx, so the proposal
 	// may or may not be on-chain. An operator has to check.
 	EventUnconfirmed Event = "unconfirmed"
+	// EventExecuteFailed: the proposal reached a supermajority but katana's
+	// ExecuteOrRejectProposal calls keep failing (e.g. a panicking executor
+	// reverts the call). katana stopped retrying; an operator has to look.
+	EventExecuteFailed Event = "execute_failed"
 	// EventWouldEject announces a proposal a dry_run chain would have sent;
 	// nothing was signed or broadcast.
 	EventWouldEject Event = "would_eject"
@@ -93,6 +97,9 @@ func Message(event Event, in Info) string {
 			actionNoun(in.Action), in.display(), in.Address, in.Chain, in.PendingTimeout)
 	case EventUnconfirmed:
 		msg = fmt.Sprintf("The %s proposal for validator %s (%s) on %s may or may not be on-chain: gnokey failed after sending it. katana files no other proposal for this validator until this is resolved; check the chain for a GovDAO proposal from katana's key.",
+			actionNoun(in.Action), in.display(), in.Address, in.Chain)
+	case EventExecuteFailed:
+		msg = fmt.Sprintf("The %s proposal for validator %s (%s) on %s reached a supermajority, but katana's ExecuteOrRejectProposal calls keep failing, so it is still open. katana stopped retrying; execute or investigate it manually.",
 			actionNoun(in.Action), in.display(), in.Address, in.Chain)
 	case EventWouldEject:
 		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for %s, but dry_run is enabled — nothing was broadcast.",
@@ -203,6 +210,8 @@ func stageSuffix(event Event) string {
 		return "expired"
 	case EventUnconfirmed:
 		return "unconfirmed"
+	case EventExecuteFailed:
+		return "execution failed"
 	case EventWouldEject:
 		return "(dry-run)"
 	default:

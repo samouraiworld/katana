@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -98,5 +100,48 @@ func TestExecuteCallArgs(t *testing.T) {
 	want := "maketx call -pkgpath gno.land/r/gov/dao -func ExecuteOrRejectProposal -args 7"
 	if !strings.Contains(got, want) || !strings.Contains(got, "-chainid dev") || !strings.Contains(got, "-remote http://rpc:26657") {
 		t.Fatalf("Command = %q", got)
+	}
+}
+
+// TestRealGnokeyOutputs runs the parser and classifier over gnokey outputs
+// captured on the gnoland-test devnet (stdout and stderr combined, as
+// Broadcast collects them).
+func TestRealGnokeyOutputs(t *testing.T) {
+	gnokeyErr := errors.New("gnokey: exit status 1")
+	tests := []struct {
+		file     string
+		err      error
+		want     Outcome
+		wantHash bool
+	}{
+		{"run_proposal_ok_combined", nil, Committed, true},
+		// Committed then reverted: a hash, but no OK! and nothing created.
+		{"call_fail_delivertx", gnokeyErr, Failed, true},
+		{"call_fail_simulation", gnokeyErr, Failed, false},
+		{"call_fail_checktx_unknown_address", gnokeyErr, Failed, false},
+		// The valset executor panics on a validator already gone: the
+		// simulation fails and nothing is sent.
+		{"call_execute_or_reject_executor_panic", gnokeyErr, Failed, false},
+		// The node committed this tx; gnokey lost the response.
+		{"run_fail_broadcast_transport", gnokeyErr, Ambiguous, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", "gnokey", tt.file+".txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := string(raw)
+			if got := Classify(out, tt.err); got != tt.want {
+				t.Errorf("Classify = %q, want %q", got, tt.want)
+			}
+			r := ParseTxOutput(out)
+			if (r.TxHash != "") != tt.wantHash {
+				t.Errorf("TxHash = %q, want present=%v", r.TxHash, tt.wantHash)
+			}
+			if tt.want == Committed && (!r.OK || r.Height == 0 || !strings.Contains(r.Events, `"ProposalCreated"`)) {
+				t.Errorf("ParseTxOutput = %+v, want OK with a height and a ProposalCreated event", r)
+			}
+		})
 	}
 }

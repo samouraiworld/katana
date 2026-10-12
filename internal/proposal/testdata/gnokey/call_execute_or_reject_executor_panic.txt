@@ -1,0 +1,26 @@
+Enter password.
+TX HASH:    
+INFO:       vm.version=dev
+--= Error =--
+Data: validator does not exist: g1g646r47fzalv5wde6fcfh2x856zeas358z4ewd
+Msg Traces:
+    0  github.com/gnolang/gno/tm2/pkg/errors/errors.go:103 - deliver transaction failed: log:msg:0,success:false,log:--= Error =--
+Data: errors.FmtError{format:"validator does not exist: g1g646r47fzalv5wde6fcfh2x856zeas358z4ewd", args:[]interface {}(nil)}
+Msg Traces:
+    0  /gnoroot/tm2/pkg/errors/errors.go:103 - VM panic: validator does not exist: g1g646r47fzalv5wde6fcfh2x856zeas358z4ewd
+Stacktrace:
+panic: validator does not exist: g1g646r47fzalv5wde6fcfh2x856zeas358z4ewd
+(anonymous) at gno.land/r/sys/validators/v3/proposal.gno:157
+(*gno.land/r/gov/dao.SimpleExecutor).Execute at gno.land/r/gov/dao/types.gno:196
+(*gno.land/r/gov/dao/v3/impl.GovDAO).ExecuteProposal at gno.land/r/gov/dao/v3/impl/govdao.gno:151
+executeProposal at gno.land/r/gov/dao/proxy.gno:197
+ExecuteOrRejectProposal at gno.land/r/gov/dao/proxy.gno:60
+
+
+Stack Trace:
+    0  /gnoroot/tm2/pkg/errors/errors.go:88
+    1  /gnoroot/tm2/pkg/errors/errors.go:103
+... 32 more lines elided,events:[]
+--= /Error =--
+
+exit=1

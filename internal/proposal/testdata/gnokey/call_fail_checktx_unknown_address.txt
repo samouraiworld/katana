@@ -1,0 +1,24 @@
+Enter password.
+--= Error =--
+Data: unknown address error
+Msg Traces:
+    0  github.com/gnolang/gno/tm2/pkg/errors/errors.go:103 - check transaction failed: log:--= Error =--
+Data: std.UnknownAddressError{abciError:std.abciError{}}
+Msg Traces:
+    0  /gnoroot/tm2/pkg/std/errors.go:100 - account g1avu0ucdcks3ypgvfxa0e4a7q0la838xvm4adu7 does not exist
+Stack Trace:
+    0  /gnoroot/tm2/pkg/errors/errors.go:93
+    1  /gnoroot/tm2/pkg/std/errors.go:100
+    2  /gnoroot/tm2/pkg/sdk/auth/ante.go:310
+    3  /gnoroot/tm2/pkg/sdk/auth/ante.go:123
+    4  /gnoroot/gno.land/pkg/gnoland/app.go:175
+    5  /gnoroot/tm2/pkg/sdk/baseapp.go:892
+    6  /gnoroot/tm2/pkg/sdk/baseapp.go:616
+    7  /gnoroot/tm2/pkg/bft/abci/client/local_client.go:90
+    8  /gnoroot/tm2/pkg/bft/appconn/app_conn.go:115
+    9  /gnoroot/tm2/pkg/bft/mempool/clist_mempool.go:286
+   10  /gnoroot/tm2/pkg/bft/mempool/clist_mempool.go:214
+... 20 more lines elided
+--= /Error =--
+
+exit=1

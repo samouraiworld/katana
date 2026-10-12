@@ -37,7 +37,7 @@ type Daemon struct {
 	txMu sync.Mutex
 
 	execMu   sync.Mutex
-	executed map[int64]time.Time // proposal row id → last ExecuteOrRejectProposal attempt
+	executed map[int64]*executeState // proposal row id → ExecuteOrRejectProposal attempts
 
 	resolversMu sync.Mutex
 	resolvers   map[string]*valopers.Resolver // chain key → operator resolver
@@ -56,7 +56,7 @@ func New(cfg *config.Config, st store.Store, logger *log.Logger) *Daemon {
 			return b.Broadcast(ctx, gk)
 		},
 		resolvers: map[string]*valopers.Resolver{},
-		executed:  map[int64]time.Time{},
+		executed:  map[int64]*executeState{},
 	}
 }
 

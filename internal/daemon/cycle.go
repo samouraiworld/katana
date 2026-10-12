@@ -273,9 +273,22 @@ func (d *Daemon) assertChainID(ctx context.Context, gno *gnoland.Client, rt conf
 }
 
 // executeRetry is the minimum delay between two ExecuteOrRejectProposal
-// attempts on the same proposal. A failed call still burns gas, so a call that
-// keeps failing must not be retried on every vote tick.
+// attempts on the same proposal. A call failing at DeliverTx still burns gas,
+// so a call that keeps failing must not be retried on every vote tick.
 const executeRetry = time.Hour
+
+// maxExecuteFailures is how many failed ExecuteOrRejectProposal attempts
+// katana makes on one proposal before giving up and alerting. The call fails
+// for good when the executor panics (e.g. ejecting a validator already gone):
+// the realm only turns a returned error into a denial, a panic reverts.
+// The count is in memory, so a restart allows another round.
+const maxExecuteFailures = 3
+
+// executeState tracks katana's execute attempts on one proposal.
+type executeState struct {
+	last     time.Time
+	failures int
+}
 
 // voteCycle follows this chain's tracked proposals: it resolves missing
 // proposal ids, executes proposals that reached a supermajority, records
@@ -395,15 +408,20 @@ func (d *Daemon) expireIfDue(ctx context.Context, rt config.Runtime, p store.Pro
 }
 
 // execute calls ExecuteOrRejectProposal on a proposal that reached a
-// supermajority, at most once per executeRetry, and returns the call's
-// outcome (Failed when no call was made).
+// supermajority, at most once per executeRetry and maxExecuteFailures times,
+// and returns the call's outcome (Failed when no call was made).
 func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.ProposalRecord, prop govdao.Proposal) proposal.Outcome {
 	d.execMu.Lock()
-	if last, ok := d.executed[p.ID]; ok && d.now().Sub(last) < executeRetry {
+	st, ok := d.executed[p.ID]
+	if !ok {
+		st = &executeState{}
+		d.executed[p.ID] = st
+	}
+	if st.failures >= maxExecuteFailures || (!st.last.IsZero() && d.now().Sub(st.last) < executeRetry) {
 		d.execMu.Unlock()
 		return proposal.Failed
 	}
-	d.executed[p.ID] = d.now()
+	st.last = d.now()
 	d.execMu.Unlock()
 
 	b := proposal.ExecuteCall(rt.ChainID, rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm, p.OnchainID)
@@ -411,6 +429,15 @@ func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.Proposa
 	outcome := proposal.Classify(out, err)
 	if outcome != proposal.Committed {
 		d.logger.Printf("[%s][vote] EXECUTE %s for proposal %s (yes=%.2f%% no=%.2f%%): %v\n%s", rt.Key, outcome, p.OnchainID, prop.YesPercent, prop.NoPercent, err, out)
+		d.execMu.Lock()
+		st.failures++
+		giveUp := st.failures == maxExecuteFailures
+		d.execMu.Unlock()
+		if giveUp {
+			d.logger.Printf("[%s][vote] proposal %s: giving up on execution after %d failed attempts", rt.Key, p.OnchainID, maxExecuteFailures)
+			nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
+			d.dispatch(ctx, notify.EventExecuteFailed, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
+		}
 		return outcome
 	}
 	d.logger.Printf("[%s][vote] EXECUTE ok for proposal %s (yes=%.2f%% no=%.2f%%)", rt.Key, p.OnchainID, prop.YesPercent, prop.NoPercent)

@@ -186,8 +186,10 @@ func shellArg(a string) string {
 }
 
 // ExecuteFunc is the GovDAO proxy entrypoint katana calls to resolve a
-// proposal. Unlike ExecuteProposal, an executor error marks the proposal
-// denied instead of reverting the tx and leaving it open forever.
+// proposal. Unlike ExecuteProposal, an executor that returns an error marks
+// the proposal denied instead of reverting the tx and leaving it open. An
+// executor that panics (the v3 valset executor on an unknown validator) still
+// reverts: the daemon caps its attempts and alerts.
 const ExecuteFunc = "ExecuteOrRejectProposal"
 
 // ExecuteCall builds the MsgCall that resolves GovDAO proposal pid once a

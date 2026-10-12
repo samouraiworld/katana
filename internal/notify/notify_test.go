@@ -339,3 +339,16 @@ func TestMessageUnconfirmed(t *testing.T) {
 		t.Errorf("Title(unconfirmed) = %q", got)
 	}
 }
+
+func TestMessageExecuteFailed(t *testing.T) {
+	in := Info{Chain: "test12", Moniker: "onbloc", Address: "g1bad", ProposalID: "7", Action: "eject"}
+	got := Message(EventExecuteFailed, in)
+	for _, want := range []string{"onbloc", "g1bad", "test12", "ExecuteOrRejectProposal", "manually"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Message(execute_failed) = %q, missing %q", got, want)
+		}
+	}
+	if got := Title(EventExecuteFailed, in); !strings.Contains(got, "execution failed") {
+		t.Errorf("Title(execute_failed) = %q", got)
+	}
+}
