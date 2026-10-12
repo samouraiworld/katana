@@ -24,6 +24,15 @@ log_level: info
 poll_interval: 15s
 dry_run: false          # true = observe-only: evaluate + notify (attach .gno script + gnokey command), no broadcast
 
+# Guardrails loosened for the 4-validator devnet so every scenario (incl.
+# multi_eject) reaches the chain; production keeps the defaults (1 per cycle,
+# 3 per day, abort above 25% eligible, never below 4 validators).
+safety:
+  max_proposals_per_cycle: 4
+  max_proposals_per_day: 100
+  max_eligible_share: 100
+  min_valset_size: 1
+
 gnomonitoring:
   base_url: "http://gnomonitoring:8989"
   timeout_seconds: 10
@@ -50,6 +59,7 @@ proposal:
   submit: run
   actions:
     eject:
+      mode: auto              # armed: the defaults are eject manual, raise_vp off
       score_below: 30                 # low, so a downed validator qualifies fast
       window: current_week
       title_template: "Eject validator {moniker} ({address}) from the valset"

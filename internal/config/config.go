@@ -5,7 +5,7 @@
 // config.yaml file. Environment variables are supported only as optional
 // overrides for secrets and per-deployment values (see applyEnvOverrides).
 //
-// Many blocks (conditions, proposal, gnokey, poll interval) have a global
+// Many blocks (conditions, proposal, gnokey, safety, poll interval) have a global
 // default and an optional per-chain override. Use Runtime(chainID) to obtain the
 // fully-resolved settings for a chain rather than reading the raw fields.
 package config
@@ -27,11 +27,14 @@ type Config struct {
 	Gnomonitoring Gnomonitoring `yaml:"gnomonitoring"`
 	Gnokey        Gnokey        `yaml:"gnokey"` // global proposing wallet
 	Proposal      Proposal      `yaml:"proposal"`
-	// DryRun is the global default for whether chains broadcast: false
-	// (default) broadcasts; true means every enabled chain rehearses instead
-	// (logs + notifies, never signs/broadcasts), unless overridden per chain
-	// via ChainConfig.DryRun.
-	DryRun        bool          `yaml:"dry_run"`
+	// DryRun is the global default for whether chains broadcast: unset (nil)
+	// or true means every enabled chain rehearses (logs + notifies, never
+	// signs/broadcasts); arming requires an explicit false. Overridable per
+	// chain via ChainConfig.DryRun. Read it through globalDryRun.
+	DryRun *bool `yaml:"dry_run"`
+	// Safety bounds how many proposals katana may produce (global default,
+	// field-by-field override per chain).
+	Safety        Safety        `yaml:"safety"`
 	VoteTracking  VoteTracking  `yaml:"vote_tracking"`
 	Notifications Notifications `yaml:"notifications"`
 	// Exceptions lists validators that must never be subscribed to an ejection
@@ -106,6 +109,17 @@ const (
 	ActionRaiseVP = "raise_vp"
 )
 
+// Action arming modes (ActionConfig.Mode).
+const (
+	// ModeAuto signs and broadcasts the action's proposals.
+	ModeAuto = "auto"
+	// ModeManual behaves like dry_run for this action only: the would-be
+	// proposal is notified with its script attached, never broadcast.
+	ModeManual = "manual"
+	// ModeOff disables the action: it is never evaluated.
+	ModeOff = "off"
+)
+
 // ActionConfig configures one score-driven action. Only the threshold field
 // relevant to that action's fixed semantics is read: eject/lower_vp use
 // ScoreBelow (score strictly below triggers), raise_vp uses ScoreAtOrAbove
@@ -131,6 +145,15 @@ type ActionConfig struct {
 
 	TitleTemplate       string `yaml:"title_template"`
 	DescriptionTemplate string `yaml:"description_template"`
+
+	// Mode arms the action: auto | manual | off. Defaults: eject manual,
+	// lower_vp auto, raise_vp off. See Runtime.ActionMode for how it combines
+	// with dry_run.
+	Mode string `yaml:"mode"`
+	// Cooldown overrides proposal.cooldown for this action (empty = fall back
+	// to proposal.cooldown). Defaults: raise_vp 2160h (90d), others empty.
+	// See Proposal.CooldownFor.
+	Cooldown string `yaml:"cooldown"`
 }
 
 // Proposal describes the score-driven action model plus the lifecycle
@@ -227,7 +250,10 @@ type ChainConfig struct {
 	PollInterval     string    `yaml:"poll_interval"`
 	Proposal         *Proposal `yaml:"proposal"`
 	Gnokey           *Gnokey   `yaml:"gnokey"`
-	Exceptions       []string  `yaml:"exceptions"`
+	// Safety overrides the global safety block field by field (nil or an
+	// unset field = inherit).
+	Safety     *Safety  `yaml:"safety"`
+	Exceptions []string `yaml:"exceptions"`
 }
 
 // Runtime is the fully-resolved settings for one chain, global defaults merged
@@ -243,8 +269,25 @@ type Runtime struct {
 	VotePollInterval   time.Duration
 	ExecuteProposals   bool
 	PendingTimeout     time.Duration
-	Proposal           Proposal
-	Gnokey             Gnokey
+	// Proposal.ActionPriority is filtered: actions in mode off are removed.
+	Proposal Proposal
+	Gnokey   Gnokey
+	Safety   SafetyRuntime
+}
+
+// ActionMode returns the effective arming mode of action on this chain:
+// ModeOff if the action is off (or not configured); otherwise ModeManual if
+// the chain is in dry_run; otherwise the action's own mode.
+func (r Runtime) ActionMode(action string) string {
+	switch mode := r.Proposal.Actions[action].Mode; mode {
+	case ModeAuto, ModeManual:
+		if r.DryRun {
+			return ModeManual
+		}
+		return mode
+	default:
+		return ModeOff
+	}
 }
 
 // DefaultEjectScript is the gno.land valset-ejection script used in "run"
@@ -425,10 +468,7 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		return Runtime{}, fmt.Errorf("vote_poll_interval: %w", err)
 	}
 
-	dryRun := c.DryRun
-	if ch.DryRun != nil {
-		dryRun = *ch.DryRun
-	}
+	dryRun := c.chainDryRun(ch)
 
 	execute := true
 	if c.VoteTracking.ExecuteProposals != nil {
@@ -466,6 +506,20 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		return Runtime{}, fmt.Errorf("proposal.rejected_backoff: %w", err)
 	}
 	for name, ac := range prop.Actions {
+		switch ac.Mode {
+		case ModeAuto, ModeManual, ModeOff:
+		default:
+			return Runtime{}, fmt.Errorf("proposal.actions.%s.mode: %q is invalid (want %q, %q or %q)", name, ac.Mode, ModeAuto, ModeManual, ModeOff)
+		}
+		if ac.Cooldown != "" {
+			d, err := parseDur(ac.Cooldown)
+			if err != nil {
+				return Runtime{}, fmt.Errorf("proposal.actions.%s.cooldown: %w", name, err)
+			}
+			if d < 0 {
+				return Runtime{}, fmt.Errorf("proposal.actions.%s.cooldown must not be negative, got %s", name, ac.Cooldown)
+			}
+		}
 		switch ac.Window {
 		case "last_24h", "current_week", "current_month", "current_year":
 		default:
@@ -485,13 +539,28 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 			}
 		}
 	}
+	// Drop the actions in mode off so rules never evaluates them (all off is
+	// allowed: the chain then evaluates nothing). A fresh slice, so the
+	// global/per-chain config is never mutated. The call-mode check only
+	// applies to actions that can actually be proposed.
+	priority := make([]string, 0, len(prop.ActionPriority))
 	for _, name := range prop.ActionPriority {
 		if name != ActionEject && name != ActionLowerVP && name != ActionRaiseVP {
 			return Runtime{}, fmt.Errorf("proposal.action_priority: unknown action %q", name)
 		}
-		if prop.Submit == "call" && name != ActionEject {
-			return Runtime{}, fmt.Errorf("proposal.submit \"call\" is only supported for the eject action; %q must use \"run\"", name)
+		if prop.Actions[name].Mode == ModeOff {
+			continue
 		}
+		if prop.Submit == "call" && name != ActionEject {
+			return Runtime{}, fmt.Errorf("proposal.submit \"call\" is only supported for the eject action; %q must use \"run\" (or mode: off)", name)
+		}
+		priority = append(priority, name)
+	}
+	prop.ActionPriority = priority
+
+	safety, err := resolveSafety(c.Safety, chainID, ch.Safety)
+	if err != nil {
+		return Runtime{}, err
 	}
 
 	gk := c.Gnokey
@@ -515,11 +584,23 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		PendingTimeout:     pendingTimeout,
 		Proposal:           prop,
 		Gnokey:             gk,
+		Safety:             safety,
 	}, nil
 }
 
 // Cooldown parses the resolved cooldown duration.
 func (p Proposal) CooldownDur() time.Duration { d, _ := parseDur(p.Cooldown); return d }
+
+// CooldownFor returns the cooldown applying to action: its own
+// actions.<action>.cooldown when set, else proposal.cooldown (CooldownDur).
+func (p Proposal) CooldownFor(action string) time.Duration {
+	if ac, ok := p.Actions[action]; ok && ac.Cooldown != "" {
+		if d, err := parseDur(ac.Cooldown); err == nil {
+			return d
+		}
+	}
+	return p.CooldownDur()
+}
 
 // RejectedBackoffDur parses the resolved rejection backoff duration.
 func (p Proposal) RejectedBackoffDur() time.Duration { d, _ := parseDur(p.RejectedBackoff); return d }
@@ -542,16 +623,25 @@ func (c *Config) EnabledChains() []string {
 func (c *Config) BroadcastCapableChains() []string {
 	ids := make([]string, 0, len(c.Chains))
 	for id, ch := range c.Chains {
-		dryRun := c.DryRun
-		if ch.DryRun != nil {
-			dryRun = *ch.DryRun
-		}
-		if ch.Enabled && !dryRun {
+		if ch.Enabled && !c.chainDryRun(ch) {
 			ids = append(ids, id)
 		}
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// globalDryRun resolves the global dry_run default: unset means true, so
+// arming a chain always takes an explicit dry_run: false.
+func (c *Config) globalDryRun() bool { return c.DryRun == nil || *c.DryRun }
+
+// chainDryRun resolves dry_run for one chain: its own override if set, else
+// the global default.
+func (c *Config) chainDryRun(ch *ChainConfig) bool {
+	if ch.DryRun != nil {
+		return *ch.DryRun
+	}
+	return c.globalDryRun()
 }
 
 // IsException reports whether a validator is protected on the given chain.
@@ -597,7 +687,8 @@ func setIfEmpty(dst *string, def string) {
 }
 
 // resolveProposalDefaults fills in the score-driven action defaults
-// (ActionPriority, MinVotingPower, MaxVotingPowerShare, Actions) on p if they
+// (ActionPriority, MinVotingPower, MaxVotingPowerShare, Actions incl. each
+// action's mode and cooldown) on p if they
 // are unset. Applied to the global proposal in applyDefaults, and again in
 // Runtime on the resolved per-chain Proposal: a per-chain proposal: override
 // is a whole-block replace (see the Runtime doc comment) that bypasses
@@ -621,6 +712,7 @@ func resolveProposalDefaults(p Proposal) Proposal {
 	}
 	p.Actions[ActionEject] = mergeActionDefault(p.Actions[ActionEject], ActionConfig{
 		ScoreBelow: intPtr(30), Window: "current_month",
+		Mode:                ModeManual,
 		RunScriptTemplate:   DefaultEjectScript,
 		TitleTemplate:       "Eject validator {moniker} ({address}) from the valset",
 		DescriptionTemplate: "Automated ejection proposal generated by katana.\nValidator: {moniker} ({address})\nScore: {score}/100 (tier {tier}) over {window}\nReason: {reason}\n",
@@ -628,6 +720,7 @@ func resolveProposalDefaults(p Proposal) Proposal {
 	p.Actions[ActionLowerVP] = mergeActionDefault(p.Actions[ActionLowerVP], ActionConfig{
 		ScoreBelow: intPtr(60), Window: "current_week",
 		VPStepPercentOfSelf: float64Ptr(-20), VPStepPercentOfTotal: float64Ptr(-2),
+		Mode:                ModeAuto,
 		RunScriptTemplate:   DefaultVPChangeScript,
 		TitleTemplate:       "Lower voting power of validator {moniker} ({address})",
 		DescriptionTemplate: "Automated voting-power reduction generated by katana.\nValidator: {moniker} ({address})\nScore: {score}/100 (tier {tier}) over {window}\nVoting power: {current_power} -> {target_power}\nReason: {reason}\n",
@@ -635,6 +728,8 @@ func resolveProposalDefaults(p Proposal) Proposal {
 	p.Actions[ActionRaiseVP] = mergeActionDefault(p.Actions[ActionRaiseVP], ActionConfig{
 		ScoreAtOrAbove: intPtr(85), Window: "current_year",
 		VPStepPercentOfSelf: float64Ptr(20), VPStepPercentOfTotal: float64Ptr(2),
+		Mode:                ModeOff,
+		Cooldown:            "2160h",
 		RunScriptTemplate:   DefaultVPChangeScript,
 		TitleTemplate:       "Raise voting power of validator {moniker} ({address})",
 		DescriptionTemplate: "Automated voting-power increase generated by katana.\nValidator: {moniker} ({address})\nScore: {score}/100 (tier {tier}) over {window}\nVoting power: {current_power} -> {target_power}\nReason: {reason}\n",
@@ -683,6 +778,12 @@ func mergeActionDefault(cur, def ActionConfig) ActionConfig {
 	}
 	if cur.DescriptionTemplate == "" {
 		cur.DescriptionTemplate = def.DescriptionTemplate
+	}
+	if cur.Mode == "" {
+		cur.Mode = def.Mode
+	}
+	if cur.Cooldown == "" {
+		cur.Cooldown = def.Cooldown
 	}
 	return cur
 }

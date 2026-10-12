@@ -78,8 +78,9 @@ chains:
 		t.Fatalf("Runtime: %v", err)
 	}
 
-	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
-		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
+	// raise_vp defaults to mode off, so Runtime filters it out of the priority.
+	if got := rt.Proposal.ActionPriority; len(got) != 2 || got[0] != ActionEject || got[1] != ActionLowerVP {
+		t.Fatalf("ActionPriority = %v, want default [eject lower_vp] (raise_vp off)", got)
 	}
 	if *rt.Proposal.MinVotingPower != 100 {
 		t.Errorf("MinVotingPower = %d, want default 100", *rt.Proposal.MinVotingPower)
@@ -324,8 +325,9 @@ chains:
 		t.Fatalf("Runtime: %v", err)
 	}
 
-	if got := rt.Proposal.ActionPriority; len(got) != 3 || got[0] != ActionEject || got[1] != ActionLowerVP || got[2] != ActionRaiseVP {
-		t.Fatalf("ActionPriority = %v, want default [eject lower_vp raise_vp]", got)
+	// raise_vp defaults to mode off, so Runtime filters it out of the priority.
+	if got := rt.Proposal.ActionPriority; len(got) != 2 || got[0] != ActionEject || got[1] != ActionLowerVP {
+		t.Fatalf("ActionPriority = %v, want default [eject lower_vp] (raise_vp off)", got)
 	}
 	if *rt.Proposal.MinVotingPower != 100 {
 		t.Errorf("MinVotingPower = %d, want default 100", *rt.Proposal.MinVotingPower)
@@ -392,8 +394,8 @@ func TestDryRunResolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Runtime(test): %v", err)
 	}
-	if rt.DryRun {
-		t.Error("test chain dry_run = true, want default false (no global dry_run set)")
+	if !rt.DryRun {
+		t.Error("test chain dry_run = false, want default true (no global dry_run set)")
 	}
 	rt2, err := c.Runtime("betanet")
 	if err != nil {
@@ -489,7 +491,7 @@ chains:
 `
 	// A broadcast-capable chain must not run on the Noop store: without
 	// lifecycle history it would re-broadcast the same ejection every cycle.
-	_, err := Load(writeConfig(t, fmt.Sprintf(base, "")))
+	_, err := Load(writeConfig(t, fmt.Sprintf(base, "dry_run: false")))
 	if err == nil {
 		t.Fatal("expected fail-start with driver none + broadcast-capable chain")
 	}
@@ -497,9 +499,12 @@ chains:
 		t.Fatalf("error should point the operator at sqlite and name the chain, got: %v", err)
 	}
 
-	// A dry-run-only config may run without persistence.
-	if _, err := Load(writeConfig(t, fmt.Sprintf(base, "dry_run: true"))); err != nil {
-		t.Fatalf("dry-run-only config with driver none should load, got: %v", err)
+	// A dry-run-only config may run without persistence, including one that
+	// relies on the dry_run default (unset = true).
+	for _, line := range []string{"dry_run: true", ""} {
+		if _, err := Load(writeConfig(t, fmt.Sprintf(base, line))); err != nil {
+			t.Fatalf("dry-run-only config (%q) with driver none should load, got: %v", line, err)
+		}
 	}
 }
 
