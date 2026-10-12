@@ -55,25 +55,66 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		d.logger.Printf("[%s][eval] valset fetch failed: %v (skipping cycle)", rt.Key, err)
 		return
 	}
+	if len(valset) == 0 {
+		d.logger.Printf("[%s][eval] node reports an empty valset (skipping cycle)", rt.Key)
+		return
+	}
 	inValset := make(map[string]bool, len(valset))
 	for _, v := range valset {
 		inValset[strings.ToLower(v.Address)] = true
 	}
 
-	produced := 0
-	byAction := map[string]int{}
+	// First pass: decide every report, so the mass-eligibility guardrail
+	// sees the whole valset before anything is proposed.
+	decs := make([]rules.Decision, len(reports))
+	excepted := make([]bool, len(reports))
 	evals := make([]store.EvalRecord, 0, len(reports))
-	for _, report := range reports {
+	downward := 0
+	for i, report := range reports {
 		dec := rules.Evaluate(report, rt.Proposal.ActionPriority, rt.Proposal.Actions,
 			*rt.Proposal.MinVotingPower, *rt.Proposal.MaxVotingPowerShare, totalVP)
-
-		excepted := d.cfg.IsException(rt.Key, report.Addr, report.Moniker)
+		decs[i] = dec
+		excepted[i] = d.cfg.IsException(rt.Key, report.Addr, report.Moniker)
 		evals = append(evals, store.EvalRecord{
 			CreatedAt: d.now(), Chain: rt.Key, Address: report.Addr, Moniker: report.Moniker,
-			Score: dec.Score, Tier: dec.Tier, Eligible: dec.Action != "", Excepted: excepted, Reason: dec.Reason,
+			Score: dec.Score, Tier: dec.Tier, Eligible: dec.Action != "", Excepted: excepted[i], Reason: dec.Reason,
 		})
+		if !excepted[i] && inValset[strings.ToLower(report.Addr)] &&
+			(dec.Action == config.ActionEject || dec.Action == config.ActionLowerVP) {
+			downward++
+		}
+	}
+	if err := d.st.RecordEvaluations(ctx, evals); err != nil {
+		d.logger.Printf("[%s][eval] recording evaluations: %v", rt.Key, err)
+	}
 
-		if excepted {
+	// Mass-eligibility guardrail: many validators failing at once points at
+	// bad metrics (a gnomonitoring outage, a chain-wide incident) rather than
+	// at many bad operators. Propose nothing and alert once per episode.
+	if float64(downward)*100 > rt.Safety.MaxEligibleShare*float64(len(valset)) {
+		d.logger.Printf("[%s][eval] CRITICAL: %d of %d validators qualify for eject/lower_vp, above safety.max_eligible_share=%g%% — proposing nothing this cycle",
+			rt.Key, downward, len(valset), rt.Safety.MaxEligibleShare)
+		if d.setGuardTripped(rt.Key, true) {
+			d.dispatchGuardrail(ctx, rt, downward, len(valset))
+		}
+		return
+	}
+	d.setGuardTripped(rt.Key, false)
+
+	// Broadcast budget for this cycle. A failed count closes it.
+	recent, err := d.st.BroadcastsSince(ctx, rt.Key, d.now().Add(-24*time.Hour))
+	if err != nil {
+		d.logger.Printf("[%s][eval] counting recent broadcasts: %v (skipping cycle)", rt.Key, err)
+		return
+	}
+	broadcasts := 0
+	openEjects := -1 // open ejections of validators still in the valset; -1 = not counted yet
+
+	produced := 0
+	byAction := map[string]int{}
+	for i, report := range reports {
+		dec := decs[i]
+		if excepted[i] {
 			if dec.Action != "" {
 				d.logger.Printf("[%s][eval] SKIP (exception) %s would be eligible for %s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, dec.Reason)
 			}
@@ -82,15 +123,29 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		if dec.Action == "" {
 			continue
 		}
+		mode := rt.ActionMode(dec.Action)
+		if mode == config.ModeOff {
+			continue
+		}
 
 		// Lifecycle gate: don't re-propose while pending/accepted(eject)/within
 		// backoff or cooldown. Dry-run records count here too (LastProposal no
 		// longer excludes them), so a rehearsal already dedups across cycles
-		// the same way a real proposal would.
-		last, _ := d.st.LastProposal(ctx, rt.Key, report.Addr)
-		rejections, _ := d.st.RejectionCount(ctx, rt.Key, report.Addr)
+		// the same way a real proposal would. A failed read closes the gate:
+		// without the history, katana cannot tell a fresh candidate from one
+		// with a proposal already open.
+		last, err := d.st.LastProposal(ctx, rt.Key, report.Addr)
+		if err != nil {
+			d.logger.Printf("[%s][eval] SUPPRESS %s: reading last proposal: %v", rt.Key, disp(report.Moniker, report.Addr), err)
+			continue
+		}
+		rejections, err := d.st.RejectionCount(ctx, rt.Key, report.Addr)
+		if err != nil {
+			d.logger.Printf("[%s][eval] SUPPRESS %s: reading rejection count: %v", rt.Key, disp(report.Moniker, report.Addr), err)
+			continue
+		}
 		if g := lifecycle.Gate(last, rejections, lifecycle.Params{
-			Cooldown:        rt.Proposal.CooldownDur(),
+			Cooldown:        rt.Proposal.CooldownFor(dec.Action),
 			RejectedBackoff: rt.Proposal.RejectedBackoffDur(),
 			MaxRejections:   rt.Proposal.MaxRejections,
 			Now:             d.now(),
@@ -105,14 +160,47 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 			continue
 		}
 
-		d.logger.Printf("[%s][eval] ELIGIBLE %s action=%s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, dec.Reason)
-		d.produce(ctx, rt, gno, dec, totalVP[dec.Window])
+		// Safety: never shrink the valset below min_valset_size, counting
+		// open ejections (they may still pass) as already gone.
+		if dec.Action == config.ActionEject {
+			if openEjects < 0 {
+				if openEjects, err = d.openEjections(ctx, rt.Key, inValset); err != nil {
+					d.logger.Printf("[%s][eval] SUPPRESS %s: counting open ejections: %v", rt.Key, disp(report.Moniker, report.Addr), err)
+					openEjects = -1
+					continue
+				}
+			}
+			if remaining := len(valset) - openEjects - 1; remaining < rt.Safety.MinValsetSize {
+				d.logger.Printf("[%s][eval] SUPPRESS %s: ejecting would leave %d validator(s) (%d in valset, %d open ejection(s)), below safety.min_valset_size=%d",
+					rt.Key, disp(report.Moniker, report.Addr), remaining, len(valset), openEjects, rt.Safety.MinValsetSize)
+				continue
+			}
+		}
+
+		// Broadcast caps. Manual actions never broadcast, so they are not capped.
+		if mode == config.ModeAuto {
+			if broadcasts >= rt.Safety.MaxProposalsPerCycle {
+				d.logger.Printf("[%s][eval] SUPPRESS %s: safety.max_proposals_per_cycle=%d reached", rt.Key, disp(report.Moniker, report.Addr), rt.Safety.MaxProposalsPerCycle)
+				continue
+			}
+			if recent+broadcasts >= rt.Safety.MaxProposalsPerDay {
+				d.logger.Printf("[%s][eval] SUPPRESS %s: safety.max_proposals_per_day=%d reached (%d in the last 24h)", rt.Key, disp(report.Moniker, report.Addr), rt.Safety.MaxProposalsPerDay, recent+broadcasts)
+				continue
+			}
+		}
+
+		d.logger.Printf("[%s][eval] ELIGIBLE %s action=%s mode=%s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, mode, dec.Reason)
+		if !d.produce(ctx, rt, gno, dec, totalVP[dec.Window], mode == config.ModeManual) {
+			continue
+		}
 		produced++
 		byAction[dec.Action]++
-	}
-
-	if err := d.st.RecordEvaluations(ctx, evals); err != nil {
-		d.logger.Printf("[%s][eval] recording evaluations: %v", rt.Key, err)
+		if mode == config.ModeAuto {
+			broadcasts++
+		}
+		if dec.Action == config.ActionEject {
+			openEjects++
+		}
 	}
 
 	if produced == 0 {
@@ -123,13 +211,45 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	}
 }
 
+// openEjections counts the chain's tracked (pending, unconfirmed, expired)
+// eject proposals whose validator is still in the valset.
+func (d *Daemon) openEjections(ctx context.Context, chain string, inValset map[string]bool) (int, error) {
+	tracked, err := d.st.TrackedProposals(ctx, chain)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, p := range tracked {
+		// An unset action is a legacy row, which was always an eject.
+		if (p.Action == config.ActionEject || p.Action == "") && inValset[strings.ToLower(p.Address)] {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// setGuardTripped records whether the chain's mass-eligibility guardrail is
+// tripped, and reports whether this call tripped it (was clear before).
+func (d *Daemon) setGuardTripped(chain string, tripped bool) bool {
+	d.guardMu.Lock()
+	defer d.guardMu.Unlock()
+	if d.guardTripped == nil {
+		d.guardTripped = map[string]bool{}
+	}
+	was := d.guardTripped[chain]
+	d.guardTripped[chain] = tripped
+	return tripped && !was
+}
+
 // produce builds a proposal for dec.Action, then either broadcasts it
-// (signing via gnokey, recording it, notifying on success) or — on a
-// dry_run chain — logs and notifies the complete would-be proposal, with
-// the script and a ready-to-run gnokey command attached, without touching
-// the chain. totalWindowVP is dec.Window's total valset VP this cycle, used
-// to compute the notification's VPDeltaPercent.
-func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalWindowVP int64) {
+// (signing via gnokey, recording it, notifying on success) or — when manual
+// (dry_run chain, or the action's mode is manual) — logs and notifies the
+// complete would-be proposal, with the script and a ready-to-run gnokey
+// command attached, without touching the chain. totalWindowVP is
+// dec.Window's total valset VP this cycle, used to compute the
+// notification's VPDeltaPercent. It reports whether it went that far (false
+// when skipped before acting: no operator mapping, chain id mismatch).
+func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalWindowVP int64, manual bool) bool {
 	// A valset action is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
 	// would act on an unknown operator).
@@ -138,7 +258,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		operator = op
 	} else {
 		d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, dec.Address)
-		return
+		return false
 	}
 
 	built := proposal.Build(proposal.Target{
@@ -167,7 +287,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	// Re-assert chain identity immediately before acting: a genesis reset can
 	// land mid-cycle, after the check that opened this pass.
 	if !d.assertChainID(ctx, gno, rt) {
-		return
+		return false
 	}
 
 	vpDeltaPercent := 0.0
@@ -176,9 +296,9 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	}
 	nt := notifyTarget{Address: dec.Address, Moniker: dec.Moniker, Action: dec.Action, CurrentPower: dec.CurrentPower, TargetPower: dec.TargetPower}
 
-	if rt.DryRun {
+	if manual {
 		d.dryRun(ctx, rt, built, rec, operator, nt, vpDeltaPercent)
-		return
+		return true
 	}
 
 	out, err := d.signAndBroadcast(ctx, built, rt.Gnokey)
@@ -217,6 +337,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	default:
 		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, dec.Address, err)
 	}
+	return true
 }
 
 // notifyTarget carries the validator/action identity dispatch needs to build
@@ -472,6 +593,26 @@ func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Run
 		ProposalFilename: obs.filename,
 		GnokeyCommand:    obs.command,
 	})
+	d.recordNotifications(ctx, rt, event, nt, proposalID, results)
+}
+
+// dispatchGuardrail alerts that the chain's mass-eligibility guardrail
+// tripped: eligible of valsetSize validators qualify for eject/lower_vp.
+func (d *Daemon) dispatchGuardrail(ctx context.Context, rt config.Runtime, eligible, valsetSize int) {
+	if !d.notifier.Enabled() {
+		return
+	}
+	results := d.notifier.Dispatch(ctx, notify.EventGuardrail, notify.Info{
+		Chain:            rt.Key,
+		EligibleCount:    eligible,
+		ValsetSize:       valsetSize,
+		MaxEligibleShare: rt.Safety.MaxEligibleShare,
+	})
+	d.recordNotifications(ctx, rt, notify.EventGuardrail, notifyTarget{}, 0, results)
+}
+
+// recordNotifications logs failed channels and records each channel result.
+func (d *Daemon) recordNotifications(ctx context.Context, rt config.Runtime, event notify.Event, nt notifyTarget, proposalID int64, results []notify.Result) {
 	for _, r := range results {
 		status := "ok"
 		if !r.OK {

@@ -281,3 +281,43 @@ func TestTxHashAndOnchainIDRoundTrip(t *testing.T) {
 		t.Fatalf("TxHash, OnchainID = %q, %q", last.TxHash, last.OnchainID)
 	}
 }
+
+func TestBroadcastsSince(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+
+	rec := func(chain string, at time.Time, status string) {
+		id, err := st.RecordProposal(ctx, ProposalRecord{
+			CreatedAt: at, Chain: chain, ChainID: "dev", Address: "g1x", Status: StatusPending,
+		})
+		if err != nil {
+			t.Fatalf("RecordProposal: %v", err)
+		}
+		if status != StatusPending {
+			if err := st.UpdateStatus(ctx, id, status, at); err != nil {
+				t.Fatalf("UpdateStatus: %v", err)
+			}
+		}
+	}
+	recent := now.Add(-time.Hour)
+	// Counted: every status a broadcast that may be on-chain can carry.
+	rec("local", recent, StatusPending)
+	rec("local", recent, StatusUnconfirmed)
+	rec("local", recent, StatusAccepted)
+	rec("local", recent, StatusRejected)
+	rec("local", recent, StatusExpired)
+	// Not counted: dry-run, definitive failure, too old, other chain.
+	rec("local", recent, StatusDryRun)
+	rec("local", recent, "")
+	rec("local", now.Add(-25*time.Hour), StatusPending)
+	rec("other", recent, StatusPending)
+
+	n, err := st.BroadcastsSince(ctx, "local", now.Add(-24*time.Hour))
+	if err != nil || n != 5 {
+		t.Fatalf("BroadcastsSince = %d, %v; want 5", n, err)
+	}
+	if n, err := (Noop{}).BroadcastsSince(ctx, "local", now); err != nil || n != 0 {
+		t.Fatalf("Noop.BroadcastsSince = %d, %v; want 0, nil", n, err)
+	}
+}

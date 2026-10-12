@@ -1,0 +1,304 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/samouraiworld/katana/internal/config"
+	"github.com/samouraiworld/katana/internal/store"
+)
+
+// failStore makes chosen lifecycle queries fail on top of a real Store.
+type failStore struct {
+	store.Store
+	lastErr, rejErr, sinceErr error
+}
+
+func (f *failStore) LastProposal(ctx context.Context, chain, addr string) (*store.ProposalRecord, error) {
+	if f.lastErr != nil {
+		return nil, f.lastErr
+	}
+	return f.Store.LastProposal(ctx, chain, addr)
+}
+
+func (f *failStore) RejectionCount(ctx context.Context, chain, addr string) (int, error) {
+	if f.rejErr != nil {
+		return 0, f.rejErr
+	}
+	return f.Store.RejectionCount(ctx, chain, addr)
+}
+
+func (f *failStore) BroadcastsSince(ctx context.Context, chain string, since time.Time) (int, error) {
+	if f.sinceErr != nil {
+		return 0, f.sinceErr
+	}
+	return f.Store.BroadcastsSince(ctx, chain, since)
+}
+
+// A store error on any lifecycle query must close the gate, never open it.
+func TestEvalCycleFailsClosedOnStoreErrors(t *testing.T) {
+	boom := errors.New("database is locked")
+	for name, fs := range map[string]*failStore{
+		"LastProposal":    {lastErr: boom},
+		"RejectionCount":  {rejErr: boom},
+		"BroadcastsSince": {sinceErr: boom},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, "dev", nil)
+			fs.Store = f.st
+			f.d.st = fs
+
+			f.d.evalCycle(context.Background(), f.runtime(t))
+
+			if got := f.broadcasts.count(); got != 0 {
+				t.Fatalf("broadcasts = %d, want 0 on a %s error\nlogs:\n%s", got, name, f.logs.String())
+			}
+			if n := len(f.notifs.all()); n != 0 {
+				t.Fatalf("notifications = %d, want 0", n)
+			}
+			if !strings.Contains(f.logs.String(), "database is locked") {
+				t.Fatalf("the store error must be logged\nlogs:\n%s", f.logs.String())
+			}
+		})
+	}
+}
+
+// valReport renders one gnomonitoring report entry with the same score and
+// voting power on all four windows.
+func valReport(addr string, score int) string {
+	p := fmt.Sprintf(`{"score":%d,"tier":"T","voting_power":1000}`, score)
+	return fmt.Sprintf(`{"addr":%q,"moniker":%q,"periods":{"last_24h":%s,"current_week":%s,"current_month":%s,"current_year":%s}}`,
+		addr, addr, p, p, p, p)
+}
+
+// newValsetFixture builds a fixture whose valset holds bad eject-eligible
+// validators (score 10, g1bad0..) and healthy no-action ones (score 70,
+// g1ok0..). Every bad validator has an operator mapping. Eject is armed
+// (mode auto) unless mutate says otherwise.
+func newValsetFixture(t *testing.T, bad, healthy int, mutate func(*config.Config)) *fixture {
+	return newMixedFixture(t, bad, 0, healthy, mutate)
+}
+
+// newMixedFixture is newValsetFixture plus watch lower_vp-eligible
+// validators (score 50, g1watch0..), listed after the bad ones.
+func newMixedFixture(t *testing.T, bad, watch, healthy int, mutate func(*config.Config)) *fixture {
+	t.Helper()
+	var reports, valset []string
+	operators := map[string]string{}
+	for i := 0; i < bad; i++ {
+		addr := fmt.Sprintf("g1bad%d", i)
+		reports = append(reports, valReport(addr, 10))
+		valset = append(valset, addr)
+		operators[fmt.Sprintf("g1op%d", i)] = addr
+	}
+	for i := 0; i < watch; i++ {
+		addr := fmt.Sprintf("g1watch%d", i)
+		reports = append(reports, valReport(addr, 50))
+		valset = append(valset, addr)
+		operators[fmt.Sprintf("g1wop%d", i)] = addr
+	}
+	for i := 0; i < healthy; i++ {
+		addr := fmt.Sprintf("g1ok%d", i)
+		reports = append(reports, valReport(addr, 70))
+		valset = append(valset, addr)
+	}
+	body := "[" + strings.Join(reports, ",") + "]"
+	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(gnomon.Close)
+
+	f := newFixture(t, "dev", func(c *config.Config) {
+		c.Gnomonitoring.BaseURL = gnomon.URL
+		if mutate != nil {
+			mutate(c)
+		}
+	})
+	f.chain.valset = valset
+	f.chain.operators = operators
+	return f
+}
+
+// strict returns the runtime with the confirmed default guardrails.
+func strict(rt config.Runtime) config.Runtime {
+	rt.Safety = config.SafetyRuntime{MaxProposalsPerCycle: 1, MaxProposalsPerDay: 3, MaxEligibleShare: 25, MinValsetSize: 4}
+	return rt
+}
+
+func TestMaxProposalsPerCycle(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 2, 8, nil)
+	rt := strict(f.runtime(t))
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts after cycle 1 = %d, want 1 (per-cycle cap)\nlogs:\n%s", got, f.logs.String())
+	}
+	if !strings.Contains(f.logs.String(), "max_proposals_per_cycle") {
+		t.Fatalf("the cap must be logged\nlogs:\n%s", f.logs.String())
+	}
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 2 {
+		t.Fatalf("broadcasts after cycle 2 = %d, want 2 (the second validator's turn)", got)
+	}
+}
+
+func TestMaxProposalsPerDay(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 1, 9, nil)
+	rt := strict(f.runtime(t))
+	now := f.d.now()
+	for i, at := range []time.Time{now.Add(-time.Hour), now.Add(-2 * time.Hour), now.Add(-23 * time.Hour)} {
+		if _, err := f.st.RecordProposal(ctx, store.ProposalRecord{
+			CreatedAt: at, Chain: "test", ChainID: "dev", Address: fmt.Sprintf("g1other%d", i),
+			Status: store.StatusPending, Success: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 (3 broadcasts in the last 24h)\nlogs:\n%s", got, f.logs.String())
+	}
+	if !strings.Contains(f.logs.String(), "max_proposals_per_day") {
+		t.Fatalf("the cap must be logged\nlogs:\n%s", f.logs.String())
+	}
+
+	// Once the oldest leaves the 24h window, one slot frees up.
+	f.d.now = func() time.Time { return now.Add(2 * time.Hour) }
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1 once a slot frees up\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+func TestMassEligibilityAbortsCycle(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 3, 7, nil) // 30% eligible > 25%
+	rt := strict(f.runtime(t))
+
+	f.d.evalCycle(ctx, rt)
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 (mass eligibility)\nlogs:\n%s", got, f.logs.String())
+	}
+	if props, _ := f.st.ListProposals(ctx, 10); len(props) != 0 {
+		t.Fatalf("proposals = %+v, want none", props)
+	}
+	if n := len(f.notifs.all()); n != 1 {
+		t.Fatalf("notifications = %d, want exactly 1 alert across both cycles", n)
+	}
+	if !strings.Contains(f.notifs.all()[0], "3 of 10") {
+		t.Fatalf("alert should give the eligible count: %s", f.notifs.all()[0])
+	}
+
+	// Under the threshold, proposals resume; tripping again re-alerts.
+	rt.Safety.MaxEligibleShare = 50
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1 once under the threshold\nlogs:\n%s", got, f.logs.String())
+	}
+	rt.Safety.MaxEligibleShare = 25
+	f.d.evalCycle(ctx, rt)
+	if n := len(f.notifs.all()); n != 3 { // alert, sent, alert
+		t.Fatalf("notifications = %d, want 3 (re-alert after recovery)", n)
+	}
+}
+
+func TestMinValsetSize(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 1, 3, nil) // 4 validators, ejecting one leaves 3
+	rt := strict(f.runtime(t))
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 (valset would drop below 4)\nlogs:\n%s", got, f.logs.String())
+	}
+	if !strings.Contains(f.logs.String(), "min_valset_size") {
+		t.Fatalf("the guardrail must be logged\nlogs:\n%s", f.logs.String())
+	}
+}
+
+// Open ejections of validators still in the valset count as already gone.
+func TestMinValsetSizeCountsOpenEjections(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 1, 4, nil) // 5 validators
+	rt := strict(f.runtime(t))
+	if _, err := f.st.RecordProposal(ctx, store.ProposalRecord{
+		CreatedAt: f.d.now().Add(-48 * time.Hour), Chain: "test", ChainID: "dev", Address: "g1ok0",
+		Action: config.ActionEject, Status: store.StatusPending, Success: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 (5 - 1 open ejection - 1 = 3 < 4)\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+func TestEmptyValsetProposesNothing(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 1, 9, nil)
+	f.chain.valset = nil
+
+	f.d.evalCycle(ctx, strict(f.runtime(t)))
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 on an empty valset", got)
+	}
+	if !strings.Contains(f.logs.String(), "empty valset") {
+		t.Fatalf("the empty valset must be logged\nlogs:\n%s", f.logs.String())
+	}
+}
+
+// A manual action never broadcasts on an armed chain: it is notified with
+// its script like a dry run, and does not use up the broadcast caps.
+func TestManualActionModeDoesNotBroadcast(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 2, 8, func(c *config.Config) {
+		ac := c.Proposal.Actions[config.ActionEject]
+		ac.Mode = config.ModeManual
+		c.Proposal.Actions[config.ActionEject] = ac
+	})
+	rt := strict(f.runtime(t))
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 for a manual action\nlogs:\n%s", got, f.logs.String())
+	}
+	props, err := f.st.ListProposals(ctx, 10)
+	if err != nil || len(props) != 2 {
+		t.Fatalf("proposals = %+v, err %v; want 2 dry-run records (manual does not use the cap)", props, err)
+	}
+	for _, p := range props {
+		if p.Status != store.StatusDryRun {
+			t.Fatalf("status = %q, want dry-run", p.Status)
+		}
+	}
+}
+
+// A manual proposal does not use up the broadcast budget of an automatic
+// one in the same cycle.
+func TestManualActionDoesNotConsumeCycleCap(t *testing.T) {
+	ctx := context.Background()
+	f := newMixedFixture(t, 1, 1, 8, func(c *config.Config) {
+		ac := c.Proposal.Actions[config.ActionEject]
+		ac.Mode = config.ModeManual
+		c.Proposal.Actions[config.ActionEject] = ac
+	})
+
+	f.d.evalCycle(ctx, strict(f.runtime(t)))
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1 (the lower_vp, after the manual eject)\nlogs:\n%s", got, f.logs.String())
+	}
+	if title := f.broadcasts.calls()[0].Title; !strings.HasPrefix(title, "Lower") {
+		t.Fatalf("broadcast title = %q, want the lower_vp proposal", title)
+	}
+}

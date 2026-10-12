@@ -114,6 +114,15 @@ valset VP]` (the reducing direction floors at `min_voting_power`, the raising
 direction caps at `max_voting_power_share`); a step that would already be a
 no-op at a bound produces no proposal that cycle.
 
+**Arming per action.** Each action has a `mode`: `auto` (broadcast),
+`manual` (notify the would-be proposal with its script, like `dry_run`, for
+an operator to broadcast by hand) or `off` (never evaluated). Defaults:
+`eject: manual`, `lower_vp: auto`, `raise_vp: off` — raise_vp would otherwise
+fire for most healthy validators on the first cycle. A chain with
+`dry_run: true` turns every `auto` into `manual`. Each action may also set
+its own `cooldown` (raise_vp defaults to `2160h` = 90 d; the others fall back
+to `proposal.cooldown`).
+
 Every threshold/window/step is independently configurable per action, and
 `proposal.actions.*` can be overridden per chain like the rest of
 `proposal:` (whole-block replace).
@@ -145,7 +154,9 @@ Because katana runs continuously, a per-`(chain, validator)` state machine
 - **rejected** suppresses re-proposal for `proposal.rejected_backoff`, and stops
   after `proposal.max_rejections` (default `2`, shared across action types);
 - `proposal.cooldown` (default `720h` = 30d) is a floor between any two proposals
-  for the same validator.
+  for the same validator; an action's own `cooldown` replaces it when that
+  action is the candidate (raise_vp: `2160h`).
+- a store error while reading this history closes the gate for that validator.
 
 Because this gate is what stands between katana and proposal spam, katana
 **refuses to start** when any broadcast-capable chain (`dry_run: false`) is
@@ -154,10 +165,26 @@ every cycle would re-broadcast the same ejection. Configure
 `storage.driver: sqlite`. Dry-run-only configurations may run with `none`
 (a startup warning describes the degraded rehearsal dedup).
 
+## Safety guardrails
+
+On top of the per-validator gate, a `safety:` block (global, overridable per
+chain field by field) bounds what katana does chain-wide. The guardrails
+cannot be disabled, only loosened:
+
+| Setting                   | Default | Effect                                                                                     |
+|---------------------------|---------|--------------------------------------------------------------------------------------------|
+| `max_proposals_per_cycle` | `1`     | broadcasts per chain per eval cycle                                                        |
+| `max_proposals_per_day`   | `3`     | broadcasts per chain over a rolling 24h (dry-run/manual records and failed broadcasts don't count) |
+| `max_eligible_share`      | `25`    | % of the valset eligible for eject/lower_vp above which the cycle proposes nothing and a `guardrail` alert is sent (once per episode) |
+| `min_valset_size`         | `4`     | no ejection that would leave fewer validators, counting open ejections as already gone     |
+
+A gnomonitoring response katana cannot trust — an empty list, a missing
+window, a missing or `null` score or voting power — skips the whole cycle
+instead of reading as a 0 score.
+
 ## Rehearsal / dry-run
 
-Set `dry_run: true` — globally (the default for every chain) or per chain,
-overriding the global default — to run katana against a live network without
+`dry_run: true` — the default, globally or per chain — runs katana against a live network without
 ever signing or broadcasting. The eval worker runs the **full pipeline** —
 metrics, score-driven action matching, exceptions, lifecycle gate, valset
 membership, operator resolution — but instead of signing and broadcasting it:
@@ -176,7 +203,9 @@ Dry-run records count toward the **real lifecycle gate** exactly like a
 broadcast attempt would: disabling `dry_run` does not bypass the cooldown of a
 proposal that was already rehearsed and shown to an operator. Use `dry_run`
 both to onboard a new chain and as a standing manual-approval mode. It
-defaults to `false` — a plain enabled chain is broadcast-armed.
+defaults to `true`: arming a chain takes an explicit `dry_run: false`, and
+ejections additionally need `proposal.actions.eject.mode: auto`. An action
+in `mode: manual` gets the same treatment on an armed chain.
 
 ## Notifications
 
@@ -301,9 +330,10 @@ gnoland-test/          local devnet for preprod/e2e
 
 ## Safety
 
-- katana broadcasts by default: every eligible validator on a chain without
-  `dry_run: true` results in a signed, on-chain GovDAO proposal — use
-  `dry_run` to rehearse a new chain or as a standing manual-approval mode.
+- katana is unarmed by default: `dry_run` defaults to `true` and eject to
+  `mode: manual`. Only a chain with `dry_run: false` broadcasts, and only for
+  actions in `mode: auto`; the [safety guardrails](#safety-guardrails) cap
+  and abort mass action.
   `gnokey` is embedded in the container image
   (pinned by the `GNO_REF` build-arg); the signing key is provisioned from a
   mnemonic at startup (`gnokey.mnemonic` / `KATANA_GNOKEY_MNEMONIC`) or from a

@@ -206,9 +206,13 @@ submitted). Each loops on its own ticker.
     `KATANA_GNOKEY_PASSWORD`; strongly recommended to keep it out of the file in
     production.
   - The wallet is used on every cycle: katana has no other run path.
-- **FR-6.6** katana broadcasts on-chain by default. `dry_run` (default `false`,
-  global with per-chain override) is the sole toggle for the opposite: when
-  `true`, katana still evaluates candidates (whichever of eject / lower_vp /
+- **FR-6.6** Arming is explicit. `dry_run` (default `true`, global with
+  per-chain override) gates every broadcast on the chain; each action also
+  has a `mode` (`auto` | `manual` | `off`, defaults eject `manual`, lower_vp
+  `auto`, raise_vp `off`). An action broadcasts only when the chain has
+  `dry_run: false` **and** its mode is `auto`; `off` removes it from
+  `action_priority`. When `dry_run` is `true` or the mode is `manual`,
+  katana still evaluates candidates (whichever of eject / lower_vp /
   raise_vp matched) and sends a `would_eject`-event notification — the event
   name is historical and covers all three actions — and records the proposal
   row (`status: dry-run`) so the real lifecycle cooldown gate prevents
@@ -219,6 +223,24 @@ submitted). Each loops on its own ticker.
   command (password piped, never embedded), so an operator can review and
   broadcast it themselves. Serves both onboarding rehearsal and a standing
   manual-approval mode. *(decision D9 — see amendment below.)* `[CHANGE]`
+- **FR-6.7** Safety guardrails, all failing closed (`safety:` block, global
+  with field-by-field per-chain override; none can be disabled, only
+  loosened):
+  - `max_proposals_per_cycle` (default 1) and `max_proposals_per_day`
+    (default 3, rolling 24h) cap broadcasts per chain. Dry-run/manual
+    records and definitive broadcast failures do not count.
+  - `max_eligible_share` (default 25 %): when more of the valset than this
+    qualifies for eject/lower_vp in one cycle, katana proposes nothing on the
+    chain that cycle and sends one `guardrail` notification per episode —
+    mass failure points at bad metrics, not bad validators.
+  - `min_valset_size` (default 4): no ejection that would leave fewer
+    validators, counting open (pending/unconfirmed/expired) ejections as
+    already gone.
+  - A malformed gnomonitoring response (empty list, missing window, missing
+    or null score/voting power) skips the cycle; it never reads as score 0.
+  - A store error on any lifecycle-gate read closes the gate.
+  - raise_vp has its own `cooldown` (default 2160h = 90 d); any action may set
+    one, falling back to `proposal.cooldown`.
 - **FR-6.6b** The signing key is provisioned into the gnokey keybase from a
   configured **mnemonic** (`gnokey.mnemonic`, env `KATANA_GNOKEY_MNEMONIC`) at
   startup: `internal/keybase.Ensure` imports the derived key under
@@ -552,9 +574,11 @@ chains:
 
 ## 10. Security & safety
 
-- katana is **broadcast-only**: there is no dry-run/preview mode, so every
-  eligible validator that clears the lifecycle gate and valset check is
-  actually proposed on-chain.
+- katana is **unarmed by default**: `dry_run` defaults to `true`, and eject
+  defaults to `mode: manual`. Broadcasting requires `dry_run: false` and an
+  action in `mode: auto` (FR-6.6).
+- Safety guardrails cap and abort mass action, and fail closed on bad
+  metrics or store errors (FR-6.7).
 - No key material stored by katana; gnokey owns signing. The signing key
   itself lives in the gnokey keybase — either provisioned from a mnemonic
   katana passes to `gnokey add` at startup, or already present in a

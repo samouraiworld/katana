@@ -284,6 +284,15 @@ func (s *SQLite) RejectionCount(ctx context.Context, chain, address string) (int
 	return n, err
 }
 
+func (s *SQLite) BroadcastsSince(ctx context.Context, chain string, since time.Time) (int, error) {
+	// created_at is fixed-width RFC3339 UTC, so string order is time order.
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM proposals WHERE chain = ? AND created_at >= ? AND status IN (?, ?, ?, ?, ?)`,
+		chain, fmtTime(since), StatusPending, StatusUnconfirmed, StatusAccepted, StatusRejected, StatusExpired).Scan(&n)
+	return n, err
+}
+
 func (s *SQLite) ListProposals(ctx context.Context, limit int) ([]ProposalRecord, error) {
 	if limit <= 0 {
 		limit = 100

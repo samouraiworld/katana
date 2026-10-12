@@ -211,6 +211,7 @@ type fixture struct {
 // (see TestEvalCycleLowersVotingPower / TestEvalCycleRaisesVotingPower).
 const reportsJSON = `[{"addr":"g1bad","moniker":"bad","periods":{
 	"current_month":{"score":10,"tier":"Critical","voting_power":1000},
+	"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
 	"current_week":{"score":10,"tier":"Critical","voting_power":1000},
 	"current_year":{"score":10,"tier":"Critical","voting_power":1000}
 }}]`
@@ -223,7 +224,7 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 
 	chain := &stubChain{
 		network:   network,
-		valset:    []string{"g1bad"},
+		valset:    []string{"g1bad", "g1peer"}, // g1peer: ejecting g1bad leaves one validator
 		operators: map[string]string{"g1op": "g1bad"},
 	}
 	rpc := httptest.NewServer(chain.handler())
@@ -245,6 +246,13 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 
 	cfg := &config.Config{
 		PollInterval: "5m",
+		// Armed, with guardrails loose enough to stay out of the way of
+		// single-validator tests; guardrails_test.go tightens them.
+		DryRun: boolPtr(false),
+		Safety: config.Safety{
+			MaxProposalsPerCycle: intPtr(100), MaxProposalsPerDay: intPtr(100),
+			MaxEligibleShare: float64Ptr(100), MinValsetSize: intPtr(1),
+		},
 		Gnomonitoring: config.Gnomonitoring{
 			BaseURL: gnomon.URL, TimeoutSeconds: 5, ReportsPath: "/api/reports/validators",
 		},
@@ -261,12 +269,14 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 			MaxVotingPowerShare: float64Ptr(15),
 			Actions: map[string]config.ActionConfig{
 				config.ActionEject: {
+					Mode:       config.ModeAuto,
 					ScoreBelow: intPtr(30), Window: "current_month",
 					RunScriptTemplate:   "{operator_address} eject {title} {description}",
 					TitleTemplate:       "Eject {moniker} ({address})",
 					DescriptionTemplate: "Reason: {reason}",
 				},
 				config.ActionLowerVP: {
+					Mode:       config.ModeAuto,
 					ScoreBelow: intPtr(60), Window: "current_week",
 					VPStepPercentOfSelf: float64Ptr(-20), VPStepPercentOfTotal: float64Ptr(-50), // wide network cap: self-cap decides in this fixture
 					RunScriptTemplate:   "{operator_address} lower {target_power} {title} {description}",
@@ -274,6 +284,7 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 					DescriptionTemplate: "Reason: {reason}",
 				},
 				config.ActionRaiseVP: {
+					Mode:           config.ModeAuto,
 					ScoreAtOrAbove: intPtr(85), Window: "current_year",
 					VPStepPercentOfSelf: float64Ptr(20), VPStepPercentOfTotal: float64Ptr(50),
 					RunScriptTemplate:   "{operator_address} raise {target_power} {title} {description}",
@@ -386,8 +397,8 @@ func TestDryRunLogsAndNotifiesWithoutBroadcast(t *testing.T) {
 		t.Fatalf("notifications = %d, want 1", len(bodies))
 	}
 	body := bodies[0]
-	if !strings.Contains(body, "dry_run is enabled") {
-		t.Errorf("dry-run notification should say dry_run is enabled:\n%s", body)
+	if !strings.Contains(body, "manual approval") {
+		t.Errorf("dry-run notification should say it needs manual approval:\n%s", body)
 	}
 	// Like the old observe mode, a dry_run notification attaches the ejection
 	// script and a ready-to-run gnokey command.
@@ -416,6 +427,7 @@ func TestEvalCycleLowersVotingPower(t *testing.T) {
 	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[{"addr":"g1bad","moniker":"bad","periods":{
 			"current_month":{"score":50,"tier":"Watch","voting_power":1000},
+			"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
 			"current_week":{"score":50,"tier":"Watch","voting_power":1000},
 			"current_year":{"score":50,"tier":"Watch","voting_power":1000}
 		}}]`))
@@ -460,10 +472,12 @@ func TestEvalCycleRaisesVotingPower(t *testing.T) {
 	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[{"addr":"g1bad","moniker":"bad","periods":{
 			"current_month":{"score":95,"tier":"Excellent","voting_power":1000},
+			"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
 			"current_week":{"score":95,"tier":"Excellent","voting_power":1000},
 			"current_year":{"score":95,"tier":"Excellent","voting_power":1000}
 		}},{"addr":"g1big","moniker":"big","periods":{
 			"current_month":{"score":70,"tier":"Stable","voting_power":19000},
+			"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
 			"current_week":{"score":70,"tier":"Stable","voting_power":19000},
 			"current_year":{"score":70,"tier":"Stable","voting_power":19000}
 		}}]`))
@@ -499,6 +513,7 @@ func TestExceptionsBlockAllThreeActions(t *testing.T) {
 			gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, `[{"addr":"g1bad","moniker":"bad","periods":{
 					"current_month":{"score":%d,"voting_power":1000},
+					"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
 					"current_week":{"score":%d,"voting_power":1000},
 					"current_year":{"score":%d,"voting_power":1000}
 				}}]`, tc.score, tc.score, tc.score)
@@ -534,6 +549,7 @@ func TestConsecutiveLowerVPCyclesDoNotCompound(t *testing.T) {
 	report := func() string {
 		return fmt.Sprintf(`[{"addr":"g1bad","moniker":"bad","periods":{
 			"current_month":{"score":50,"voting_power":%d},
+			"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
 			"current_week":{"score":50,"voting_power":%d},
 			"current_year":{"score":50,"voting_power":%d}
 		}}]`, power, power, power)

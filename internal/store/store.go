@@ -122,6 +122,11 @@ type Store interface {
 	TrackedProposals(ctx context.Context, chain string) ([]ProposalRecord, error)
 	// RejectionCount counts the validator's rejected proposals.
 	RejectionCount(ctx context.Context, chain, address string) (int, error)
+	// BroadcastsSince counts the chain's proposals created at or after since
+	// that may be on-chain (pending, unconfirmed, accepted, rejected,
+	// expired). Dry-run records and definitive broadcast failures are not
+	// counted. Backs the safety.max_proposals_per_day cap.
+	BroadcastsSince(ctx context.Context, chain string, since time.Time) (int, error)
 
 	ListProposals(ctx context.Context, limit int) ([]ProposalRecord, error)
 	Close() error
@@ -172,5 +177,6 @@ func (Noop) LastProposal(context.Context, string, string) (*ProposalRecord, erro
 }
 func (Noop) TrackedProposals(context.Context, string) ([]ProposalRecord, error) { return nil, nil }
 func (Noop) RejectionCount(context.Context, string, string) (int, error)        { return 0, nil }
+func (Noop) BroadcastsSince(context.Context, string, time.Time) (int, error)    { return 0, nil }
 func (Noop) ListProposals(context.Context, int) ([]ProposalRecord, error)       { return nil, nil }
 func (Noop) Close() error                                                       { return nil }
