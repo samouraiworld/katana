@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/samouraiworld/katana/internal/config"
+	"github.com/samouraiworld/katana/internal/proposal"
 	"github.com/samouraiworld/katana/internal/store"
 )
 
@@ -300,5 +301,47 @@ func TestManualActionDoesNotConsumeCycleCap(t *testing.T) {
 	}
 	if title := f.broadcasts.calls()[0].Title; !strings.HasPrefix(title, "Lower") {
 		t.Fatalf("broadcast title = %q, want the lower_vp proposal", title)
+	}
+}
+
+// A definitive broadcast failure creates no proposal, so it must not use up
+// the cycle's broadcast budget nor count as an open ejection.
+func TestFailedBroadcastDoesNotConsumeCaps(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 2, 8, nil)
+	f.broadcasts.onCall = func(proposal.Built) {
+		// Runs under the recorder's lock: first call fails at CheckTx, the
+		// second commits.
+		if len(f.broadcasts.built) == 1 {
+			f.broadcasts.out, f.broadcasts.err = "check transaction failed: log:insufficient funds", errors.New("gnokey: exit status 1")
+		} else {
+			f.broadcasts.out, f.broadcasts.err = "", nil
+		}
+	}
+
+	f.d.evalCycle(ctx, strict(f.runtime(t)))
+	if got := f.broadcasts.count(); got != 2 {
+		t.Fatalf("broadcast attempts = %d, want 2 (the failure frees its slot)\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// Same for min_valset_size: a failed ejection does not shrink the valset.
+func TestFailedEjectionDoesNotCountAsOpen(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 2, 3, nil) // 5 validators; one ejection leaves 4
+	f.broadcasts.onCall = func(proposal.Built) {
+		if len(f.broadcasts.built) == 1 {
+			f.broadcasts.out, f.broadcasts.err = "check transaction failed: log:insufficient funds", errors.New("gnokey: exit status 1")
+		} else {
+			f.broadcasts.out, f.broadcasts.err = "", nil
+		}
+	}
+	rt := strict(f.runtime(t))
+	rt.Safety.MaxProposalsPerCycle = 2
+	rt.Safety.MaxEligibleShare = 50
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 2 {
+		t.Fatalf("broadcast attempts = %d, want 2 (failed ejection is not open)\nlogs:\n%s", got, f.logs.String())
 	}
 }

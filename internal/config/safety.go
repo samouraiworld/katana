@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Safety holds the anti-runaway guardrails bounding how many proposals katana
 // may produce. The global block is the default; a chain may override any
@@ -50,7 +53,9 @@ func (s Safety) validate(prefix string) error {
 	if s.MaxProposalsPerDay != nil && *s.MaxProposalsPerDay < 1 {
 		return fmt.Errorf("%s.max_proposals_per_day must be >= 1, got %d", prefix, *s.MaxProposalsPerDay)
 	}
-	if s.MaxEligibleShare != nil && (*s.MaxEligibleShare <= 0 || *s.MaxEligibleShare > 100) {
+	// NaN fails every comparison, so it is rejected explicitly: it would
+	// otherwise pass here and silently disable the guardrail.
+	if s.MaxEligibleShare != nil && (math.IsNaN(*s.MaxEligibleShare) || *s.MaxEligibleShare <= 0 || *s.MaxEligibleShare > 100) {
 		return fmt.Errorf("%s.max_eligible_share must be in (0, 100], got %v", prefix, *s.MaxEligibleShare)
 	}
 	if s.MinValsetSize != nil && *s.MinValsetSize < 1 {

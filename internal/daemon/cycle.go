@@ -190,15 +190,19 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		}
 
 		d.logger.Printf("[%s][eval] ELIGIBLE %s action=%s mode=%s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, mode, dec.Reason)
-		if !d.produce(ctx, rt, gno, dec, totalVP[dec.Window], mode == config.ModeManual) {
+		res := d.produce(ctx, rt, gno, dec, totalVP[dec.Window], mode == config.ModeManual)
+		if res == skipped {
 			continue
 		}
 		produced++
 		byAction[dec.Action]++
-		if mode == config.ModeAuto {
+		// A definitive broadcast failure created nothing: it uses up neither
+		// the budget nor the valset. A manual ejection may still be
+		// broadcast by hand, so it counts as open.
+		if res == broadcastOnChain {
 			broadcasts++
 		}
-		if dec.Action == config.ActionEject {
+		if dec.Action == config.ActionEject && res != broadcastFailed {
 			openEjects++
 		}
 	}
@@ -241,15 +245,24 @@ func (d *Daemon) setGuardTripped(chain string, tripped bool) bool {
 	return tripped && !was
 }
 
+// produceResult is what produce did with a proposal.
+type produceResult int
+
+const (
+	skipped          produceResult = iota // stopped before acting (no operator mapping, chain id mismatch)
+	handedOff                             // manual: recorded and notified, not broadcast
+	broadcastOnChain                      // committed or ambiguous: may be on-chain
+	broadcastFailed                       // definitive failure: nothing on-chain
+)
+
 // produce builds a proposal for dec.Action, then either broadcasts it
 // (signing via gnokey, recording it, notifying on success) or — when manual
 // (dry_run chain, or the action's mode is manual) — logs and notifies the
 // complete would-be proposal, with the script and a ready-to-run gnokey
 // command attached, without touching the chain. totalWindowVP is
 // dec.Window's total valset VP this cycle, used to compute the
-// notification's VPDeltaPercent. It reports whether it went that far (false
-// when skipped before acting: no operator mapping, chain id mismatch).
-func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalWindowVP int64, manual bool) bool {
+// notification's VPDeltaPercent.
+func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalWindowVP int64, manual bool) produceResult {
 	// A valset action is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
 	// would act on an unknown operator).
@@ -258,7 +271,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		operator = op
 	} else {
 		d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, dec.Address)
-		return false
+		return skipped
 	}
 
 	built := proposal.Build(proposal.Target{
@@ -287,7 +300,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	// Re-assert chain identity immediately before acting: a genesis reset can
 	// land mid-cycle, after the check that opened this pass.
 	if !d.assertChainID(ctx, gno, rt) {
-		return false
+		return skipped
 	}
 
 	vpDeltaPercent := 0.0
@@ -298,7 +311,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 
 	if manual {
 		d.dryRun(ctx, rt, built, rec, operator, nt, vpDeltaPercent)
-		return true
+		return handedOff
 	}
 
 	out, err := d.signAndBroadcast(ctx, built, rt.Gnokey)
@@ -336,8 +349,9 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		d.dispatch(ctx, notify.EventUnconfirmed, rt, id, nt, "", vpDeltaPercent, observePayload{})
 	default:
 		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, dec.Address, err)
+		return broadcastFailed
 	}
-	return true
+	return broadcastOnChain
 }
 
 // notifyTarget carries the validator/action identity dispatch needs to build

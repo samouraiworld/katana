@@ -95,6 +95,9 @@ func TestSafetyRejectsInvalidValues(t *testing.T) {
 		{name: "share zero", global: "safety: {max_eligible_share: 0}", field: "max_eligible_share"},
 		{name: "share negative", global: "safety: {max_eligible_share: -5}", field: "max_eligible_share"},
 		{name: "share above 100", global: "safety: {max_eligible_share: 100.5}", field: "max_eligible_share"},
+		// NaN fails every comparison: it would silently disable the guardrail.
+		{name: "share NaN", global: "safety: {max_eligible_share: .nan}", field: "max_eligible_share"},
+		{name: "share +Inf", global: "safety: {max_eligible_share: .inf}", field: "max_eligible_share"},
 		{name: "min_valset zero", global: "safety: {min_valset_size: 0}", field: "min_valset_size"},
 		{name: "per-chain per_day zero", chain: "    safety: {max_proposals_per_day: 0}\n", field: "max_proposals_per_day"},
 		// An invalid global value must fail even when the chain overrides it.
@@ -304,10 +307,16 @@ func TestCallSubmitIgnoresOffActions(t *testing.T) {
 func TestCooldownFor(t *testing.T) {
 	rt := loadRuntime(t, guardrailYAML("proposal:\n  cooldown: 240h\n  actions:\n    lower_vp: {cooldown: 48h}", ""))
 	cases := map[string]time.Duration{
-		ActionEject:   240 * time.Hour,  // empty: falls back to proposal.cooldown
+		ActionEject:   240 * time.Hour,  // unset: falls back to proposal.cooldown
 		ActionLowerVP: 48 * time.Hour,   // explicit
 		ActionRaiseVP: 2160 * time.Hour, // built-in 90d default
 		"unknown":     240 * time.Hour,
+	}
+	// An explicitly empty cooldown replaces the built-in default with the
+	// proposal.cooldown fallback.
+	rt2 := loadRuntime(t, guardrailYAML("proposal:\n  cooldown: 240h\n  actions:\n    raise_vp: {cooldown: \"\"}", ""))
+	if got := rt2.Proposal.CooldownFor(ActionRaiseVP); got != 240*time.Hour {
+		t.Errorf("raise_vp with cooldown \"\": CooldownFor = %s, want proposal.cooldown 240h", got)
 	}
 	for action, want := range cases {
 		if got := rt.Proposal.CooldownFor(action); got != want {
