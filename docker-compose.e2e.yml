@@ -58,7 +58,9 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        GNO_REF: ${GNO_REF:-master}
+        # Must match the gno commit the gnoland-test devnet was built from. Defaults
+        # to the chain/mainnet tag commit (see Dockerfile); override with GNO_REF.
+        GNO_REF: ${GNO_REF:-9c8eb132e483d6fd324d92c193e629ad65a98a37}
     image: katana:latest
     container_name: katana-e2e
     restart: unless-stopped

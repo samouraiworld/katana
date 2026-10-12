@@ -607,3 +607,72 @@ func TestPendingTimeoutMustBePositive(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultScriptsTargetMainnetRealms pins the default run scripts to the
+// realm paths of the gno.land chain/mainnet tag (9c8eb132e483), where
+// r/sys/validators/v3 was renamed to r/sys/validators/v0. A test13 operator
+// overrides run_script_template instead of relying on these defaults.
+func TestDefaultScriptsTargetMainnetRealms(t *testing.T) {
+	for name, script := range map[string]string{
+		"DefaultEjectScript":    DefaultEjectScript,
+		"DefaultVPChangeScript": DefaultVPChangeScript,
+	} {
+		if !strings.Contains(script, `validators "gno.land/r/sys/validators/v0"`) {
+			t.Errorf("%s does not import gno.land/r/sys/validators/v0", name)
+		}
+		if strings.Contains(script, "validators/v3") {
+			t.Errorf("%s still references the test13 realm r/sys/validators/v3", name)
+		}
+		if !strings.Contains(script, `"gno.land/r/gov/dao"`) {
+			t.Errorf("%s does not import the gno.land/r/gov/dao proxy", name)
+		}
+		if !strings.Contains(script, "dao.MustCreateProposal(cross(cur), pr)") {
+			t.Errorf("%s does not create the proposal through dao.MustCreateProposal", name)
+		}
+	}
+	if !strings.Contains(DefaultEjectScript, `NewValoperChange(address("{operator_address}"), 0)`) {
+		t.Errorf("DefaultEjectScript must remove the operator with Power=0")
+	}
+	if !strings.Contains(DefaultVPChangeScript, `NewValoperChange(address("{operator_address}"), {target_power})`) {
+		t.Errorf("DefaultVPChangeScript must upsert {target_power} in a single change")
+	}
+}
+
+func TestTxIndexerURL(t *testing.T) {
+	const base = `
+gnomonitoring: {base_url: "http://localhost:8989"}
+storage: {driver: sqlite}
+gnokey: {key_name: "k"%s}
+chains:
+  test:
+    rpc_endpoint: "http://localhost:26658"
+    chain_id: "dev"
+    gnomonitoring_chain: "local"
+    enabled: true%s
+`
+	load := func(gnokey, chain string) (Runtime, error) {
+		t.Helper()
+		c, err := Load(writeConfig(t, fmt.Sprintf(base, gnokey, chain)))
+		if err != nil {
+			return Runtime{}, err
+		}
+		return c.Runtime("test")
+	}
+
+	rt, err := load("", "")
+	if err != nil || rt.TxIndexerURL != "" {
+		t.Fatalf("unset: rt.TxIndexerURL=%q err=%v, want empty", rt.TxIndexerURL, err)
+	}
+
+	rt, err = load(`, address: "g1katana"`, "\n    tx_indexer_url: \"http://indexer:8546/graphql/query\"")
+	if err != nil || rt.TxIndexerURL != "http://indexer:8546/graphql/query" {
+		t.Fatalf("set: rt.TxIndexerURL=%q err=%v", rt.TxIndexerURL, err)
+	}
+
+	// Reconciliation queries the indexer by signer: without the key's
+	// address it cannot run, so refuse the config rather than silently skip.
+	if _, err := load("", "\n    tx_indexer_url: \"http://indexer:8546/graphql/query\""); err == nil ||
+		!strings.Contains(err.Error(), "gnokey.address") {
+		t.Fatalf("tx_indexer_url without gnokey.address: err=%v, want a gnokey.address error", err)
+	}
+}

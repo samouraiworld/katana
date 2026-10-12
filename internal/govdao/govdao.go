@@ -63,12 +63,16 @@ type abciQueryResponse struct {
 	} `json:"error"`
 }
 
-// Supermajority mirrors gno.land/r/gov/dao/v3/impl's law.Supermajority: the
-// YES or NO share a proposal needs before an ExecuteProposal call resolves it.
+// Supermajority mirrors the GovDAO implementation's law.Supermajority
+// (gno.land/r/gov/dao/impl/v0 on the chain/mainnet tag, r/gov/dao/v3/impl on
+// test13; 66.66 on both): the YES or NO share a proposal needs before an
+// ExecuteProposal call resolves it.
 const Supermajority = 66.66
 
-// Marker lines emitted by gno.land/r/gov/dao/v3/impl's proposalStatus.String()
-// on a single-proposal page. Exactly one of them is present per render.
+// Marker lines emitted by the GovDAO implementation's proposalStatus.String()
+// (r/gov/dao/impl/v0 on mainnet, r/gov/dao/v3/impl on test13; identical lines,
+// both also emit an "- ABSTAIN PERCENT: " line that katana ignores) on a
+// single-proposal page. Exactly one of them is present per render.
 const (
 	markerAccepted = "- **PROPOSAL HAS BEEN ACCEPTED**"
 	markerDenied   = "- **PROPOSAL HAS BEEN DENIED**"
@@ -124,8 +128,10 @@ func (c *Client) Proposal(ctx context.Context, proposalID string) (Proposal, err
 	return ParseRender(string(raw)), nil
 }
 
-// ParseRender reads the status and vote tallies out of a GovDAO v3
-// single-proposal page.
+// ParseRender reads the status and vote tallies out of a GovDAO
+// single-proposal page (r/gov/dao/impl/v0 on mainnet, v3/impl on test13).
+// A proposal created by a previous implementation renders a "not available"
+// page with no marker: that yields Unknown, like any unrecognised render.
 //
 // Only whole marker lines count. Anything looser is unsafe: the page embeds
 // the proposal's own title and description (which may say "ACCEPTED", or carry

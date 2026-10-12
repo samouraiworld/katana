@@ -1,0 +1,46 @@
+services:
+  katana:
+    # Pin an immutable image tag; never `latest`. Tags published by
+    # .github/workflows/docker-image.yml: `<semver>` for a `v<semver>` git tag
+    # (e.g. KATANA_IMAGE_TAG=1.0.0), `sha-<short commit>` for every push. The
+    # image ships gnokey built from GNO_REF (default: the gno.land chain/mainnet
+    # tag commit 9c8eb132e483).
+    image: ghcr.io/samouraiworld/katana:${KATANA_IMAGE_TAG:?set KATANA_IMAGE_TAG to a released image tag}
+    container_name: katana
+    # katana is a permanent backend: keep it running and restart on failure.
+    restart: unless-stopped
+
+    # Expose the /health endpoint (enable `web:` in config.yaml, listen ":8990").
+    ports:
+      - "8990:8990"
+
+    volumes:
+      # Your configuration (read-only).
+      - ./config.yaml:/app/config.yaml:ro
+      # Persistent SQLite DB + gnokey keybase, bind-mounted on the host.
+      # In config.yaml set (for the container):
+      #   storage.sqlite_path: "/app/data/katana.db"
+      #   gnokey.home: "/app/data/keybase"
+      - ./data:/app/data
+
+    command: ["--config", "/app/config.yaml"]
+
+    # busybox wget (in the alpine runtime image) exits non-zero on any non-2xx
+    # answer, so a 503 from /health (stale worker) marks the container unhealthy.
+    # 127.0.0.1, not localhost: busybox wget may resolve localhost to ::1 only,
+    # which fails if web.listen is bound to an IPv4 address.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8990/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # If you run gnomonitoring via its own compose, join its network here so
+    # KATANA_GNOMON_BASE_URL can use the service name.
+    # networks:
+    #   - gnomonitoring
+
+# networks:
+#   gnomonitoring:
+#     external: true

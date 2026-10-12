@@ -32,7 +32,8 @@ func TestStatusParsesResponseBaseData(t *testing.T) {
 	}
 }
 
-// TestParseRender runs the parser over real GovDAO v3 proposal pages. The
+// TestParseRender runs the parser over real GovDAO v3 (test13) proposal pages,
+// whose marker and tally lines are unchanged in r/gov/dao/impl/v0 (mainnet). The
 // fixtures in testdata/render are verbatim gno.land/r/gov/dao:<id> renders
 // produced by the realm itself (see testdata/gen for the generating filetests).
 func TestParseRender(t *testing.T) {

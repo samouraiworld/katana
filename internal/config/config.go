@@ -237,6 +237,11 @@ type ChainConfig struct {
 	ChainID            string `yaml:"chain_id"`
 	GnomonitoringChain string `yaml:"gnomonitoring_chain"`
 	Enabled            bool   `yaml:"enabled"`
+	// TxIndexerURL is the tx-indexer GraphQL endpoint used to reconcile an
+	// `unconfirmed` broadcast whose gnokey output carried no tx hash. Empty
+	// disables reconciliation (such rows stay blocked until handled by hand).
+	// Requires gnokey.address: the indexer is queried by signer.
+	TxIndexerURL string `yaml:"tx_indexer_url"`
 	// DryRun overrides the global dry_run default for this chain (nil =
 	// inherit the global value). true runs the full evaluation pipeline but
 	// never signs or broadcasts: the would-be proposal is logged and notified
@@ -265,6 +270,7 @@ type Runtime struct {
 	GnowebURL          string
 	ChainID            string
 	GnomonitoringChain string
+	TxIndexerURL       string
 	DryRun             bool
 	PollInterval       time.Duration
 	VotePollInterval   time.Duration
@@ -292,20 +298,24 @@ func (r Runtime) ActionMode(action string) string {
 }
 
 // DefaultEjectScript is the gno.land valset-ejection script used in "run"
-// submission mode. It routes through r/sys/validators/v3 with Power=0 (removal)
-// and creates the GovDAO proposal. Placeholders: {operator_address} {title}
-// {description}. Direct MsgCall is unsupported (the v3 builder is non-crossing),
-// so a crossing script is required.
+// submission mode. It targets the gno.land mainnet realms (gnolang/gno
+// `chain/mainnet` tag, 9c8eb132e483): it routes through r/sys/validators/v0
+// with Power=0 (removal) and creates the GovDAO proposal through the
+// r/gov/dao proxy. Placeholders: {operator_address} {title} {description}.
+// Direct MsgCall is unsupported (the builder returns a ProposalRequest that
+// must be handed to dao.MustCreateProposal), so a crossing script is required.
 //
-// CONFIRMED end-to-end on the gnoland-test devnet (PP-5): a proposal built from
-// this script, once accepted and executed, emits ValidatorRemoved from
-// r/sys/validators/v3 and drops the operator from the consensus valset (RPC
-// /validators). Confirmed via `make accept-govdao` in gnoland-test (see issue #2).
+// Confirmed end-to-end on the test13 gnoland-test devnet (PP-5), where the
+// realm was r/sys/validators/v3 with the same API: an accepted and executed
+// proposal emitted ValidatorRemoved and dropped the operator from the consensus
+// valset (RPC /validators), via `make accept-govdao` (see issue #2). Pending
+// re-confirmation on a devnet built from the chain/mainnet tag. On test13,
+// override run_script_template with the v3 import (see config.yaml.example).
 const DefaultEjectScript = `package main
 
 import (
 	"gno.land/r/gov/dao"
-	validators "gno.land/r/sys/validators/v3"
+	validators "gno.land/r/sys/validators/v0"
 )
 
 func main(cur realm) {
@@ -320,14 +330,15 @@ func main(cur realm) {
 
 // DefaultVPChangeScript is the gno.land valset voting-power-change script
 // used by lower_vp/raise_vp in "run" submission mode. Same crossing-script
-// pattern as DefaultEjectScript, but with an arbitrary {target_power}
-// instead of a hardcoded 0. Placeholders: {operator_address} {target_power}
-// {title} {description}.
+// pattern and mainnet realms as DefaultEjectScript, but with an arbitrary
+// {target_power} instead of a hardcoded 0: r/sys/validators/v0 treats a
+// single {op, newPower} entry for an op already in the set as an upsert.
+// Placeholders: {operator_address} {target_power} {title} {description}.
 const DefaultVPChangeScript = `package main
 
 import (
 	"gno.land/r/gov/dao"
-	validators "gno.land/r/sys/validators/v3"
+	validators "gno.land/r/sys/validators/v0"
 )
 
 func main(cur realm) {
@@ -571,6 +582,9 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 	if gk.KeyName == "" {
 		return Runtime{}, fmt.Errorf("gnokey.key_name is required")
 	}
+	if ch.TxIndexerURL != "" && gk.Address == "" {
+		return Runtime{}, fmt.Errorf("tx_indexer_url requires gnokey.address (the indexer is queried by signer)")
+	}
 
 	return Runtime{
 		Key:                chainID,
@@ -578,6 +592,7 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		GnowebURL:          ch.GnowebURL,
 		ChainID:            ch.ChainID,
 		GnomonitoringChain: ch.GnomonitoringChain,
+		TxIndexerURL:       ch.TxIndexerURL,
 		DryRun:             dryRun,
 		PollInterval:       poll,
 		VotePollInterval:   votePoll,

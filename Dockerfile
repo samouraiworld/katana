@@ -1,7 +1,9 @@
-# Pin to the SAME gno revision the target network was built from. For the e2e
-# devnet this must match gnoland-test's GNO_REPO_PATH commit; for a real chain,
-# use the network's released gno tag.
-ARG GNO_REF=master
+# Pin to the SAME gno revision the target network was built from. The default is
+# the gno.land mainnet: the gnolang/gno `chain/mainnet` tag commit (also tagged
+# v1.2.0). Pin the full SHA rather than the tag, since tags can move. For the e2e
+# devnet this must match gnoland-test's GNO_REPO_PATH commit; for test13 use
+# f45cc5c88e6a (and override the run scripts, see config.yaml.example).
+ARG GNO_REF=9c8eb132e483d6fd324d92c193e629ad65a98a37
 
 # ── build stage ───────────────────────────────────────────────────────────────
 FROM golang:1.25-alpine AS build
@@ -27,6 +29,7 @@ RUN CGO_ENABLED=0 go install github.com/gnolang/gno/gno.land/cmd/gnokey@${GNO_RE
 FROM alpine:3.20
 
 # ca-certificates is needed for HTTPS calls to gnomonitoring and gno.land RPC.
+# wget (busybox, part of the base image) backs the compose healthcheck on /health.
 RUN apk add --no-cache ca-certificates \
 	&& adduser -D -u 10001 katana
 
