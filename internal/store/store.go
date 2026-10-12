@@ -21,13 +21,14 @@ const (
 	StatusAccepted = "accepted"
 	StatusRejected = "rejected"
 	// StatusExpired marks a proposal still open on-chain after
-	// vote_tracking.pending_timeout. GovDAO proposals never expire on-chain,
-	// so the vote worker keeps polling it for a late outcome; the lifecycle
-	// gate treats it like a rejection (backoff, counts toward max_rejections).
+	// vote_tracking.pending_timeout. GovDAO proposals never expire on-chain
+	// and cannot be withdrawn, so the vote worker keeps polling (and
+	// executing) it, and the lifecycle gate stays closed until it resolves.
 	StatusExpired = "expired"
 	// StatusUnconfirmed marks a broadcast whose outcome is unknown: gnokey
 	// failed after sending the tx (timeout, dropped connection), so it may or
-	// may not be on-chain. It blocks the gate like pending until it expires.
+	// may not be on-chain. It blocks the gate like pending, and keeps
+	// blocking once expired.
 	StatusUnconfirmed = "unconfirmed"
 	// StatusDryRun tags a proposal record produced by a dry_run chain instead
 	// of a real broadcast attempt, so store queries and operators can tell a
@@ -119,7 +120,7 @@ type Store interface {
 	// TrackedProposals returns the proposals the vote worker still follows:
 	// pending, unconfirmed, and expired (still open on-chain).
 	TrackedProposals(ctx context.Context, chain string) ([]ProposalRecord, error)
-	// RejectionCount counts the validator's rejected and expired proposals.
+	// RejectionCount counts the validator's rejected proposals.
 	RejectionCount(ctx context.Context, chain, address string) (int, error)
 
 	ListProposals(ctx context.Context, limit int) ([]ProposalRecord, error)

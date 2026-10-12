@@ -216,8 +216,8 @@ func TestNoopStore(t *testing.T) {
 }
 
 // TestTrackedProposalsAndRejectionCount: an expired proposal is still open
-// on-chain, so the vote worker keeps polling it, and the gate counts it like a
-// rejection. An unconfirmed broadcast is tracked until it resolves or expires.
+// on-chain, so the vote worker keeps polling it; it is not a rejection. An
+// unconfirmed broadcast is tracked until it resolves or expires.
 func TestTrackedProposalsAndRejectionCount(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
@@ -254,8 +254,8 @@ func TestTrackedProposalsAndRejectionCount(t *testing.T) {
 	if strings.Join(ids, ",") != "1,2,5" {
 		t.Fatalf("TrackedProposals ids = %v, want [1 2 5]", ids)
 	}
-	if n, err := st.RejectionCount(ctx, "local", "g1bad"); err != nil || n != 2 {
-		t.Fatalf("RejectionCount = %d, %v; want 2 (rejected + expired)", n, err)
+	if n, err := st.RejectionCount(ctx, "local", "g1bad"); err != nil || n != 1 {
+		t.Fatalf("RejectionCount = %d, %v; want 1 (expired is not a rejection)", n, err)
 	}
 }
 

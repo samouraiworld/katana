@@ -279,8 +279,8 @@ func (s *SQLite) TrackedProposals(ctx context.Context, chain string) ([]Proposal
 func (s *SQLite) RejectionCount(ctx context.Context, chain, address string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM proposals WHERE chain = ? AND address = ? AND status IN (?, ?)`,
-		chain, address, StatusRejected, StatusExpired).Scan(&n)
+		`SELECT COUNT(*) FROM proposals WHERE chain = ? AND address = ? AND status = ?`,
+		chain, address, StatusRejected).Scan(&n)
 	return n, err
 }
 

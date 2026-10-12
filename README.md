@@ -62,8 +62,10 @@ on-chain. So the vote worker also:
   override; retried at most hourly). An executor error marks the proposal denied
   instead of leaving it open;
 - marks a proposal still open after `vote_tracking.pending_timeout` (default
-  `336h` = 14d) as **expired**: notified once, gated like a rejection, and still
-  watched — a late on-chain outcome updates it.
+  `336h` = 14d) as **expired** and notifies once (stalled vote). GovDAO
+  proposals cannot be withdrawn, so it stays open and votable: the validator
+  stays gated, and katana keeps watching and executing it — a late on-chain
+  outcome updates it. katana never has two live proposals for one validator.
 
 The status is read only from the realm's marker lines
 (`**PROPOSAL HAS BEEN ACCEPTED**`, `**PROPOSAL HAS BEEN DENIED**`,
@@ -76,7 +78,8 @@ the `ProposalCreated` event, or later from the tx itself (RPC `/tx`) when gnokey
 printed none. When gnokey fails *after* sending the tx (RPC timeout, dropped
 connection), the proposal may or may not be on-chain: katana records it as
 **unconfirmed**, sends an alert, and blocks new proposals for that validator
-until it expires. Other gnokey errors (simulation, CheckTx, DeliverTx) are plain
+until it is resolved (an expired unconfirmed row keeps blocking: gnokey prints
+no tx hash in that case, so an operator has to check). Other gnokey errors (simulation, CheckTx, DeliverTx) are plain
 failures.
 
 ## Score-driven actions
@@ -131,15 +134,14 @@ Validators under `exceptions:` are **never** proposed, matched by address
 Because katana runs continuously, a per-`(chain, validator)` state machine
 (backed by SQLite) prevents duplicate proposals:
 
-- a **pending** or **unconfirmed** proposal blocks new ones until it resolves
-  or expires;
+- a **pending**, **expired** or **unconfirmed** proposal blocks new ones until
+  it is decided on-chain;
 - an **accepted eject** is terminal (the validator is gone); an **accepted
   `lower_vp`/`raise_vp`** is not terminal — once `proposal.cooldown` elapses, a
   new action (eject / lower_vp / raise_vp) may be proposed if the validator's
   score still qualifies;
-- **rejected** or **expired** suppresses re-proposal for
-  `proposal.rejected_backoff`, and stops after `proposal.max_rejections`
-  (default `2`, shared across action types, expiries included);
+- **rejected** suppresses re-proposal for `proposal.rejected_backoff`, and stops
+  after `proposal.max_rejections` (default `2`, shared across action types);
 - `proposal.cooldown` (default `720h` = 30d) is a floor between any two proposals
   for the same validator.
 

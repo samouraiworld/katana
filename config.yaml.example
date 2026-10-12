@@ -135,8 +135,9 @@ vote_tracking:
   execute_proposals: true             # katana calls ExecuteOrRejectProposal on its own proposals
                                       # once a supermajority is reached. Overridable per chain.
   pending_timeout: 336h               # 14d. A proposal still open after this is marked
-                                      # expired: notified once, gated like a rejection, and
-                                      # still watched for a late outcome. Overridable per chain.
+                                      # expired and notified once (stalled vote). It stays
+                                      # open on-chain, so the validator stays gated and katana
+                                      # keeps watching/executing it. Overridable per chain.
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 # Sent only after a successful broadcast (and accepted/rejected outcomes).

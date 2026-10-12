@@ -298,6 +298,11 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) {
 func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord) {
 	nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
 
+	if p.TxHash == "" {
+		// Rows recorded before the tx_hash column existed: the hash is in
+		// the stored gnokey output.
+		p.TxHash = proposal.ParseTxOutput(p.Output).TxHash
+	}
 	if p.OnchainID == "" && p.TxHash != "" {
 		if id, err := gd.TxProposalID(ctx, p.TxHash); err != nil {
 			d.logger.Printf("[%s][vote] proposal row %d: resolving id from tx %s: %v", rt.Key, p.ID, p.TxHash, err)
@@ -326,12 +331,37 @@ func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govda
 		d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
 	case govdao.Pending:
 		if rt.ExecuteProposals && prop.Executable() {
-			d.execute(ctx, rt, p, prop)
+			switch d.execute(ctx, rt, p, prop) {
+			case proposal.Committed:
+				// The call decided the proposal: record the outcome now
+				// rather than expiring it first.
+				d.recordAfterExecute(ctx, rt, gd, p, nt)
+				return
+			case proposal.Ambiguous:
+				// The outcome is on its way; let the next tick read it.
+				return
+			}
 		}
 		d.expireIfDue(ctx, rt, p, nt)
 	default:
 		// Unknown is inert: never terminal, never expired, never notified.
 		d.logger.Printf("[%s][vote] proposal %s: unrecognised render, keeping it %s", rt.Key, p.OnchainID, p.Status)
+	}
+}
+
+// recordAfterExecute reads the render right after a committed execute call
+// and records the outcome it shows.
+func (d *Daemon) recordAfterExecute(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord, nt notifyTarget) {
+	prop, err := gd.Proposal(ctx, p.OnchainID)
+	if err != nil {
+		d.logger.Printf("[%s][vote] status query after execute failed for proposal %s: %v", rt.Key, p.OnchainID, err)
+		return
+	}
+	switch prop.Status {
+	case govdao.Accepted:
+		d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
+	case govdao.Rejected:
+		d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
 	}
 }
 
@@ -365,24 +395,26 @@ func (d *Daemon) expireIfDue(ctx context.Context, rt config.Runtime, p store.Pro
 }
 
 // execute calls ExecuteOrRejectProposal on a proposal that reached a
-// supermajority, at most once per executeRetry. The outcome is read from the
-// render on a later tick, like any other vote.
-func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.ProposalRecord, prop govdao.Proposal) {
+// supermajority, at most once per executeRetry, and returns the call's
+// outcome (Failed when no call was made).
+func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.ProposalRecord, prop govdao.Proposal) proposal.Outcome {
 	d.execMu.Lock()
 	if last, ok := d.executed[p.ID]; ok && d.now().Sub(last) < executeRetry {
 		d.execMu.Unlock()
-		return
+		return proposal.Failed
 	}
 	d.executed[p.ID] = d.now()
 	d.execMu.Unlock()
 
 	b := proposal.ExecuteCall(rt.ChainID, rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm, p.OnchainID)
 	out, err := d.signAndBroadcast(ctx, b, rt.Gnokey)
-	if outcome := proposal.Classify(out, err); outcome != proposal.Committed {
+	outcome := proposal.Classify(out, err)
+	if outcome != proposal.Committed {
 		d.logger.Printf("[%s][vote] EXECUTE %s for proposal %s (yes=%.2f%% no=%.2f%%): %v\n%s", rt.Key, outcome, p.OnchainID, prop.YesPercent, prop.NoPercent, err, out)
-		return
+		return outcome
 	}
 	d.logger.Printf("[%s][vote] EXECUTE ok for proposal %s (yes=%.2f%% no=%.2f%%)", rt.Key, p.OnchainID, prop.YesPercent, prop.NoPercent)
+	return outcome
 }
 
 // observePayload carries the extra fields a would_eject (observe) notification

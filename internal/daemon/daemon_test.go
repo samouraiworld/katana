@@ -138,12 +138,18 @@ type broadcastRecorder struct {
 	built []proposal.Built
 	out   string
 	err   error
+	// onCall, when set, runs on every broadcast (e.g. to make the chain
+	// reflect an executed proposal).
+	onCall func(proposal.Built)
 }
 
 func (b *broadcastRecorder) broadcast(_ context.Context, built proposal.Built, _ config.Gnokey) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.built = append(b.built, built)
+	if b.onCall != nil {
+		b.onCall(built)
+	}
 	if b.out == "" && b.err == nil {
 		return gnokeyOK("7"), nil
 	}

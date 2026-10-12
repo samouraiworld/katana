@@ -317,14 +317,16 @@ actions) if the validator's score still qualifies — see FR-7.2.
   override), katana calls `ExecuteOrRejectProposal(pid)` with its own key once
   the render shows a supermajority, at most once per hour per proposal.
 - **FR-VT.7** Proposals never expire on-chain. A proposal still open after
-  `pending_timeout` (default 14 d, per-chain override) becomes `expired`:
-  notified once, gated like a rejection (backoff, counts toward
-  `max_rejections`), and still polled so a late outcome is recorded.
-  *(decisions confirmed 2026-10-12.)*
+  `pending_timeout` (default 14 d, per-chain override) becomes `expired` and is
+  notified once (stalled vote). Proposals cannot be withdrawn, so it stays
+  votable: the gate stays closed for that validator, and katana keeps polling
+  and executing it so a late outcome is recorded. katana never holds two live
+  proposals for one validator. *(decisions confirmed 2026-10-12.)*
 - **FR-VT.8** A gnokey failure after the tx was sent (RPC timeout, dropped
   connection) leaves the outcome unknown: the record is `unconfirmed`, an alert
-  is sent, and the gate blocks the validator until the proposal resolves or
-  expires.
+  is sent, and the gate blocks the validator until the proposal is resolved;
+  expiry does not reopen it. gnokey prints no tx hash in that case, so
+  reconciliation needs the tx-indexer (signer + height) or an operator.
 
 ### 6.9 Notifications `[TO BUILD]`
 

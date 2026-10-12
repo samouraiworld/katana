@@ -201,6 +201,52 @@ func TestVoteCycleExpiresAndKeepsWatching(t *testing.T) {
 	}
 }
 
+// An overdue proposal that katana executes is recorded with its outcome right
+// away, never as expired first (that would notify two contradictory events).
+func TestVoteCycleExecutedOverdueProposalIsNotExpired(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, 15*24*time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+	f.broadcasts.onCall = func(b proposal.Built) {
+		if b.Function == proposal.ExecuteFunc {
+			f.chain.setRender("7", render(t, "accepted"))
+		}
+	}
+
+	f.d.voteCycle(context.Background(), f.runtime(t))
+	if got := lastStatus(t, f).Status; got != store.StatusAccepted {
+		t.Fatalf("status = %q, want accepted\nlogs:\n%s", got, f.logs.String())
+	}
+	notifs := f.notifs.all()
+	if len(notifs) != 1 || strings.Contains(notifs[0], "expired") {
+		t.Fatalf("notifications = %v, want one accepted", notifs)
+	}
+}
+
+// A row recorded before the tx_hash column existed still carries the hash in
+// its stored gnokey output: it is used to resolve the missing id.
+func TestVoteCycleResolvesIDFromStoredOutput(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	id, err := f.st.RecordProposal(context.Background(), store.ProposalRecord{
+		CreatedAt: f.d.now().Add(-time.Hour), Chain: "test", ChainID: "dev",
+		Address: "g1bad", Moniker: "bad", Action: config.ActionEject,
+		Success: true, Status: store.StatusPending,
+		Output: "\nOK!\nHEIGHT:     42\nEVENTS:     []\nTX HASH:    q2Vh\n",
+	})
+	if err != nil || id == 0 {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	f.chain.txs = map[string]string{
+		"ab6561": `[{"type":"ProposalCreated","attrs":[{"key":"id","value":"9"}],"pkg_path":"gno.land/r/gov/dao"}]`,
+	}
+	f.chain.setRender("9", render(t, "accepted"))
+
+	f.d.voteCycle(context.Background(), f.runtime(t))
+	if last := lastStatus(t, f); last.OnchainID != "9" || last.Status != store.StatusAccepted {
+		t.Fatalf("onchain id = %q status = %q, want 9 accepted", last.OnchainID, last.Status)
+	}
+}
+
 // An unreadable render past the timeout keeps the row pending: unknown is
 // inert, never terminal.
 func TestVoteCycleUnknownNeverExpires(t *testing.T) {
