@@ -635,6 +635,38 @@ func TestEvalCycleRecordsInterruptedBroadcast(t *testing.T) {
 	}
 }
 
+// blockingOutcomeStore never completes RecordBroadcastOutcome before its ctx
+// ends, like a wedged database.
+type blockingOutcomeStore struct{ store.Store }
+
+func (blockingOutcomeStore) RecordBroadcastOutcome(ctx context.Context, _ int64, _ store.ProposalRecord) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Recording an interrupted broadcast survives the shutdown, but is bounded:
+// a store that never answers cannot hold the worker (and shutdown) forever.
+func TestInterruptedBroadcastRecordingIsBounded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newFixture(t, "dev", nil)
+	f.d.st = blockingOutcomeStore{f.st}
+	f.d.outcomeTimeout = 50 * time.Millisecond
+	f.broadcasts.onCall = func(proposal.Built) { cancel() }
+	f.broadcasts.set("", fmt.Errorf("gnokey interrupted: %w", context.Canceled))
+
+	done := make(chan struct{})
+	go func() {
+		f.d.evalCycle(ctx, f.runtime(t))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evalCycle still blocked on the store after shutdown")
+	}
+}
+
 // The last allowed execute attempt being interrupted by a shutdown still
 // raises the give-up alert.
 func TestVoteCycleAlertsOnInterruptedLastExecute(t *testing.T) {
