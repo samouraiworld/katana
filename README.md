@@ -44,7 +44,8 @@ independent tickers:
 5. Confirm the target is in the live consensus valset.
 6. Re-assert the chain id, then sign & broadcast via `gnokey`, capture the
    on-chain proposal id, and send a notification — or, on a `dry_run: true`
-   chain, log + notify the would-be proposal without broadcasting (see
+   chain or for an action in `mode: manual`, log + notify the would-be
+   proposal without broadcasting (see
    [Rehearsal / dry-run](#rehearsal--dry-run)).
 
 **Vote worker** (every `vote_poll_interval`): polls the GovDAO page of each
@@ -226,9 +227,16 @@ It also alerts when a proposal needs an operator:
 - **expired** — still open after `vote_tracking.pending_timeout` (sent once;
   katana keeps watching it);
 - **execution failed** — the proposal reached a supermajority but 3
-  `ExecuteOrRejectProposal` calls failed, so katana stopped retrying.
+  `ExecuteOrRejectProposal` calls failed, so katana stopped retrying;
+- **guardrail** — more of the valset than `safety.max_eligible_share` qualifies
+  for eject/lower_vp (or is missing from the gnomonitoring report), so katana
+  proposes nothing on the chain (sent once per episode; see
+  [Safety guardrails](#safety-guardrails)).
 
-Additionally, on `dry_run: true` chains, katana sends a notification with the would-be proposal script (eject or VP-change) and ready-to-run `gnokey` command — see [Rehearsal / dry-run](#rehearsal--dry-run).
+Additionally, for every proposal katana does not broadcast — on `dry_run: true`
+chains, and for actions in `mode: manual` on armed chains — katana sends a
+notification with the would-be proposal script (eject or VP-change) and
+ready-to-run `gnokey` command — see [Rehearsal / dry-run](#rehearsal--dry-run).
 
 Notifications are color-coded by action: green for `raise_vp`, orange for `lower_vp`, red for `eject` (Discord embed color / Slack attachment color; Telegram uses a 🟢/🟠/🔴 emoji prefix since it has no native color concept). The title states the lifecycle stage (submitted/accepted/rejected/expired/unconfirmed/execution failed/dry-run).
 
@@ -240,7 +248,7 @@ funds) and other errors are only logged.
 - Go 1.23+
 - A reachable gnomonitoring backend.
 - The `gnokey` binary and a keybase (or mnemonic) holding the proposing key —
-  katana always signs and broadcasts.
+  `gnokey.key_name` is always required (even in `dry_run`).
 
 ## Build & run
 

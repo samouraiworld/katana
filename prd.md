@@ -56,7 +56,7 @@ records it, and sends a notification to Discord / Telegram / Slack.
 
 - **Validator-set operators / GovDAO members** who want under-performing
   validators surfaced and proposed for ejection automatically, fully automated
-  end-to-end (katana always broadcasts on-chain).
+  end-to-end once armed (katana is unarmed by default, FR-6.6).
 
 ## 5. System overview
 
@@ -190,10 +190,12 @@ submitted). Each loops on its own ticker.
   (case-insensitive) or moniker. Global list ∪ per-chain list.
 
 ### 6.6 Proposal generation & submission `[EXISTS]`
-- **FR-6.1** katana **always broadcasts**: build the proposal, then sign &
-  submit it on-chain via gnokey. There is no dry-run mode and no artifact-only
-  output — every eligible, non-suppressed validator results in a real
-  broadcast attempt.
+- **FR-6.1** katana **broadcasts armed actions**: build the proposal, then
+  sign & submit it on-chain via gnokey — only on a chain with
+  `dry_run: false` (the default is `true`, FR-6.6) and for an action in
+  `mode: auto` (per-action mode, FR-6.6), within the safety guardrails
+  (FR-6.7). Every other eligible, non-suppressed validator gets the dry-run
+  hand-off (FR-6.6) instead; there is no artifact-only output.
 - **FR-6.3** Before proposing, confirm the target is in the live consensus valset
   (skippable with `--skip-valset-check`).
 - **FR-6.4** Realm path / function / args are configurable (per chain).
@@ -205,7 +207,8 @@ submitted). Each loops on its own ticker.
   - `gnokey.password` — unlocks the key for signing. **Secret**: overridable via
     `KATANA_GNOKEY_PASSWORD`; strongly recommended to keep it out of the file in
     production.
-  - The wallet is used on every cycle: katana has no other run path.
+  - `gnokey.key_name` is required on every chain, even in `dry_run`
+    (FR-6.6).
 - **FR-6.6** Arming is explicit. `dry_run` (default `true`, global with
   per-chain override) gates every broadcast on the chain; each action also
   has a `mode` (`auto` | `manual` | `off`, defaults eject `manual`, lower_vp
@@ -364,7 +367,8 @@ actions) if the validator's score still qualifies — see FR-7.2.
 
 Notifications follow the on-chain lifecycle, all in English (decision D3): three
 outcome events (FR-8.1 to FR-8.3) plus three operator alerts (FR-8.6 to
-FR-8.8), and the dry-run hand-off (FR-6.6). A broadcast that failed before
+FR-8.8), the `guardrail` alert (FR-6.7), and the dry-run hand-off (FR-6.6).
+A broadcast that failed before
 sending, and any other error, is only logged.
 
 - **FR-8.1** *Proposal sent* — after a **successful broadcast** of a proposal
@@ -699,8 +703,9 @@ supermajority alone). This is where katana is exercised as it will run in prod.
   for it under `chain=local`.
 - **PP-3 katana config.** A `local` chain: `rpc_endpoint: http://localhost:26658`,
   `chain_id: dev`, `gnomonitoring_chain: local`, `gnoweb_url: http://localhost:8890`,
-  wallet = the `dev` gnokey account (katana always broadcasts, so no run-mode
-  setting is needed), conditions tuned so `validator4` becomes eligible quickly.
+  wallet = the `dev` gnokey account, armed (`dry_run: false`, `eject.mode:
+  auto`, `safety.min_valset_size: 1` for the 4-validator devnet), conditions
+  tuned so `validator4` becomes eligible quickly.
 - **PP-4 Assert the full flow.** katana detects `validator4` eligible → broadcasts
   the ejection proposal → captures the `ProposalCreated` id → the vote-watcher
   follows it. Then, driving the `dev` GovDAO vote:
@@ -760,6 +765,9 @@ supermajority alone). This is where katana is exercised as it will run in prod.
 
 - **D2 — Notification trigger.** ✅ Notify **only** after a proposal is
   successfully broadcast on-chain (no dry-run, no error notifications). (FR-8.1)
+  *Amended: notifications also cover the dry-run/manual hand-off (FR-6.6),
+  the operator alerts (FR-8.6 to FR-8.8) and the `guardrail` alert (FR-6.7);
+  plain errors are still only logged.*
 - **D3 — Message content.** ✅ English, includes moniker + address + chain, e.g.
   *"A proposal for validator `<moniker>` (`<address>`) has been sent to remove it
   from the valset."* Optional gnoweb link. (FR-8.3)
@@ -783,6 +791,11 @@ supermajority alone). This is where katana is exercised as it will run in prod.
   reintroduced, covering both onboarding rehearsal and a standing
   manual-approval mode (see README "Rehearsal / dry-run"); broadcast remains
   the default.*
+  *Amended again: katana is now unarmed by default — `dry_run` defaults to
+  `true` (FR-6.6) — and each action has its own `mode` (`auto` | `manual` |
+  `off`, eject defaulting to `manual`; FR-6.6), so broadcasting takes an
+  explicit `dry_run: false` and an action in `mode: auto`. The safety
+  guardrails (FR-6.7) bound what an armed chain broadcasts.*
 - **D10 — Per-chain wallet.** ✅ Global `gnokey` + optional per-chain override.
 - **D15 — Score as the sole eligibility signal.** ✅ gnomonitoring's computed
   score (not raw missed-blocks/alert counts, and not its sub-metrics) is the
@@ -858,8 +871,9 @@ All decisions are now settled; the PRD is ready to implement.
   accepted / rejected, driving whether a new proposal may be created.
 - **Vote watcher** — the worker that polls GovDAO for the outcome of katana's
   broadcast proposals.
-- **Broadcast** — sign and submit the proposal on-chain via gnokey; katana's
-  only mode of operation (no dry-run/preview mode exists).
+- **Broadcast** — sign and submit the proposal on-chain via gnokey; only on
+  an armed chain (`dry_run: false`) for an action in `mode: auto` (FR-6.6),
+  otherwise katana hands the would-be proposal off (dry-run).
 - **Keybase provisioning** — importing the signing key derived from a
   configured mnemonic into the gnokey keybase at startup (`internal/keybase`);
   idempotent, and a no-op when the keybase is already pre-provisioned.
