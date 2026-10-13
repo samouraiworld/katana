@@ -88,14 +88,28 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		d.logger.Printf("[%s][eval] recording evaluations: %v", rt.Key, err)
 	}
 
+	// A non-excepted validator in the valset but missing from the report
+	// cannot be judged: it counts as downward, so a partial report cannot
+	// dilute the guardrail below.
+	reported := make(map[string]bool, len(reports))
+	for _, report := range reports {
+		reported[strings.ToLower(report.Addr)] = true
+	}
+	missing := 0
+	for _, v := range valset {
+		if !reported[strings.ToLower(v.Address)] && !d.cfg.IsException(rt.Key, v.Address, "") {
+			missing++
+		}
+	}
+
 	// Mass-eligibility guardrail: many validators failing at once points at
 	// bad metrics (a gnomonitoring outage, a chain-wide incident) rather than
 	// at many bad operators. Propose nothing and alert once per episode.
-	if float64(downward)*100 > rt.Safety.MaxEligibleShare*float64(len(valset)) {
-		d.logger.Printf("[%s][eval] CRITICAL: %d of %d validators qualify for eject/lower_vp, above safety.max_eligible_share=%g%% — proposing nothing this cycle",
-			rt.Key, downward, len(valset), rt.Safety.MaxEligibleShare)
+	if flagged := downward + missing; float64(flagged)*100 > rt.Safety.MaxEligibleShare*float64(len(valset)) {
+		d.logger.Printf("[%s][eval] CRITICAL: %d of %d validators qualify for eject/lower_vp or are missing from the report (%d missing), above safety.max_eligible_share=%g%% — proposing nothing this cycle",
+			rt.Key, flagged, len(valset), missing, rt.Safety.MaxEligibleShare)
 		if d.setGuardTripped(rt.Key, true) {
-			d.dispatchGuardrail(ctx, rt, downward, len(valset))
+			d.dispatchGuardrail(ctx, rt, flagged, len(valset))
 		}
 		return
 	}
@@ -624,7 +638,8 @@ func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Run
 }
 
 // dispatchGuardrail alerts that the chain's mass-eligibility guardrail
-// tripped: eligible of valsetSize validators qualify for eject/lower_vp.
+// tripped: eligible of valsetSize validators qualify for eject/lower_vp or
+// are missing from the gnomonitoring report.
 func (d *Daemon) dispatchGuardrail(ctx context.Context, rt config.Runtime, eligible, valsetSize int) {
 	if !d.notifier.Enabled() {
 		return

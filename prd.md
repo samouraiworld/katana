@@ -232,7 +232,10 @@ submitted). Each loops on its own ticker.
   - `max_eligible_share` (default 25 %): when more of the valset than this
     qualifies for eject/lower_vp in one cycle, katana proposes nothing on the
     chain that cycle and sends one `guardrail` notification per episode —
-    mass failure points at bad metrics, not bad validators.
+    mass failure points at bad metrics, not bad validators. Non-excepted
+    validators in the valset but missing from the gnomonitoring report count
+    as qualifying (they cannot be judged), so a partial report cannot dilute
+    the share.
   - `min_valset_size` (default 4): no ejection that would leave fewer
     validators, counting open ejections of validators still in the valset
     as already gone: pending/unconfirmed/expired ones, and manual hand-offs

@@ -38,7 +38,8 @@ safety:
   max_proposals_per_day: 3            # max proposals per chain over a rolling 24h
   max_eligible_share: 25              # % of the valset; if more validators than this are
                                       # eligible for eject/lower_vp at once, the cycle is
-                                      # aborted (likely a monitoring outage, not bad validators)
+                                      # aborted (likely a monitoring outage, not bad validators);
+                                      # validators missing from the report count as eligible
   min_valset_size: 4                  # never eject if the valset would drop below this
 
 # ── gnomonitoring REST API ────────────────────────────────────────────────────

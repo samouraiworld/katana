@@ -42,7 +42,8 @@ const (
 	// nothing was signed or broadcast.
 	EventWouldEject Event = "would_eject"
 	// EventGuardrail: too large a share of the valset qualifies for
-	// eject/lower_vp at once (safety.max_eligible_share). katana proposes
+	// eject/lower_vp at once, or is missing from the gnomonitoring report
+	// (safety.max_eligible_share). katana proposes
 	// nothing on the chain until the share drops. Sent once per episode.
 	EventGuardrail Event = "guardrail"
 )
@@ -69,8 +70,9 @@ type Info struct {
 	ProposalCode     string
 	ProposalFilename string
 	GnokeyCommand    string
-	// Guardrail fields: how many validators qualified for eject/lower_vp,
-	// out of how large a valset, against which percentage limit.
+	// Guardrail fields: how many validators qualified for eject/lower_vp or
+	// were missing from the report, out of how large a valset, against which
+	// percentage limit.
 	EligibleCount    int
 	ValsetSize       int
 	MaxEligibleShare float64
@@ -118,7 +120,7 @@ func Message(event Event, in Info) string {
 		}
 		return msg
 	case EventGuardrail:
-		return fmt.Sprintf("Mass-action guardrail tripped on %s: %d of %d validators qualify for eject or lower_vp, more than safety.max_eligible_share (%g%%) of the valset. This usually means bad metrics rather than bad validators: katana proposes nothing on this chain until the share drops. Check gnomonitoring before relaxing the limit.",
+		return fmt.Sprintf("Mass-action guardrail tripped on %s: %d of %d validators qualify for eject or lower_vp (or are missing from the gnomonitoring report), more than safety.max_eligible_share (%g%%) of the valset. This usually means bad metrics rather than bad validators: katana proposes nothing on this chain until the share drops. Check gnomonitoring before relaxing the limit.",
 			in.Chain, in.EligibleCount, in.ValsetSize, in.MaxEligibleShare)
 	default:
 		msg = fmt.Sprintf("katana event %q for validator %s (%s) on %s.", event, in.display(), in.Address, in.Chain)

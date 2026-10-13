@@ -397,3 +397,56 @@ func TestMinValsetSizeIgnoresStaleHandOffs(t *testing.T) {
 		t.Fatalf("broadcasts = %d, want 1 (stale hand-off is not open)\nlogs:\n%s", got, f.logs.String())
 	}
 }
+
+// Validators in the valset but missing from the gnomonitoring report cannot
+// be judged: the mass-eligibility guardrail counts them against arming, so a
+// partial report cannot dilute the share.
+func TestMassEligibilityCountsValidatorsMissingFromReport(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		missing    []string
+		exceptions []string
+		upper      bool // valset spells the healthy addresses in upper case
+		wantTrip   bool
+	}{
+		// 1 eligible + 2 missing = 3 of 10 > 25%.
+		"partial report trips": {missing: []string{"g1gone0", "g1gone1"}, wantTrip: true},
+		// An excepted validator is never proposed: 1 + 1 = 2 of 10.
+		"excepted missing does not count": {missing: []string{"g1gone0", "g1gone1"}, exceptions: []string{"g1gone1"}},
+		// A full report: 1 of 10, whatever the address case.
+		"full report": {upper: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			healthy := 9 - len(tc.missing)
+			f := newValsetFixture(t, 1, healthy, func(c *config.Config) { c.Exceptions = tc.exceptions })
+			if tc.upper {
+				for i := range f.chain.valset {
+					if strings.HasPrefix(f.chain.valset[i], "g1ok") {
+						f.chain.valset[i] = strings.ToUpper(f.chain.valset[i])
+					}
+				}
+			}
+			f.chain.valset = append(f.chain.valset, tc.missing...)
+
+			f.d.evalCycle(ctx, strict(f.runtime(t)))
+			want := 1
+			if tc.wantTrip {
+				want = 0
+			}
+			if got := f.broadcasts.count(); got != want {
+				t.Fatalf("broadcasts = %d, want %d\nlogs:\n%s", got, want, f.logs.String())
+			}
+			if tripped := strings.Contains(f.logs.String(), "max_eligible_share"); tripped != tc.wantTrip {
+				t.Fatalf("guardrail tripped = %v, want %v\nlogs:\n%s", tripped, tc.wantTrip, f.logs.String())
+			}
+			if tc.wantTrip {
+				if props, _ := f.st.ListProposals(ctx, 10); len(props) != 0 {
+					t.Fatalf("proposals = %+v, want none", props)
+				}
+				if !strings.Contains(f.notifs.all()[0], "3 of 10") {
+					t.Fatalf("alert should count the missing validators: %s", f.notifs.all()[0])
+				}
+			}
+		})
+	}
+}
