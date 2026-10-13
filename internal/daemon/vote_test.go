@@ -573,6 +573,31 @@ func TestBroadcastRecordsReconcileData(t *testing.T) {
 	}
 }
 
+// A call-mode broadcast records the MsgCall fingerprint, not a script hash.
+func TestBroadcastRecordsCallPayloadHash(t *testing.T) {
+	f := newFixture(t, "dev", func(c *config.Config) {
+		c.Proposal.Submit = "call"
+		for _, a := range []string{config.ActionLowerVP, config.ActionRaiseVP} {
+			ac := c.Proposal.Actions[a]
+			ac.Mode = config.ModeOff
+			c.Proposal.Actions[a] = ac
+		}
+		ej := c.Proposal.Actions[config.ActionEject]
+		ej.RealmPkgPath, ej.Function, ej.Args = "gno.land/r/test/valset", "Eject", []string{"{operator_address}", "{title}"}
+		c.Proposal.Actions[config.ActionEject] = ej
+	})
+	f.d.evalCycle(context.Background(), f.runtime(t))
+
+	calls := f.broadcasts.calls()
+	if len(calls) != 1 || calls[0].Submit != "call" {
+		t.Fatalf("broadcasts = %+v, want one call\nlogs:\n%s", calls, f.logs.String())
+	}
+	b := calls[0]
+	if got, want := lastStatus(t, f).PayloadHash, txindexer.CallPayloadHash(b.RealmPath, b.Function, b.Args); got != want || got == txindexer.RunPayloadHash(b.Script) {
+		t.Fatalf("PayloadHash = %q, want the call hash %q", got, want)
+	}
+}
+
 // A shutdown signal landing while gnokey runs interrupts it after the tx may
 // have been sent: the outcome must still be recorded and alerted, or the
 // restarted daemon would re-propose with no record of the first attempt.
