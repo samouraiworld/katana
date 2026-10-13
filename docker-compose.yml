@@ -39,8 +39,9 @@ services:
 
     command: ["--config", "/app/config.yaml"]
 
+    # 127.0.0.1, not localhost: busybox wget may resolve localhost to ::1 only.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8990/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8990/health"]
       interval: 30s
       timeout: 5s
       retries: 3
