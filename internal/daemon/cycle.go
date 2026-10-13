@@ -503,8 +503,9 @@ func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) error {
 // trackProposal advances one tracked proposal. It returns an operational
 // error for /health: the GovDAO status or a configured tx-indexer could not be
 // read, /tx could not be queried, or lifecycle state could not be persisted.
-// A /tx lookup that finds no tx, or a committed tx without a ProposalCreated
-// event, is not one (an ambiguous broadcast may simply never have landed).
+// An unrecognised render is one too, though the row is left untouched. A /tx
+// lookup that finds no tx, or a committed tx without a ProposalCreated event,
+// is not one (an ambiguous broadcast may simply never have landed).
 func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord) error {
 	nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
 	var opErr error
@@ -561,9 +562,11 @@ func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govda
 		return errors.Join(opErr, d.expireIfDue(ctx, rt, p, nt))
 	default:
 		// Unknown is inert: never terminal, never expired, never notified.
+		// It still fails the cycle: tracking is broken (e.g. a realm
+		// upgrade changed the render) and /health must show it.
 		d.logger.Printf("[%s][vote] proposal %s: unrecognised render, keeping it %s", rt.Key, p.OnchainID, p.Status)
+		return errors.Join(opErr, fmt.Errorf("chain %s: unrecognised render for proposal %s on %s", rt.Key, p.OnchainID, d.cfg.VoteTracking.GovdaoRealm))
 	}
-	return opErr
 }
 
 // reconcile looks a hashless broadcast (gnokey timed out while sending) up on

@@ -333,6 +333,26 @@ func TestVoteCycleUnknownNeverExpires(t *testing.T) {
 	}
 }
 
+// An unrecognised render (e.g. after a realm upgrade) leaves the row as it
+// was and unnotified, but fails the cycle so /health surfaces broken tracking.
+func TestVoteCycleUnknownRenderIsOperationalError(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.cfg.VoteTracking.GovdaoRealm = "gno.land/r/gov/dao/custom"
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "open_forged_marker"))
+
+	err := f.d.voteCycle(context.Background(), f.runtime(t))
+	if err == nil || !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "gno.land/r/gov/dao/custom") {
+		t.Fatalf("voteCycle = %v, want an error naming the proposal and realm", err)
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+	if n := len(f.notifs.all()); n != 0 {
+		t.Fatalf("notifications = %d, want 0", n)
+	}
+}
+
 func TestVoteCycleResolvesMissingIDFromTxHash(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, "dev", nil)

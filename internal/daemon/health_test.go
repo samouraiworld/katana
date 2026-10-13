@@ -208,6 +208,26 @@ func TestVoteCycleOutcome(t *testing.T) {
 	}
 }
 
+// A vote worker that keeps reading unrecognised renders goes stale.
+func TestVoteCycleUnknownRenderMakesWorkerStale(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "dev", nil)
+	rt := f.runtime(t)
+	seed(t, f, "7", "", store.StatusPending, time.Minute)
+	f.chain.setRender("7", "an upgraded realm render katana cannot parse\n")
+
+	c := newClock()
+	h := newHealthRegistry(c.now)
+	h.register("test", "vote", time.Minute)
+	for range 4 {
+		c.advance(time.Minute)
+		h.record("test", "vote", f.d.voteCycle(ctx, rt))
+	}
+	if healthOf(h) {
+		t.Fatalf("vote worker still healthy after 4 unrecognised renders: %+v", workerOf(h))
+	}
+}
+
 // Resolving a missing id from the tx hash: a tx not committed (yet) is an
 // expected state, but an RPC that cannot answer /tx reaches /health.
 func TestVoteCycleTxLookupErrors(t *testing.T) {
