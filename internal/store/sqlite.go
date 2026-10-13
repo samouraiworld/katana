@@ -203,12 +203,17 @@ func (s *SQLite) RecordProposal(ctx context.Context, r ProposalRecord) (int64, e
 
 func (s *SQLite) RecordBroadcastOutcome(ctx context.Context, id int64, o ProposalRecord) error {
 	// Guarded like Reconcile: only the bare intent is completed, so a row the
-	// vote worker reconciled while gnokey ran keeps its tx hash and id.
+	// vote worker reconciled while gnokey ran keeps its tx hash and id. An
+	// intent the vote worker expired meanwhile (short pending_timeout) still
+	// takes the outcome but stays expired, as in Reconcile, so the expiry is
+	// not notified twice; only a definitive failure clears it.
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE proposals SET output = ?, success = ?, status = ?, tx_hash = ?, onchain_proposal_id = ?
-		 WHERE id = ? AND status = ? AND tx_hash = '' AND onchain_proposal_id = ''`,
-		o.Output, boolInt(o.Success), o.Status, o.TxHash, o.OnchainID,
-		id, StatusUnconfirmed)
+		`UPDATE proposals SET output = ?, success = ?,
+		 status = CASE WHEN status = ? AND ? != '' THEN status ELSE ? END,
+		 tx_hash = ?, onchain_proposal_id = ?
+		 WHERE id = ? AND status IN (?, ?) AND tx_hash = '' AND onchain_proposal_id = ''`,
+		o.Output, boolInt(o.Success), StatusExpired, o.Status, o.Status, o.TxHash, o.OnchainID,
+		id, StatusUnconfirmed, StatusExpired)
 	if err != nil {
 		return err
 	}

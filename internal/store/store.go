@@ -126,9 +126,11 @@ type Store interface {
 	RecordProposal(ctx context.Context, r ProposalRecord) (int64, error)
 	// RecordBroadcastOutcome completes a broadcast intent row (recorded as
 	// unconfirmed before gnokey ran) with gnokey's outcome: output, success,
-	// status, tx hash and GovDAO id. A missing row is an error; a row that is
-	// no longer the bare intent (reconciled meanwhile) is left as it is and
-	// returns ErrBroadcastSuperseded.
+	// status, tx hash and GovDAO id. An intent expired meanwhile still takes
+	// the outcome but stays expired (unless the broadcast definitively
+	// failed). A missing row is an error; a row that is no longer the bare
+	// intent (reconciled meanwhile) is left as it is and returns
+	// ErrBroadcastSuperseded.
 	RecordBroadcastOutcome(ctx context.Context, id int64, outcome ProposalRecord) error
 	// SetOnchainID records a GovDAO id resolved after the broadcast (from the
 	// tx's events when gnokey's own output did not carry it).

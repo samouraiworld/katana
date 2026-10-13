@@ -525,6 +525,51 @@ func TestRecordBroadcastOutcomeAfterReconcile(t *testing.T) {
 	}
 }
 
+// The vote worker can expire the intent while gnokey still runs (a short
+// pending_timeout): the outcome still lands, and the row stays expired so
+// the expiry is not notified twice.
+func TestRecordBroadcastOutcomeAfterExpiry(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	intent := func() int64 {
+		t.Helper()
+		id, err := st.RecordProposal(ctx, ProposalRecord{
+			CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+			Status: StatusUnconfirmed,
+		})
+		if err != nil {
+			t.Fatalf("RecordProposal: %v", err)
+		}
+		if err := st.UpdateStatus(ctx, id, StatusExpired, time.Now()); err != nil {
+			t.Fatalf("UpdateStatus: %v", err)
+		}
+		return id
+	}
+
+	id := intent()
+	if err := st.RecordBroadcastOutcome(ctx, id, ProposalRecord{
+		Output: "OK!", Success: true, Status: StatusPending, TxHash: "h=", OnchainID: "4",
+	}); err != nil {
+		t.Fatalf("RecordBroadcastOutcome: %v", err)
+	}
+	last, err := st.LastProposal(ctx, "local", "g1bad")
+	if err != nil || last == nil {
+		t.Fatalf("LastProposal: %+v, %v", last, err)
+	}
+	if last.ID != id || last.Status != StatusExpired || last.TxHash != "h=" || last.OnchainID != "4" || !last.Success || last.Output != "OK!" {
+		t.Fatalf("row = %+v, want expired with the committed outcome", last)
+	}
+
+	// A definitive failure created nothing on-chain: the row stops gating.
+	id = intent()
+	if err := st.RecordBroadcastOutcome(ctx, id, ProposalRecord{Output: "rejected", Status: ""}); err != nil {
+		t.Fatalf("RecordBroadcastOutcome (failed): %v", err)
+	}
+	if last, err = st.LastProposal(ctx, "local", "g1bad"); err != nil || last == nil || last.ID != id || last.Status != "" {
+		t.Fatalf("row = %+v, %v; want status cleared by the definitive failure", last, err)
+	}
+}
+
 func TestDryRunsSince(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
