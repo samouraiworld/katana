@@ -35,6 +35,9 @@ type Daemon struct {
 	// sign with the same key, and two concurrent txs would race on the
 	// account sequence (the loser fails CheckTx).
 	txMu sync.Mutex
+	// outcomeTimeout bounds recording and notifying a broadcast outcome
+	// once the worker ctx may be cancelled (see detach).
+	outcomeTimeout time.Duration
 
 	execMu   sync.Mutex
 	executed map[int64]*executeState // proposal row id → ExecuteOrRejectProposal attempts
@@ -46,12 +49,13 @@ type Daemon struct {
 // New builds a Daemon from the loaded config and an open store.
 func New(cfg *config.Config, st store.Store, logger *log.Logger) *Daemon {
 	return &Daemon{
-		cfg:      cfg,
-		st:       st,
-		gnomon:   gnomonitoring.New(cfg.Gnomonitoring),
-		notifier: notify.New(cfg.Notifications),
-		logger:   logger,
-		now:      time.Now,
+		cfg:            cfg,
+		st:             st,
+		gnomon:         gnomonitoring.New(cfg.Gnomonitoring),
+		notifier:       notify.New(cfg.Notifications),
+		logger:         logger,
+		now:            time.Now,
+		outcomeTimeout: 30 * time.Second,
 		broadcast: func(ctx context.Context, b proposal.Built, gk config.Gnokey) (string, error) {
 			return b.Broadcast(ctx, gk)
 		},

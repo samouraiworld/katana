@@ -185,7 +185,8 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	// The tx may have landed even if a shutdown interrupted gnokey: record
 	// and notify the outcome regardless of cancellation, or a restart would
 	// re-propose with no trace of this attempt.
-	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := d.detach(ctx)
+	defer cancel()
 	tx := proposal.ParseTxOutput(out)
 	rec.Output = out
 	rec.TxHash = tx.TxHash
@@ -274,6 +275,14 @@ func (d *Daemon) assertChainID(ctx context.Context, gno *gnoland.Client, rt conf
 		return false
 	}
 	return true
+}
+
+// detach returns the context a broadcast outcome is recorded and notified
+// with: it survives the worker's cancellation (the tx may have landed) but is
+// bounded by outcomeTimeout, so a stuck store or webhook cannot hold up
+// shutdown forever.
+func (d *Daemon) detach(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), d.outcomeTimeout)
 }
 
 // executeRetry is the minimum delay between two ExecuteOrRejectProposal
@@ -430,7 +439,8 @@ func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.Proposa
 
 	b := proposal.ExecuteCall(rt.ChainID, rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm, p.OnchainID)
 	out, err := d.signAndBroadcast(ctx, b, rt.Gnokey)
-	ctx = context.WithoutCancel(ctx) // notify even if a shutdown interrupted gnokey
+	ctx, cancel := d.detach(ctx) // notify even if a shutdown interrupted gnokey
+	defer cancel()
 	outcome := proposal.Classify(out, err)
 	if outcome != proposal.Committed {
 		d.logger.Printf("[%s][vote] EXECUTE %s for proposal %s (yes=%.2f%% no=%.2f%%): %v\n%s", rt.Key, outcome, p.OnchainID, prop.YesPercent, prop.NoPercent, err, out)
