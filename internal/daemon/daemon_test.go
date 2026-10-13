@@ -36,9 +36,10 @@ type stubChain struct {
 	powers    map[string]int64  // signing address → voting power (default 1000)
 	operators map[string]string // operator address → signing address
 
-	mu      sync.Mutex
-	renders map[string]string // GovDAO proposal id → realm render
-	txs     map[string]string // hex tx hash → DeliverTx events JSON
+	mu        sync.Mutex
+	badHeight bool              // /status serves an unreadable latest_block_height
+	renders   map[string]string // GovDAO proposal id → realm render
+	txs       map[string]string // hex tx hash → DeliverTx events JSON
 }
 
 func (s *stubChain) setPower(addr string, power int64) {
@@ -63,7 +64,13 @@ func (s *stubChain) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/status":
-			fmt.Fprintf(w, `{"result":{"node_info":{"network":%q},"sync_info":{"latest_block_height":"42"}}}`, s.network)
+			s.mu.Lock()
+			height := "42"
+			if s.badHeight {
+				height = "not-a-height"
+			}
+			s.mu.Unlock()
+			fmt.Fprintf(w, `{"result":{"node_info":{"network":%q},"sync_info":{"latest_block_height":%q}}}`, s.network, height)
 		case "/validators":
 			entries := make([]string, 0, len(s.valset))
 			for _, a := range s.valset {

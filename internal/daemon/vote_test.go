@@ -573,6 +573,23 @@ func TestBroadcastRecordsReconcileData(t *testing.T) {
 	}
 }
 
+// An unreadable chain height only disables reconcile for that row: the
+// broadcast still goes out, recorded with BroadcastHeight 0.
+func TestBroadcastSurvivesUnreadableHeight(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.chain.mu.Lock()
+	f.chain.badHeight = true
+	f.chain.mu.Unlock()
+	f.d.evalCycle(context.Background(), f.runtime(t))
+
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1\nlogs:\n%s", got, f.logs.String())
+	}
+	if got := lastStatus(t, f); got.BroadcastHeight != 0 || got.PayloadHash == "" {
+		t.Fatalf("row BroadcastHeight=%d PayloadHash=%q, want 0 and a payload hash", got.BroadcastHeight, got.PayloadHash)
+	}
+}
+
 // A call-mode broadcast records the MsgCall fingerprint, not a script hash.
 func TestBroadcastRecordsCallPayloadHash(t *testing.T) {
 	f := newFixture(t, "dev", func(c *config.Config) {
