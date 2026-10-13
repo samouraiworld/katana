@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -659,5 +660,35 @@ func TestDryRunRecordCountsTowardCooldown(t *testing.T) {
 	f.d.evalCycle(ctx, f.runtime(t))
 	if got := f.broadcasts.count(); got != 1 {
 		t.Fatalf("broadcasts = %d, want 1 after the cooldown elapses\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// The eval and vote workers share the key's account sequence: gnokey
+// transactions must never overlap.
+func TestSignAndBroadcastSerialises(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	var inFlight, overlaps atomic.Int32
+	f.d.broadcast = func(context.Context, proposal.Built, config.Gnokey) (string, error) {
+		if inFlight.Add(1) > 1 {
+			overlaps.Add(1)
+		}
+		time.Sleep(time.Millisecond)
+		inFlight.Add(-1)
+		return gnokeyOK("7"), nil
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				_, _ = f.d.signAndBroadcast(context.Background(), proposal.Built{}, config.Gnokey{})
+			}
+		}()
+	}
+	wg.Wait()
+	if n := overlaps.Load(); n != 0 {
+		t.Fatalf("overlapping broadcasts = %d, want 0", n)
 	}
 }
