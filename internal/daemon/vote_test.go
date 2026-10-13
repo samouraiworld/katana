@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -525,6 +526,16 @@ func TestVoteReconcileUsesConfiguredRealm(t *testing.T) {
 	}
 	if !strings.Contains(string(reqBody), `"realm":"gno.land/r/gov/dao/custom"`) {
 		t.Fatalf("indexer request does not use the configured realm: %s", reqBody)
+	}
+	// The tx lands after the recorded height: the query asks for heights
+	// >= BroadcastHeight+1, sent as "afterHeight" (strictly greater) = 10.
+	var req struct {
+		Variables struct {
+			AfterHeight int64 `json:"afterHeight"`
+		} `json:"variables"`
+	}
+	if err := json.Unmarshal(reqBody, &req); err != nil || req.Variables.AfterHeight != 10 {
+		t.Fatalf("afterHeight = %d (%v), want 10 (min height BroadcastHeight+1 = 11)", req.Variables.AfterHeight, err)
 	}
 }
 
