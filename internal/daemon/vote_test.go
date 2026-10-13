@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -360,5 +361,53 @@ func TestVoteCycleGivesUpOnFailingExecute(t *testing.T) {
 	}
 	if got := lastStatus(t, f).Status; got != store.StatusPending {
 		t.Fatalf("status = %q, want pending (the proposal is still open)", got)
+	}
+}
+
+// A shutdown signal landing while gnokey runs interrupts it after the tx may
+// have been sent: the outcome must still be recorded and alerted, or the
+// restarted daemon would re-propose with no record of the first attempt.
+func TestEvalCycleRecordsInterruptedBroadcast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newFixture(t, "dev", nil)
+	f.broadcasts.onCall = func(proposal.Built) { cancel() }
+	f.broadcasts.set("", fmt.Errorf("gnokey interrupted: %w", context.Canceled))
+
+	f.d.evalCycle(ctx, f.runtime(t))
+	if got := lastStatus(t, f).Status; got != store.StatusUnconfirmed {
+		t.Fatalf("status = %q, want unconfirmed\nlogs:\n%s", got, f.logs.String())
+	}
+	notifs := f.notifs.all()
+	if len(notifs) != 1 || !strings.Contains(notifs[0], "unconfirmed") {
+		t.Fatalf("notifications = %v, want one unconfirmed", notifs)
+	}
+}
+
+// The last allowed execute attempt being interrupted by a shutdown still
+// raises the give-up alert.
+func TestVoteCycleAlertsOnInterruptedLastExecute(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+	f.broadcasts.set("", fmt.Errorf("gnokey interrupted: %w", context.Canceled))
+
+	start := time.Now()
+	for i := 0; i < maxExecuteFailures; i++ {
+		if i == maxExecuteFailures-1 {
+			f.broadcasts.onCall = func(proposal.Built) { cancel() }
+		}
+		at := start.Add(time.Duration(i) * 2 * executeRetry)
+		f.d.now = func() time.Time { return at }
+		f.d.voteCycle(ctx, f.runtime(t))
+	}
+	if n := len(executeCalls(f)); n != maxExecuteFailures {
+		t.Fatalf("execute calls = %d, want %d\nlogs:\n%s", n, maxExecuteFailures, f.logs.String())
+	}
+	notifs := f.notifs.all()
+	if len(notifs) != 1 || !strings.Contains(notifs[0], "execution failed") {
+		t.Fatalf("notifications = %v, want one execution-failed alert", notifs)
 	}
 }

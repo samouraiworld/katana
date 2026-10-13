@@ -182,6 +182,10 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	}
 
 	out, err := d.signAndBroadcast(ctx, built, rt.Gnokey)
+	// The tx may have landed even if a shutdown interrupted gnokey: record
+	// and notify the outcome regardless of cancellation, or a restart would
+	// re-propose with no trace of this attempt.
+	ctx = context.WithoutCancel(ctx)
 	tx := proposal.ParseTxOutput(out)
 	rec.Output = out
 	rec.TxHash = tx.TxHash
@@ -426,6 +430,7 @@ func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.Proposa
 
 	b := proposal.ExecuteCall(rt.ChainID, rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm, p.OnchainID)
 	out, err := d.signAndBroadcast(ctx, b, rt.Gnokey)
+	ctx = context.WithoutCancel(ctx) // notify even if a shutdown interrupted gnokey
 	outcome := proposal.Classify(out, err)
 	if outcome != proposal.Committed {
 		d.logger.Printf("[%s][vote] EXECUTE %s for proposal %s (yes=%.2f%% no=%.2f%%): %v\n%s", rt.Key, outcome, p.OnchainID, prop.YesPercent, prop.NoPercent, err, out)
