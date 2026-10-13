@@ -47,11 +47,42 @@ independent tickers:
    chain, log + notify the would-be proposal without broadcasting (see
    [Rehearsal / dry-run](#rehearsal--dry-run)).
 
-**Vote worker** (every `vote_poll_interval`): polls the GovDAO status of each
-pending proposal katana broadcast, and on resolution notifies + updates state:
+**Vote worker** (every `vote_poll_interval`): polls the GovDAO page of each
+proposal katana broadcast, and on resolution notifies + updates state:
 - **accepted** → validator removed from the valset;
-- **rejected** → validator kept; re-proposal suppressed for `rejected_backoff`,
-  and stopped entirely after `max_rejections`.
+- **rejected** (the realm says *denied*) → validator kept; re-proposal
+  suppressed for `rejected_backoff`, and stopped entirely after `max_rejections`.
+
+GovDAO v3 only decides a proposal when someone calls
+`gno.land/r/gov/dao.ExecuteProposal` after YES or NO reached the 66.66%
+supermajority; a NO majority alone resolves nothing, and proposals never expire
+on-chain. So the vote worker also:
+- calls `ExecuteOrRejectProposal(pid)` with katana's key when the page shows a
+  supermajority (`vote_tracking.execute_proposals`, default `true`, per-chain
+  override; retried at most hourly; never on a `dry_run` chain, which signs
+  nothing). An executor that returns an error marks the proposal denied. One
+  that panics (e.g. ejecting a validator already gone) reverts the call: after
+  3 failed attempts katana stops and sends an *execution failed* alert;
+- marks a proposal still open after `vote_tracking.pending_timeout` (default
+  `336h` = 14d) as **expired** and notifies once (stalled vote). GovDAO
+  proposals cannot be withdrawn, so it stays open and votable: the validator
+  stays gated, and katana keeps watching and executing it — a late on-chain
+  outcome updates it. katana never has two live proposals for one validator.
+
+The status is read only from the realm's marker lines
+(`**PROPOSAL HAS BEEN ACCEPTED**`, `**PROPOSAL HAS BEEN DENIED**`,
+`**Proposal is open for votes**`). A page with no marker or with several (the
+description is not escaped, so it could forge one) is *unknown*: kept pending,
+never resolved, never expired.
+
+**Broadcast outcome.** katana reads gnokey's output: the proposal id comes from
+the `ProposalCreated` event, or later from the tx itself (RPC `/tx`) when gnokey
+printed none. When gnokey fails *after* sending the tx (RPC timeout, dropped
+connection), the proposal may or may not be on-chain: katana records it as
+**unconfirmed**, sends an alert, and blocks new proposals for that validator
+until it is resolved (an expired unconfirmed row keeps blocking: gnokey prints
+no tx hash in that case, so an operator has to check). Other gnokey errors (simulation, CheckTx, DeliverTx) are plain
+failures.
 
 ## Score-driven actions
 
@@ -105,7 +136,8 @@ Validators under `exceptions:` are **never** proposed, matched by address
 Because katana runs continuously, a per-`(chain, validator)` state machine
 (backed by SQLite) prevents duplicate proposals:
 
-- a **pending** proposal blocks new ones until the vote resolves;
+- a **pending**, **expired** or **unconfirmed** proposal blocks new ones until
+  it is decided on-chain;
 - an **accepted eject** is terminal (the validator is gone); an **accepted
   `lower_vp`/`raise_vp`** is not terminal — once `proposal.cooldown` elapses, a
   new action (eject / lower_vp / raise_vp) may be proposed if the validator's
@@ -159,11 +191,20 @@ katana notifies every enabled channel (Discord, Slack, Telegram). Example
 *"...has been sent to lower its voting power from 500 to 400 (-2.1% of total
 valset VP)."*
 
+It also alerts when a proposal needs an operator:
+- **unconfirmed** — gnokey failed after sending the tx (RPC timeout, dropped
+  connection, shutdown mid-run), so the proposal may or may not be on-chain;
+- **expired** — still open after `vote_tracking.pending_timeout` (sent once;
+  katana keeps watching it);
+- **execution failed** — the proposal reached a supermajority but 3
+  `ExecuteOrRejectProposal` calls failed, so katana stopped retrying.
+
 Additionally, on `dry_run: true` chains, katana sends a notification with the would-be proposal script (eject or VP-change) and ready-to-run `gnokey` command — see [Rehearsal / dry-run](#rehearsal--dry-run).
 
-Notifications are color-coded by action: green for `raise_vp`, orange for `lower_vp`, red for `eject` (Discord embed color / Slack attachment color; Telegram uses a 🟢/🟠/🔴 emoji prefix since it has no native color concept). The title states the lifecycle stage (submitted/accepted/rejected/dry-run).
+Notifications are color-coded by action: green for `raise_vp`, orange for `lower_vp`, red for `eject` (Discord embed color / Slack attachment color; Telegram uses a 🟢/🟠/🔴 emoji prefix since it has no native color concept). The title states the lifecycle stage (submitted/accepted/rejected/expired/unconfirmed/execution failed/dry-run).
 
-Nothing is sent on errors.
+Nothing else is sent: a broadcast rejected before sending (e.g. insufficient
+funds) and other errors are only logged.
 
 ## Requirements
 

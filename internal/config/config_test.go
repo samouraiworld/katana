@@ -530,3 +530,128 @@ chains:
 		})
 	}
 }
+
+func TestVoteTrackingDefaults(t *testing.T) {
+	c, err := Load(writeConfig(t, validYAML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rt, err := c.Runtime("test")
+	if err != nil {
+		t.Fatalf("Runtime: %v", err)
+	}
+	if !rt.ExecuteProposals {
+		t.Error("execute_proposals should default to true")
+	}
+	if rt.PendingTimeout != 14*24*time.Hour {
+		t.Errorf("PendingTimeout = %v, want 336h", rt.PendingTimeout)
+	}
+}
+
+func TestVoteTrackingPerChainOverride(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: sqlite}
+vote_tracking:
+  execute_proposals: false
+  pending_timeout: 72h
+chains:
+  inherits:
+    rpc_endpoint: "r1"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+  overridden:
+    rpc_endpoint: "r2"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    execute_proposals: true
+    pending_timeout: 24h
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	inherits, err := c.Runtime("inherits")
+	if err != nil {
+		t.Fatalf("Runtime(inherits): %v", err)
+	}
+	if inherits.ExecuteProposals || inherits.PendingTimeout != 72*time.Hour {
+		t.Errorf("inherits = (%v, %v), want (false, 72h)", inherits.ExecuteProposals, inherits.PendingTimeout)
+	}
+	overridden, err := c.Runtime("overridden")
+	if err != nil {
+		t.Fatalf("Runtime(overridden): %v", err)
+	}
+	if !overridden.ExecuteProposals || overridden.PendingTimeout != 24*time.Hour {
+		t.Errorf("overridden = (%v, %v), want (true, 24h)", overridden.ExecuteProposals, overridden.PendingTimeout)
+	}
+}
+
+// dry_run means nothing is signed: it also disables ExecuteOrRejectProposal,
+// whatever execute_proposals says, globally or per chain.
+func TestDryRunDisablesExecuteProposals(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: sqlite}
+dry_run: true
+vote_tracking:
+  execute_proposals: true
+chains:
+  inherits:
+    rpc_endpoint: "r1"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+  explicit:
+    rpc_endpoint: "r2"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    execute_proposals: true
+  armed:
+    rpc_endpoint: "r3"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    dry_run: false
+  armed_disabled:
+    rpc_endpoint: "r4"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    dry_run: false
+    execute_proposals: false
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for chain, want := range map[string]bool{
+		"inherits": false, "explicit": false, "armed": true, "armed_disabled": false,
+	} {
+		rt, err := c.Runtime(chain)
+		if err != nil {
+			t.Fatalf("Runtime(%s): %v", chain, err)
+		}
+		if rt.ExecuteProposals != want {
+			t.Errorf("%s: ExecuteProposals = %v, want %v (dry_run %v)", chain, rt.ExecuteProposals, want, rt.DryRun)
+		}
+	}
+}
+
+func TestPendingTimeoutMustBePositive(t *testing.T) {
+	for _, v := range []string{"0s", "-1h", "soon"} {
+		yaml := strings.Replace(validYAML, "storage:", "vote_tracking:\n  pending_timeout: "+v+"\nstorage:", 1)
+		c, err := Load(writeConfig(t, yaml))
+		if err == nil {
+			_, err = c.Runtime("test")
+		}
+		if err == nil {
+			t.Errorf("pending_timeout %q: expected an error", v)
+		}
+	}
+}

@@ -312,3 +312,43 @@ func TestTelegramEmoji(t *testing.T) {
 		}
 	}
 }
+
+func TestMessageExpired(t *testing.T) {
+	in := Info{Chain: "test12", Moniker: "onbloc", Address: "g1bad", ProposalID: "7",
+		GnowebURL: "https://gno.land", Action: "eject", PendingTimeout: 336 * time.Hour}
+	got := Message(EventExpired, in)
+	for _, want := range []string{"onbloc", "g1bad", "test12", "expired", "336h", "https://gno.land/r/gov/dao:7"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Message(expired) = %q, missing %q", got, want)
+		}
+	}
+	if got := Title(EventExpired, in); !strings.Contains(got, "expired") {
+		t.Errorf("Title(expired) = %q", got)
+	}
+}
+
+func TestMessageUnconfirmed(t *testing.T) {
+	in := Info{Chain: "test12", Moniker: "onbloc", Address: "g1bad", Action: "eject"}
+	got := Message(EventUnconfirmed, in)
+	for _, want := range []string{"onbloc", "g1bad", "test12", "may", "check"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Message(unconfirmed) = %q, missing %q", got, want)
+		}
+	}
+	if got := Title(EventUnconfirmed, in); !strings.Contains(got, "unconfirmed") {
+		t.Errorf("Title(unconfirmed) = %q", got)
+	}
+}
+
+func TestMessageExecuteFailed(t *testing.T) {
+	in := Info{Chain: "test12", Moniker: "onbloc", Address: "g1bad", ProposalID: "7", Action: "eject"}
+	got := Message(EventExecuteFailed, in)
+	for _, want := range []string{"onbloc", "g1bad", "test12", "ExecuteOrRejectProposal", "manually"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Message(execute_failed) = %q, missing %q", got, want)
+		}
+	}
+	if got := Title(EventExecuteFailed, in); !strings.Contains(got, "execution failed") {
+		t.Errorf("Title(execute_failed) = %q", got)
+	}
+}

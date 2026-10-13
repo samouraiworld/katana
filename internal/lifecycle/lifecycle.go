@@ -66,6 +66,15 @@ func Gate(last *store.ProposalRecord, rejections int, p Params) Decision {
 	case store.StatusPending:
 		return deny("a proposal is pending GovDAO vote")
 
+	case store.StatusExpired:
+		// GovDAO proposals cannot be withdrawn: an expired one is still open
+		// and votable, so filing another would leave two live proposals for
+		// the same validator.
+		return deny("an expired proposal is still open on-chain")
+
+	case store.StatusUnconfirmed:
+		return deny("the last broadcast is unconfirmed (may be on-chain)")
+
 	case store.StatusRejected:
 		if p.MaxRejections > 0 && rejections >= p.MaxRejections {
 			return deny("max rejections reached (%d)", rejections)

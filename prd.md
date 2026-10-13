@@ -286,14 +286,18 @@ actions) if the validator's score still qualifies — see FR-7.2.
 - **FR-VT.1** For every proposal katana **broadcasts**, it captures the resulting
   **on-chain GovDAO proposal id** from the `ProposalCreated` event emitted by
   `gno.land/r/gov/dao` (attr `key: "id"`). *(decision D13 — resolved.)* The id is
-  read from the broadcast tx response events; if unavailable there (e.g. gnokey
-  CLI broadcast without event capture), fall back to querying the GraphQL indexer
-  for that tx (same query gnomonitoring uses — see references). Reference impl:
-  gnomonitoring `ExtractGovDAOIDs` / `ProcessProposal`.
+  read from the broadcast tx response events (gnokey's `EVENTS` line); if
+  unavailable there, it is read back from the committed tx by hash (RPC
+  `/tx?hash=`, always available). The GraphQL indexer fallback (same query
+  gnomonitoring uses) is only needed for a broadcast with no tx hash at all — see
+  FR-VT.8. Reference impl: gnomonitoring `ExtractGovDAOIDs` / `ProcessProposal`.
 - **FR-VT.2** The vote-watcher worker polls each pending proposal's status on
   `vote_poll_interval` via RPC `vm/qrender` on `gno.land/r/gov/dao:<id>` and maps
-  the rendered status to katana states: `ACCEPTED → accepted`,
-  `ACTIVE` / vote-in-progress `→ pending`, otherwise `→ rejected`. *(decision D14
+  the realm's status marker line to katana states:
+  `**PROPOSAL HAS BEEN ACCEPTED** → accepted`,
+  `**PROPOSAL HAS BEEN DENIED** → rejected`,
+  `**Proposal is open for votes** → pending`, anything else (no marker, or more
+  than one) `→ unknown`, handled per FR-VT.2b. *(decision D14
   — resolved: RPC render, mirroring gnomonitoring `ExtractProposalRender`; the
   GraphQL indexer remains an optional fallback for id/discovery.)*
 - **FR-VT.2b** Status parsing is render-string-based and **realm-version
@@ -307,11 +311,34 @@ actions) if the validator's score still qualifies — see FR-7.2.
   removed.
 - **FR-VT.5** Vote tracking always applies: every produced proposal is a real
   on-chain broadcast, so every one has a GovDAO id to follow.
+- **FR-VT.6** GovDAO v3 decides a proposal only inside an `ExecuteProposal`
+  call made once YES or NO reaches the supermajority (66.66 %); a NO majority
+  alone resolves nothing. When `execute_proposals` is on (default, per-chain
+  override), katana calls `ExecuteOrRejectProposal(pid)` with its own key once
+  the render shows a supermajority, at most once per hour per proposal. A
+  `dry_run` chain never executes: it signs nothing, whatever
+  `execute_proposals` says. Only
+  an executor that *returns* an error turns into a denial; a panicking one
+  reverts the call, so katana stops after 3 failed attempts and alerts
+  (`execute_failed`).
+- **FR-VT.7** Proposals never expire on-chain. A proposal still open after
+  `pending_timeout` (default 14 d, per-chain override) becomes `expired` and is
+  notified once (stalled vote). Proposals cannot be withdrawn, so it stays
+  votable: the gate stays closed for that validator, and katana keeps polling
+  and executing it so a late outcome is recorded. katana never holds two live
+  proposals for one validator. *(decisions confirmed 2026-10-12.)*
+- **FR-VT.8** A gnokey failure after the tx was sent (RPC timeout, dropped
+  connection) leaves the outcome unknown: the record is `unconfirmed`, an alert
+  is sent, and the gate blocks the validator until the proposal is resolved;
+  expiry does not reopen it. gnokey prints no tx hash in that case, so
+  reconciliation needs the tx-indexer (signer + height) or an operator.
 
 ### 6.9 Notifications `[TO BUILD]`
 
-Notifications never fire on a failed/errored broadcast; they follow the on-chain
-lifecycle. Three events, all in English (decision D3):
+Notifications follow the on-chain lifecycle, all in English (decision D3): three
+outcome events (FR-8.1 to FR-8.3) plus three operator alerts (FR-8.6 to
+FR-8.8), and the dry-run hand-off (FR-6.6). A broadcast that failed before
+sending, and any other error, is only logged.
 
 - **FR-8.1** *Proposal sent* — after a **successful broadcast** of a proposal
   (eject / lower_vp / raise_vp):
@@ -328,6 +355,15 @@ lifecycle. Three events, all in English (decision D3):
   link to the proposal is appended when the chain's `gnoweb_url` is known.
 - **FR-8.5** Best-effort: a failed notification is logged, never blocks nor
   crashes a worker; short timeout.
+- **FR-8.6** *Proposal unconfirmed* — gnokey failed after sending the tx
+  (FR-VT.8), so it may be on-chain:
+  > `The <action> proposal for validator <moniker> (<address>) on <chain> may or may not be on-chain: gnokey failed after sending it. katana files no other proposal for this validator until this is resolved; check the chain for a GovDAO proposal from katana's key.`
+- **FR-8.7** *Proposal expired* — still open after `pending_timeout`, sent once
+  (FR-VT.7):
+  > `The <action> proposal for validator <moniker> (<address>) on <chain> expired: no supermajority after <pending_timeout>. It is still open on-chain and cannot be withdrawn: katana files no other proposal for this validator until it is decided, and keeps watching it.`
+- **FR-8.8** *Execution failed* — katana gave up on `ExecuteOrRejectProposal`
+  after 3 failed attempts (FR-VT.6):
+  > `The <action> proposal for validator <moniker> (<address>) on <chain> reached a supermajority, but katana's ExecuteOrRejectProposal calls keep failing, so it is still open. katana stopped retrying; execute or investigate it manually.`
 
 ### 6.10 Persistence `[EXISTS + extend]`
 
@@ -434,7 +470,8 @@ vote_tracking:
   govdao_realm: "gno.land/r/gov/dao"   # realm that emits ProposalCreated + exposes status
   status_source: rpc               # rpc (vm/qrender, default) | graphql (indexer fallback) (D14)
 
-# [NEW] Notifications — sent only after a SUCCESSFUL on-chain broadcast (D2).
+# [NEW] Notifications — on a SUCCESSFUL on-chain broadcast (D2), outcomes and
+# operator alerts (unconfirmed / expired / execution failed), see §6.9.
 notifications:
   enabled: true
   discord:

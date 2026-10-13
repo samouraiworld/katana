@@ -89,6 +89,19 @@ func TestGate(t *testing.T) {
 			wantAllow:  false,
 		},
 		{
+			name:      "unconfirmed broadcast blocks re-proposal",
+			last:      &store.ProposalRecord{Status: store.StatusUnconfirmed, CreatedAt: now.Add(-800 * time.Hour)},
+			wantAllow: false,
+		},
+		{
+			// GovDAO proposals cannot be withdrawn: an expired one is still
+			// open and votable, so a replacement would mean two live
+			// proposals for the same validator.
+			name:      "expired stays blocked however old",
+			last:      &store.ProposalRecord{Status: store.StatusExpired, CreatedAt: now.Add(-8000 * time.Hour), ResolvedAt: now.Add(-8000 * time.Hour)},
+			wantAllow: false,
+		},
+		{
 			name:      "empty-status within cooldown is blocked",
 			last:      &store.ProposalRecord{Status: "", CreatedAt: now.Add(-1 * time.Hour)},
 			wantAllow: false,

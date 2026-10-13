@@ -165,10 +165,20 @@ type VoteTracking struct {
 	VotePollInterval string `yaml:"vote_poll_interval"`
 	GovdaoRealm      string `yaml:"govdao_realm"`
 	StatusSource     string `yaml:"status_source"` // rpc | graphql
+	// ExecuteProposals is the global default for whether katana calls
+	// ExecuteOrRejectProposal on its own proposals once a supermajority is
+	// reached (nil = true). GovDAO v3 resolves a proposal only on that call.
+	// A dry_run chain never executes, whatever this says.
+	ExecuteProposals *bool `yaml:"execute_proposals"`
+	// PendingTimeout is how long a proposal may stay open before katana marks
+	// it expired. Proposals never expire on-chain.
+	PendingTimeout string `yaml:"pending_timeout"`
 }
 
-// Notifications configures outbound channels. Sent only after a successful
-// on-chain broadcast (and on accepted/rejected outcomes).
+// Notifications configures outbound channels. Sent on a successful broadcast,
+// accepted/rejected outcomes, an unconfirmed broadcast, an expired proposal, a
+// given-up execution, and a dry-run would-be proposal; other errors are only
+// logged.
 type Notifications struct {
 	Enabled  bool            `yaml:"enabled"`
 	Discord  WebhookChannel  `yaml:"discord"`
@@ -212,11 +222,15 @@ type ChainConfig struct {
 	// (with the ejection script and a ready-to-run gnokey command attached)
 	// instead. Meant both for rehearsing katana on a new network and as a
 	// standing manual-approval mode.
-	DryRun       *bool     `yaml:"dry_run"`
-	PollInterval string    `yaml:"poll_interval"`
-	Proposal     *Proposal `yaml:"proposal"`
-	Gnokey       *Gnokey   `yaml:"gnokey"`
-	Exceptions   []string  `yaml:"exceptions"`
+	DryRun *bool `yaml:"dry_run"`
+	// ExecuteProposals and PendingTimeout override the vote_tracking defaults
+	// for this chain (nil / empty = inherit).
+	ExecuteProposals *bool     `yaml:"execute_proposals"`
+	PendingTimeout   string    `yaml:"pending_timeout"`
+	PollInterval     string    `yaml:"poll_interval"`
+	Proposal         *Proposal `yaml:"proposal"`
+	Gnokey           *Gnokey   `yaml:"gnokey"`
+	Exceptions       []string  `yaml:"exceptions"`
 }
 
 // Runtime is the fully-resolved settings for one chain, global defaults merged
@@ -230,6 +244,8 @@ type Runtime struct {
 	DryRun             bool
 	PollInterval       time.Duration
 	VotePollInterval   time.Duration
+	ExecuteProposals   bool
+	PendingTimeout     time.Duration
 	Proposal           Proposal
 	Gnokey             Gnokey
 }
@@ -337,6 +353,7 @@ func (c *Config) applyDefaults() {
 	setIfEmpty(&c.VoteTracking.VotePollInterval, "5m")
 	setIfEmpty(&c.VoteTracking.GovdaoRealm, "gno.land/r/gov/dao")
 	setIfEmpty(&c.VoteTracking.StatusSource, "rpc")
+	setIfEmpty(&c.VoteTracking.PendingTimeout, "336h")
 	setIfEmpty(&c.Storage.Driver, "none")
 	setIfEmpty(&c.Storage.SQLitePath, "./data/katana.db")
 	setIfEmpty(&c.Web.Listen, ":8990")
@@ -416,6 +433,27 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		dryRun = *ch.DryRun
 	}
 
+	execute := true
+	if c.VoteTracking.ExecuteProposals != nil {
+		execute = *c.VoteTracking.ExecuteProposals
+	}
+	if ch.ExecuteProposals != nil {
+		execute = *ch.ExecuteProposals
+	}
+	// dry_run signs nothing, ExecuteOrRejectProposal included.
+	execute = execute && !dryRun
+	timeoutStr := c.VoteTracking.PendingTimeout
+	if ch.PendingTimeout != "" {
+		timeoutStr = ch.PendingTimeout
+	}
+	pendingTimeout, err := parseDur(timeoutStr)
+	if err != nil {
+		return Runtime{}, fmt.Errorf("pending_timeout: %w", err)
+	}
+	if pendingTimeout <= 0 {
+		return Runtime{}, fmt.Errorf("pending_timeout must be positive, got %s", timeoutStr)
+	}
+
 	prop := c.Proposal
 	if ch.Proposal != nil {
 		prop = *ch.Proposal
@@ -478,6 +516,8 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 		DryRun:             dryRun,
 		PollInterval:       poll,
 		VotePollInterval:   votePoll,
+		ExecuteProposals:   execute,
+		PendingTimeout:     pendingTimeout,
 		Proposal:           prop,
 		Gnokey:             gk,
 	}, nil

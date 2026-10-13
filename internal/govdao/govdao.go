@@ -3,7 +3,8 @@
 //
 // It mirrors gnomonitoring's approach (backend/internal/govdao): the id comes
 // from the `ProposalCreated` event (attr key "id"); the status is derived from
-// the realm render (`vm/qrender` on `<realm>:<id>`). All access is over plain
+// the realm render (`vm/qrender` on `<realm>:<id>`). When gnokey's output does
+// not carry the event, the id is read back from the committed tx (RPC /tx). All access is over plain
 // HTTP RPC so katana stays free of the heavy gnolang/gno dependency.
 package govdao
 
@@ -15,7 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,104 +63,223 @@ type abciQueryResponse struct {
 	} `json:"error"`
 }
 
-// Status renders the proposal and maps it to a katana lifecycle status.
+// Supermajority mirrors gno.land/r/gov/dao/v3/impl's law.Supermajority: the
+// YES or NO share a proposal needs before an ExecuteProposal call resolves it.
+const Supermajority = 66.66
+
+// Marker lines emitted by gno.land/r/gov/dao/v3/impl's proposalStatus.String()
+// on a single-proposal page. Exactly one of them is present per render.
+const (
+	markerAccepted = "- **PROPOSAL HAS BEEN ACCEPTED**"
+	markerDenied   = "- **PROPOSAL HAS BEEN DENIED**"
+	markerOpen     = "- **Proposal is open for votes**"
+
+	tallyYes = "- YES PERCENT: "
+	tallyNo  = "- NO PERCENT: "
+)
+
+// Proposal is what katana reads from a single-proposal render.
+type Proposal struct {
+	Status string
+	// YesPercent and NoPercent are the realm's vote tallies, only meaningful
+	// when HasTally is true.
+	YesPercent, NoPercent float64
+	HasTally              bool
+}
+
+// Executable reports whether an ExecuteProposal call would resolve the
+// proposal: it is still open and one side holds a supermajority. Below that
+// threshold the realm panics and the call only burns gas.
+func (p Proposal) Executable() bool {
+	return p.Status == Pending && p.HasTally &&
+		(p.YesPercent >= Supermajority || p.NoPercent >= Supermajority)
+}
+
+// Proposal renders the proposal and parses its status and vote tallies.
 //
-// Mapping is render-string based and realm-version dependent. An unrecognised
-// render returns Unknown, which the caller must treat as still-pending — it must
-// never be promoted to Rejected (see PRD FR-VT.2b).
-func (c *Client) Status(ctx context.Context, proposalID string) (string, error) {
+// An unrecognised render yields Unknown, which the caller must treat as
+// still-pending — it must never be promoted to Rejected (see PRD FR-VT.2b).
+func (c *Client) Proposal(ctx context.Context, proposalID string) (Proposal, error) {
 	data := fmt.Sprintf("%s:%s", c.realm, proposalID)
 
 	q := url.Values{}
 	q.Set("path", `"vm/qrender"`)
 	q.Set("data", "0x"+hex.EncodeToString([]byte(data)))
 
+	unknown := Proposal{Status: Unknown}
 	var body abciQueryResponse
 	if err := c.getJSON(ctx, "/abci_query", q, &body); err != nil {
-		return Unknown, err
+		return unknown, err
 	}
 	if body.Error != nil {
-		return Unknown, fmt.Errorf("RPC error: %s", body.Error.Message)
+		return unknown, fmt.Errorf("RPC error: %s", body.Error.Message)
 	}
 	if e := body.Result.Response.ResponseBase.Error; e != nil {
-		return Unknown, fmt.Errorf("abci error: %s", e.Message)
+		return unknown, fmt.Errorf("abci error: %s", e.Message)
 	}
 	raw, err := base64.StdEncoding.DecodeString(body.Result.Response.ResponseBase.Data)
 	if err != nil {
-		return Unknown, fmt.Errorf("decoding render: %w", err)
+		return unknown, fmt.Errorf("decoding render: %w", err)
 	}
-	return classify(string(raw)), nil
+	return ParseRender(string(raw)), nil
 }
 
-// classify maps a rendered GovDAO proposal page to a lifecycle status.
-func classify(render string) string {
-	switch {
-	case strings.Contains(render, "ACCEPTED"):
-		return Accepted
-	case strings.Contains(render, "REJECTED"):
-		return Rejected
-	case strings.Contains(render, "ACTIVE"),
-		strings.Contains(render, "PROPOSED"),
-		strings.Contains(render, "Vote YES"):
-		return Pending
-	default:
-		return Unknown
+// ParseRender reads the status and vote tallies out of a GovDAO v3
+// single-proposal page.
+//
+// Only whole marker lines count. Anything looser is unsafe: the page embeds
+// the proposal's own title and description (which may say "ACCEPTED", or carry
+// a validator-controlled moniker), and an action bar with "Vote YES"/"Vote NO"
+// links that the realm renders on every page, decided or not.
+//
+// The description is not escaped, so it can also forge a whole marker line.
+// The realm writes exactly one marker per page: a render with any other count
+// is ambiguous and yields Unknown rather than a guess. The same rule applies to
+// the tally lines.
+func ParseRender(render string) Proposal {
+	var statuses []string
+	var yes, no []string
+	for _, line := range strings.Split(render, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == markerAccepted:
+			statuses = append(statuses, Accepted)
+		case line == markerDenied:
+			statuses = append(statuses, Rejected)
+		case line == markerOpen:
+			statuses = append(statuses, Pending)
+		case strings.HasPrefix(line, tallyYes):
+			yes = append(yes, line[len(tallyYes):])
+		case strings.HasPrefix(line, tallyNo):
+			no = append(no, line[len(tallyNo):])
+		}
 	}
+
+	p := Proposal{Status: Unknown}
+	if len(statuses) == 1 {
+		p.Status = statuses[0]
+	}
+	if len(yes) == 1 && len(no) == 1 {
+		y, yerr := parsePercent(yes[0])
+		n, nerr := parsePercent(no[0])
+		if yerr == nil && nerr == nil {
+			p.YesPercent, p.NoPercent, p.HasTally = y, n, true
+		}
+	}
+	return p
 }
 
-// proposalCreatedID matches an on-chain `ProposalCreated` event and captures the
-// numeric id attribute from gnokey/RPC broadcast output.
-var proposalCreatedID = regexp.MustCompile(`ProposalCreated[\s\S]{0,400}?\bid\b\D{0,10}(\d+)`)
-
-// ExtractProposalID best-effort parses the GovDAO proposal id from the textual
-// output of a broadcast (gnokey). Returns "" if not found; the caller should
-// then fall back to the GraphQL indexer.
-func ExtractProposalID(broadcastOutput string) string {
-	// First try a structured events array if gnokey printed JSON.
-	if id := extractFromJSON(broadcastOutput); id != "" {
-		return id
+// parsePercent parses a realm tally value such as "66.66666666666666%".
+func parsePercent(s string) (float64, error) {
+	v, ok := strings.CutSuffix(s, "%")
+	if !ok {
+		return 0, fmt.Errorf("tally %q: missing %%", s)
 	}
-	if m := proposalCreatedID.FindStringSubmatch(broadcastOutput); len(m) == 2 {
-		return m[1]
-	}
-	return ""
+	return strconv.ParseFloat(v, 64)
 }
 
-func extractFromJSON(out string) string {
-	type attr struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
-	}
-	type event struct {
+// ProposalIDFromEvents returns the GovDAO proposal id carried by a tx's
+// events: the "id" attribute of the single ProposalCreated event emitted by
+// realm. It accepts both gnokey's EVENTS line and the amino JSON of RPC /tx.
+//
+// It returns "" unless exactly one such event with a numeric id is present:
+// katana creates one proposal per tx, so anything else is not a tx it can
+// attribute safely.
+func ProposalIDFromEvents(events []byte, realm string) string {
+	var evs []struct {
 		Type  string `json:"type"`
-		Attrs []attr `json:"attrs"`
+		Attrs []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"attrs"`
+		PkgPath string `json:"pkg_path"`
 	}
-	// Scan every '[' … ']' slice and try to decode an events array.
-	for i := 0; i < len(out); i++ {
-		if out[i] != '[' {
+	if err := json.Unmarshal(events, &evs); err != nil {
+		return ""
+	}
+	var ids []string
+	for _, e := range evs {
+		if e.Type != "ProposalCreated" || e.PkgPath != realm {
 			continue
 		}
-		for j := len(out); j > i; j-- {
-			if out[j-1] != ']' {
-				continue
+		for _, a := range e.Attrs {
+			if a.Key == "id" {
+				ids = append(ids, a.Value)
 			}
-			var evs []event
-			if err := json.Unmarshal([]byte(out[i:j]), &evs); err == nil {
-				for _, e := range evs {
-					if e.Type != "ProposalCreated" {
-						continue
-					}
-					for _, a := range e.Attrs {
-						if a.Key == "id" {
-							return a.Value
-						}
-					}
-				}
-			}
-			break
 		}
 	}
-	return ""
+	if len(ids) != 1 {
+		return ""
+	}
+	if _, err := strconv.ParseUint(ids[0], 10, 64); err != nil {
+		return ""
+	}
+	return ids[0]
+}
+
+type txResponse struct {
+	Result *struct {
+		TxResult json.RawMessage `json:"tx_result"`
+	} `json:"result"`
+	Error *struct {
+		Message string `json:"message"`
+		Data    string `json:"data"`
+	} `json:"error"`
+}
+
+// TxProposalID looks a committed tx up by its base64 hash (as gnokey prints
+// it) via RPC /tx and returns the proposal id from its events. A tx that is
+// not committed yet comes back as an error.
+func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(txHash)
+	if err != nil {
+		return "", fmt.Errorf("decoding tx hash %q: %w", txHash, err)
+	}
+	q := url.Values{}
+	q.Set("hash", "0x"+hex.EncodeToString(raw))
+
+	var body txResponse
+	if err := c.getJSON(ctx, "/tx", q, &body); err != nil {
+		return "", err
+	}
+	if body.Error != nil {
+		return "", fmt.Errorf("RPC error: %s %s", body.Error.Message, body.Error.Data)
+	}
+	if body.Result == nil {
+		return "", fmt.Errorf("tx %s: empty result", txHash)
+	}
+	events := findEvents(body.Result.TxResult)
+	if events == nil {
+		return "", fmt.Errorf("tx %s: no events in result", txHash)
+	}
+	id := ProposalIDFromEvents(events, c.realm)
+	if id == "" {
+		return "", fmt.Errorf("tx %s: no single ProposalCreated event from %s", txHash, c.realm)
+	}
+	return id, nil
+}
+
+// findEvents returns the first "events" array (any letter case) in a
+// DeliverTx result. The amino JSON nests it under ResponseBase; searching
+// keeps katana independent of that layout.
+func findEvents(raw json.RawMessage) json.RawMessage {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	for k, v := range obj {
+		if strings.EqualFold(k, "events") && len(v) > 0 && v[0] == '[' {
+			return v
+		}
+	}
+	for _, v := range obj {
+		if len(v) > 0 && v[0] == '{' {
+			if ev := findEvents(v); ev != nil {
+				return ev
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out any) error {

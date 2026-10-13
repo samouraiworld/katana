@@ -20,11 +20,21 @@ const (
 	StatusPending  = "pending"
 	StatusAccepted = "accepted"
 	StatusRejected = "rejected"
+	// StatusExpired marks a proposal still open on-chain after
+	// vote_tracking.pending_timeout. GovDAO proposals never expire on-chain
+	// and cannot be withdrawn, so the vote worker keeps polling (and
+	// executing) it, and the lifecycle gate stays closed until it resolves.
+	StatusExpired = "expired"
+	// StatusUnconfirmed marks a broadcast whose outcome is unknown: gnokey
+	// failed after sending the tx (timeout, dropped connection), so it may or
+	// may not be on-chain. It blocks the gate like pending, and keeps
+	// blocking once expired.
+	StatusUnconfirmed = "unconfirmed"
 	// StatusDryRun tags a proposal record produced by a dry_run chain instead
 	// of a real broadcast attempt, so store queries and operators can tell a
 	// deliberate non-broadcast apart from a genuine gnokey failure (Success:
 	// false, Status: ""). It counts toward the real lifecycle gate exactly
-	// like any other record: LastProposal/RejectionCount/PendingProposals do
+	// like any other record: LastProposal/RejectionCount/TrackedProposals do
 	// not exclude it, so disabling dry_run does not bypass the cooldown of a
 	// proposal that was already shown to an operator.
 	StatusDryRun = "dry-run"
@@ -66,8 +76,9 @@ type ProposalRecord struct {
 	Success      bool
 	// Broadcast-only lifecycle fields.
 	OnchainID  string    // GovDAO proposal id
-	Status     string    // pending | accepted | rejected ("" until broadcast succeeds)
-	ResolvedAt time.Time // zero until accepted/rejected
+	TxHash     string    // base64 tx hash printed by gnokey, if any
+	Status     string    // pending | accepted | rejected | expired | unconfirmed ("" for a failed broadcast)
+	ResolvedAt time.Time // zero until accepted/rejected/expired
 }
 
 // NotifRecord is one notification attempt.
@@ -95,7 +106,8 @@ type Store interface {
 	RecordEvaluations(ctx context.Context, rs []EvalRecord) error
 	// RecordProposal persists a proposal and returns its row id.
 	RecordProposal(ctx context.Context, r ProposalRecord) (int64, error)
-	// SetOnchainID records the GovDAO id captured after a successful broadcast.
+	// SetOnchainID records a GovDAO id resolved after the broadcast (from the
+	// tx's events when gnokey's own output did not carry it).
 	SetOnchainID(ctx context.Context, id int64, onchainID string) error
 	// UpdateStatus advances a proposal's lifecycle status.
 	UpdateStatus(ctx context.Context, id int64, status string, resolvedAt time.Time) error
@@ -105,7 +117,10 @@ type Store interface {
 	// LastProposal returns the validator's most recent proposal record
 	// (broadcast or dry-run) on this chain, or nil.
 	LastProposal(ctx context.Context, chain, address string) (*ProposalRecord, error)
-	PendingProposals(ctx context.Context, chain string) ([]ProposalRecord, error)
+	// TrackedProposals returns the proposals the vote worker still follows:
+	// pending, unconfirmed, and expired (still open on-chain).
+	TrackedProposals(ctx context.Context, chain string) ([]ProposalRecord, error)
+	// RejectionCount counts the validator's rejected proposals.
 	RejectionCount(ctx context.Context, chain, address string) (int, error)
 
 	ListProposals(ctx context.Context, limit int) ([]ProposalRecord, error)
@@ -155,7 +170,7 @@ func (Noop) RecordNotification(context.Context, NotifRecord) error         { ret
 func (Noop) LastProposal(context.Context, string, string) (*ProposalRecord, error) {
 	return nil, nil
 }
-func (Noop) PendingProposals(context.Context, string) ([]ProposalRecord, error) { return nil, nil }
+func (Noop) TrackedProposals(context.Context, string) ([]ProposalRecord, error) { return nil, nil }
 func (Noop) RejectionCount(context.Context, string, string) (int, error)        { return 0, nil }
 func (Noop) ListProposals(context.Context, int) ([]ProposalRecord, error)       { return nil, nil }
 func (Noop) Close() error                                                       { return nil }

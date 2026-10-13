@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,19 @@ type stubChain struct {
 	network   string            // node_info.network reported by /status
 	valset    []string          // consensus signing addresses
 	operators map[string]string // operator address → signing address
+
+	mu      sync.Mutex
+	renders map[string]string // GovDAO proposal id → realm render
+	txs     map[string]string // hex tx hash → DeliverTx events JSON
+}
+
+func (s *stubChain) setRender(id, render string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.renders == nil {
+		s.renders = map[string]string{}
+	}
+	s.renders[id] = render
 }
 
 func (s *stubChain) handler() http.HandlerFunc {
@@ -53,6 +67,10 @@ func (s *stubChain) handler() http.HandlerFunc {
 			cmd := string(raw)
 			var md string
 			switch {
+			case strings.HasPrefix(cmd, "gno.land/r/gov/dao:"):
+				s.mu.Lock()
+				md = s.renders[strings.TrimPrefix(cmd, "gno.land/r/gov/dao:")]
+				s.mu.Unlock()
 			case strings.Contains(cmd, "?page=1"):
 				for op := range s.operators {
 					md += fmt.Sprintf("- [Val](/r/gnops/valopers:%s)\n", op)
@@ -68,6 +86,15 @@ func (s *stubChain) handler() http.HandlerFunc {
 			}
 			fmt.Fprintf(w, `{"result":{"response":{"ResponseBase":{"Data":%q}}}}`,
 				base64.StdEncoding.EncodeToString([]byte(md)))
+		case "/tx":
+			s.mu.Lock()
+			events, ok := s.txs[strings.TrimPrefix(r.URL.Query().Get("hash"), "0x")]
+			s.mu.Unlock()
+			if !ok {
+				fmt.Fprint(w, `{"error":{"code":-32603,"message":"Internal error","data":"tx not found"}}`)
+				return
+			}
+			fmt.Fprintf(w, `{"result":{"tx_result":{"ResponseBase":{"Events":%s}}}}`, events)
 		default:
 			http.NotFound(w, r)
 		}
@@ -96,17 +123,50 @@ func (n *notifRecorder) all() []string {
 	return append([]string(nil), n.bodies...)
 }
 
-// broadcastRecorder is a test double for the gnokey broadcast step.
+// gnokeyOK renders gnokey's output for a successful broadcast that created
+// GovDAO proposal id (gno.land/pkg/keyscli PrintTxSuccess).
+func gnokeyOK(id string) string {
+	return "\nOK!\nGAS WANTED: 1\nGAS USED:   1\nHEIGHT:     42\n" +
+		`EVENTS:     [{"type":"ProposalCreated","attrs":[{"key":"id","value":"` + id + `"}],"pkg_path":"gno.land/r/gov/dao"}]` +
+		"\nINFO:       \nTX HASH:    q2Vh\n"
+}
+
+// broadcastRecorder is a test double for the gnokey broadcast step. By
+// default every broadcast succeeds and creates proposal "7"; tests swap out
+// and err to simulate gnokey failures.
 type broadcastRecorder struct {
 	mu    sync.Mutex
 	built []proposal.Built
+	out   string
+	err   error
+	// onCall, when set, runs on every broadcast (e.g. to make the chain
+	// reflect an executed proposal).
+	onCall func(proposal.Built)
 }
 
 func (b *broadcastRecorder) broadcast(_ context.Context, built proposal.Built, _ config.Gnokey) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.built = append(b.built, built)
-	return "broadcast ok", nil
+	if b.onCall != nil {
+		b.onCall(built)
+	}
+	if b.out == "" && b.err == nil {
+		return gnokeyOK("7"), nil
+	}
+	return b.out, b.err
+}
+
+func (b *broadcastRecorder) set(out string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.out, b.err = out, err
+}
+
+func (b *broadcastRecorder) calls() []proposal.Built {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]proposal.Built(nil), b.built...)
 }
 
 func (b *broadcastRecorder) count() int {
@@ -143,6 +203,7 @@ type fixture struct {
 	logs       *bytes.Buffer
 	notifs     *notifRecorder
 	broadcasts *broadcastRecorder
+	chain      *stubChain
 }
 
 // reportsJSON is the default gnomonitoring report fixture: g1bad has a
@@ -222,7 +283,9 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 				},
 			},
 		},
-		VoteTracking: config.VoteTracking{VotePollInterval: "5m"},
+		VoteTracking: config.VoteTracking{
+			VotePollInterval: "5m", GovdaoRealm: "gno.land/r/gov/dao", PendingTimeout: "336h",
+		},
 		Notifications: config.Notifications{
 			Enabled: true,
 			Discord: config.WebhookChannel{Enabled: true, WebhookURL: hook.URL},
@@ -252,7 +315,7 @@ func newFixture(t *testing.T, network string, mutate func(*config.Config)) *fixt
 	br := &broadcastRecorder{}
 	d.broadcast = br.broadcast
 
-	return &fixture{d: d, cfg: cfg, st: st, logs: logs, notifs: notifs, broadcasts: br}
+	return &fixture{d: d, cfg: cfg, st: st, logs: logs, notifs: notifs, broadcasts: br, chain: chain}
 }
 
 func (f *fixture) runtime(t *testing.T) config.Runtime {
@@ -597,5 +660,35 @@ func TestDryRunRecordCountsTowardCooldown(t *testing.T) {
 	f.d.evalCycle(ctx, f.runtime(t))
 	if got := f.broadcasts.count(); got != 1 {
 		t.Fatalf("broadcasts = %d, want 1 after the cooldown elapses\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// The eval and vote workers share the key's account sequence: gnokey
+// transactions must never overlap.
+func TestSignAndBroadcastSerialises(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	var inFlight, overlaps atomic.Int32
+	f.d.broadcast = func(context.Context, proposal.Built, config.Gnokey) (string, error) {
+		if inFlight.Add(1) > 1 {
+			overlaps.Add(1)
+		}
+		time.Sleep(time.Millisecond)
+		inFlight.Add(-1)
+		return gnokeyOK("7"), nil
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				_, _ = f.d.signAndBroadcast(context.Background(), proposal.Built{}, config.Gnokey{})
+			}
+		}()
+	}
+	wg.Wait()
+	if n := overlaps.Load(); n != 0 {
+		t.Fatalf("overlapping broadcasts = %d, want 0", n)
 	}
 }

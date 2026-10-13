@@ -27,6 +27,17 @@ const (
 	EventSent     Event = "sent"
 	EventAccepted Event = "accepted"
 	EventRejected Event = "rejected"
+	// EventExpired: the proposal stayed open past vote_tracking.pending_timeout.
+	// It is still open on-chain; katana keeps watching it and the validator
+	// stays gated.
+	EventExpired Event = "expired"
+	// EventUnconfirmed: gnokey failed after sending the tx, so the proposal
+	// may or may not be on-chain. An operator has to check.
+	EventUnconfirmed Event = "unconfirmed"
+	// EventExecuteFailed: the proposal reached a supermajority but katana's
+	// ExecuteOrRejectProposal calls keep failing (e.g. a panicking executor
+	// reverts the call). katana stopped retrying; an operator has to look.
+	EventExecuteFailed Event = "execute_failed"
 	// EventWouldEject announces a proposal a dry_run chain would have sent;
 	// nothing was signed or broadcast.
 	EventWouldEject Event = "would_eject"
@@ -40,6 +51,7 @@ type Info struct {
 	GnowebURL       string
 	ProposalID      string
 	RejectedBackoff time.Duration
+	PendingTimeout  time.Duration
 	// Action is the score-driven action this notification is about: eject |
 	// lower_vp | raise_vp. CurrentPower/TargetPower are 0 for eject.
 	// VPDeltaPercent is the signed % of the chain's total valset VP this
@@ -80,6 +92,15 @@ func Message(event Event, in Info) string {
 		msg = acceptedText(in)
 	case EventRejected:
 		msg = rejectedText(in)
+	case EventExpired:
+		msg = fmt.Sprintf("The %s proposal for validator %s (%s) on %s expired: no supermajority after %s. It is still open on-chain and cannot be withdrawn: katana files no other proposal for this validator until it is decided, and keeps watching it.",
+			actionNoun(in.Action), in.display(), in.Address, in.Chain, in.PendingTimeout)
+	case EventUnconfirmed:
+		msg = fmt.Sprintf("The %s proposal for validator %s (%s) on %s may or may not be on-chain: gnokey failed after sending it. katana files no other proposal for this validator until this is resolved; check the chain for a GovDAO proposal from katana's key.",
+			actionNoun(in.Action), in.display(), in.Address, in.Chain)
+	case EventExecuteFailed:
+		msg = fmt.Sprintf("The %s proposal for validator %s (%s) on %s reached a supermajority, but katana's ExecuteOrRejectProposal calls keep failing, so it is still open. katana stopped retrying; execute or investigate it manually.",
+			actionNoun(in.Action), in.display(), in.Address, in.Chain)
 	case EventWouldEject:
 		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for %s, but dry_run is enabled — nothing was broadcast.",
 			in.display(), in.Address, in.Chain, actionNoun(in.Action))
@@ -185,6 +206,12 @@ func stageSuffix(event Event) string {
 		return "accepted"
 	case EventRejected:
 		return "rejected"
+	case EventExpired:
+		return "expired"
+	case EventUnconfirmed:
+		return "unconfirmed"
+	case EventExecuteFailed:
+		return "execution failed"
 	case EventWouldEject:
 		return "(dry-run)"
 	default:
