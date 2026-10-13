@@ -120,8 +120,8 @@ func TestMessageWouldEjectIncludesCommand(t *testing.T) {
 	if !strings.Contains(msg, "val4") || !strings.Contains(msg, "g1abc") {
 		t.Errorf("missing validator identity: %q", msg)
 	}
-	if !strings.Contains(msg, "dry_run is enabled") {
-		t.Errorf("would_eject message should reference dry_run: %q", msg)
+	if !strings.Contains(msg, "manual approval") || !strings.Contains(msg, "mode: manual") {
+		t.Errorf("would_eject message should name both manual-approval causes: %q", msg)
 	}
 	if !strings.Contains(msg, "gnokey maketx run") {
 		t.Errorf("would_eject message should embed the gnokey command: %q", msg)
@@ -260,6 +260,7 @@ func TestTitle(t *testing.T) {
 		{"eject dry-run", EventWouldEject, config.ActionEject, "val1", "", "Validator ejection (dry-run) — val1 (chain1)"},
 		{"unknown action", EventSent, "", "val1", "", "katana event submitted — val1 (chain1)"},
 		{"moniker falls back to address", EventSent, config.ActionEject, "", "g1x", "Validator ejection submitted — g1x (chain1)"},
+		{"guardrail", EventGuardrail, "", "", "", "Mass-action guardrail tripped (chain1)"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -350,5 +351,14 @@ func TestMessageExecuteFailed(t *testing.T) {
 	}
 	if got := Title(EventExecuteFailed, in); !strings.Contains(got, "execution failed") {
 		t.Errorf("Title(execute_failed) = %q", got)
+	}
+}
+
+func TestMessageGuardrail(t *testing.T) {
+	msg := Message(EventGuardrail, Info{Chain: "local", EligibleCount: 3, ValsetSize: 10, MaxEligibleShare: 25})
+	for _, want := range []string{"local", "3 of 10", "25%", "safety.max_eligible_share"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("guardrail message missing %q: %q", want, msg)
+		}
 	}
 }

@@ -24,6 +24,15 @@ log_level: info
 poll_interval: 15s
 dry_run: false          # true = observe-only: evaluate + notify (attach .gno script + gnokey command), no broadcast
 
+# Guardrails loosened for the 4-validator devnet so every scenario (incl.
+# multi_eject) reaches the chain; production keeps the defaults (1 per cycle,
+# 3 per day, abort above 25% eligible, never below 4 validators).
+safety:
+  max_proposals_per_cycle: 4
+  max_proposals_per_day: 100
+  max_eligible_share: 100
+  min_valset_size: 1
+
 gnomonitoring:
   base_url: "http://host.docker.internal:8989"   # stub-gnomonitoring on the host
   timeout_seconds: 10
@@ -57,14 +66,18 @@ proposal:
   submit: run
   actions:
     eject:
+      mode: auto              # armed: the defaults are eject manual, raise_vp off
       score_below: 30
       window: current_month
     lower_vp:
+      mode: auto              # armed: the defaults are eject manual, raise_vp off
       score_below: 60
       window: current_week
     raise_vp:
+      mode: auto              # armed: the defaults are eject manual, raise_vp off
       score_at_or_above: 85
       window: current_year
+      cooldown: 5m            # default 2160h would block re-testing
 
 vote_tracking:
   vote_poll_interval: 15s

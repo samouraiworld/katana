@@ -41,6 +41,11 @@ const (
 	// EventWouldEject announces a proposal a dry_run chain would have sent;
 	// nothing was signed or broadcast.
 	EventWouldEject Event = "would_eject"
+	// EventGuardrail: too large a share of the valset qualifies for
+	// eject/lower_vp at once, or is missing from the gnomonitoring report
+	// (safety.max_eligible_share). katana proposes
+	// nothing on the chain until the share drops. Sent once per episode.
+	EventGuardrail Event = "guardrail"
 )
 
 // Info carries the fields a message may reference.
@@ -65,6 +70,12 @@ type Info struct {
 	ProposalCode     string
 	ProposalFilename string
 	GnokeyCommand    string
+	// Guardrail fields: how many validators qualified for eject/lower_vp or
+	// were missing from the report, out of how large a valset, against which
+	// percentage limit.
+	EligibleCount    int
+	ValsetSize       int
+	MaxEligibleShare float64
 }
 
 func (i Info) display() string {
@@ -102,12 +113,15 @@ func Message(event Event, in Info) string {
 		msg = fmt.Sprintf("The %s proposal for validator %s (%s) on %s reached a supermajority, but katana's ExecuteOrRejectProposal calls keep failing, so it is still open. katana stopped retrying; execute or investigate it manually.",
 			actionNoun(in.Action), in.display(), in.Address, in.Chain)
 	case EventWouldEject:
-		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for %s, but dry_run is enabled — nothing was broadcast.",
+		msg = fmt.Sprintf("Validator %s (%s) on %s qualifies for %s, which needs manual approval here (dry_run, or mode: manual for this action) — nothing was broadcast.",
 			in.display(), in.Address, in.Chain, actionNoun(in.Action))
 		if in.GnokeyCommand != "" {
 			msg += "\nTo broadcast it manually, run:\n```\n" + in.GnokeyCommand + "\n```\nThe proposal script is included with this notification (attached, or inline below if your channel doesn't support attachments)."
 		}
 		return msg
+	case EventGuardrail:
+		return fmt.Sprintf("Mass-action guardrail tripped on %s: %d of %d validators qualify for eject or lower_vp (or are missing from the gnomonitoring report), more than safety.max_eligible_share (%g%%) of the valset. This usually means bad metrics rather than bad validators: katana proposes nothing on this chain until the share drops. Check gnomonitoring before relaxing the limit.",
+			in.Chain, in.EligibleCount, in.ValsetSize, in.MaxEligibleShare)
 	default:
 		msg = fmt.Sprintf("katana event %q for validator %s (%s) on %s.", event, in.display(), in.Address, in.Chain)
 	}
@@ -225,6 +239,9 @@ func stageSuffix(event Event) string {
 // Action alone; Title additionally varies by Event so the stage is visible
 // without reading the body.
 func Title(event Event, in Info) string {
+	if event == EventGuardrail {
+		return fmt.Sprintf("Mass-action guardrail tripped (%s)", in.Chain)
+	}
 	return fmt.Sprintf("%s %s — %s (%s)", actionLabel(in.Action), stageSuffix(event), in.display(), in.Chain)
 }
 

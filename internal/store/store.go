@@ -34,9 +34,10 @@ const (
 	// of a real broadcast attempt, so store queries and operators can tell a
 	// deliberate non-broadcast apart from a genuine gnokey failure (Success:
 	// false, Status: ""). It counts toward the real lifecycle gate exactly
-	// like any other record: LastProposal/RejectionCount/TrackedProposals do
-	// not exclude it, so disabling dry_run does not bypass the cooldown of a
-	// proposal that was already shown to an operator.
+	// like any other record: LastProposal/RejectionCount do not exclude it,
+	// so disabling dry_run does not bypass the cooldown of a proposal that was
+	// already shown to an operator. TrackedProposals excludes it (nothing to
+	// vote-poll); DryRunsSince returns it for safety.min_valset_size.
 	StatusDryRun = "dry-run"
 )
 
@@ -122,6 +123,15 @@ type Store interface {
 	TrackedProposals(ctx context.Context, chain string) ([]ProposalRecord, error)
 	// RejectionCount counts the validator's rejected proposals.
 	RejectionCount(ctx context.Context, chain, address string) (int, error)
+	// BroadcastsSince counts the chain's proposals created at or after since
+	// that may be on-chain (pending, unconfirmed, accepted, rejected,
+	// expired). Dry-run records and definitive broadcast failures are not
+	// counted. Backs the safety.max_proposals_per_day cap.
+	BroadcastsSince(ctx context.Context, chain string, since time.Time) (int, error)
+	// DryRunsSince returns the chain's dry-run records (manual hand-offs)
+	// created at or after since. Backs safety.min_valset_size, which counts a
+	// recent eject hand-off as open: an operator may still broadcast it.
+	DryRunsSince(ctx context.Context, chain string, since time.Time) ([]ProposalRecord, error)
 
 	ListProposals(ctx context.Context, limit int) ([]ProposalRecord, error)
 	Close() error
@@ -172,5 +182,9 @@ func (Noop) LastProposal(context.Context, string, string) (*ProposalRecord, erro
 }
 func (Noop) TrackedProposals(context.Context, string) ([]ProposalRecord, error) { return nil, nil }
 func (Noop) RejectionCount(context.Context, string, string) (int, error)        { return 0, nil }
-func (Noop) ListProposals(context.Context, int) ([]ProposalRecord, error)       { return nil, nil }
-func (Noop) Close() error                                                       { return nil }
+func (Noop) BroadcastsSince(context.Context, string, time.Time) (int, error)    { return 0, nil }
+func (Noop) DryRunsSince(context.Context, string, time.Time) ([]ProposalRecord, error) {
+	return nil, nil
+}
+func (Noop) ListProposals(context.Context, int) ([]ProposalRecord, error) { return nil, nil }
+func (Noop) Close() error                                                 { return nil }

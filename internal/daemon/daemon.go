@@ -44,6 +44,9 @@ type Daemon struct {
 
 	resolversMu sync.Mutex
 	resolvers   map[string]*valopers.Resolver // chain key → operator resolver
+
+	guardMu      sync.Mutex
+	guardTripped map[string]bool // chain key → mass-eligibility guardrail tripped last cycle
 }
 
 // New builds a Daemon from the loaded config and an open store.

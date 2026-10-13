@@ -4,9 +4,11 @@
 # usually passed as environment variables. A few secrets/per-deployment values
 # can be overridden from the environment (annotated `env:` below).
 #
-# katana BROADCASTS BY DEFAULT: every eligible validator results in a signed,
-# broadcast GovDAO proposal, unless the chain sets `dry_run: true` (rehearsal
-# mode: log + notify the would-be proposal, never broadcast). gnokey ships
+# katana is SAFE BY DEFAULT: dry_run defaults to true (rehearsal mode: log +
+# notify the would-be proposal, never broadcast) and ejections default to
+# `mode: manual`. To arm a chain, set `dry_run: false` explicitly (root or per
+# chain); to let it broadcast ejections, also set
+# `proposal.actions.eject.mode: auto` explicitly. gnokey ships
 # inside the container image (pinned by the GNO_REF build-arg); the signing key
 # is provisioned from a mnemonic at startup, or from a pre-provisioned keybase.
 #
@@ -21,8 +23,24 @@ poll_interval: 5m
 
 # dry_run: true rehearses every chain (or one chain, if set under chains.<name>)
 # without ever signing or broadcasting — see "Rehearsal / dry-run" in README.md.
-# Overridable per chain via chains.<name>.dry_run. Defaults to false.
-dry_run: false
+# Overridable per chain via chains.<name>.dry_run. Defaults to TRUE when unset:
+# arming requires an explicit `dry_run: false`. Even then, each action only
+# broadcasts in `mode: auto` (see proposal.actions.*.mode) — eject defaults to
+# manual, so arming ejections also takes an explicit `eject: {mode: auto}`.
+dry_run: true
+
+# ── Safety guardrails ─────────────────────────────────────────────────────────
+# Hard limits on how many proposals katana may produce. They cannot be
+# disabled: 0 or a negative value is a validation error. Overridable per chain
+# via chains.<name>.safety, merged field by field (unset fields inherit).
+safety:
+  max_proposals_per_cycle: 1          # max proposals broadcast per chain per eval cycle
+  max_proposals_per_day: 3            # max proposals per chain over a rolling 24h
+  max_eligible_share: 25              # % of the valset; if more validators than this are
+                                      # eligible for eject/lower_vp at once, the cycle is
+                                      # aborted (likely a monitoring outage, not bad validators);
+                                      # validators missing from the report count as eligible
+  min_valset_size: 4                  # never eject if the valset would drop below this
 
 # ── gnomonitoring REST API ────────────────────────────────────────────────────
 # katana does not compute validator metrics itself; it reads a computed
@@ -40,7 +58,7 @@ gnomonitoring:
   discover_chains: true               # validate config chains against /info at startup
 
 # ── Proposing wallet (global default) ─────────────────────────────────────────
-# A signing key is always required: katana always signs & broadcasts. Overridable per chain.
+# gnokey.key_name is always required (even in dry_run). Overridable per chain.
 gnokey:
   bin: "gnokey"                       # env: KATANA_GNOKEY_BIN
   key_name: ""                        # keybase key name. env: KATANA_GNOKEY_KEY
@@ -83,7 +101,15 @@ proposal:
     # Thresholds default to gnomonitoring's own tier boundaries (Excellent
     # >=85 / Good >=60 / Watch >=30 / Critical <30); 60-84 is an intentional
     # no-action "stability zone".
+    #
+    # mode (per action): auto   = sign & broadcast (unless the chain is in dry_run)
+    #                    manual = like dry_run for this action only: notify the
+    #                             would-be proposal with its script, never broadcast
+    #                    off    = never evaluated (dropped from action_priority)
+    # cooldown (per action, optional): overrides proposal.cooldown for this
+    # action; empty = use proposal.cooldown.
     eject:
+      mode: manual                    # default; set `auto` explicitly to arm ejections
       score_below: 30
       window: current_month           # ACTION WINDOW: last_24h|current_week|current_month|current_year
       title_template: "Eject validator {moniker} ({address}) from the valset"
@@ -93,6 +119,7 @@ proposal:
         Score: {score}/100 (tier {tier}) over {window}
         Reason: {reason}
     lower_vp:
+      mode: auto                      # default
       score_below: 60
       window: current_week
       # Step = whichever of vp_step_percent_of_self% of the validator's own
@@ -110,6 +137,8 @@ proposal:
         Voting power: {current_power} -> {target_power}
         Reason: {reason}
     raise_vp:
+      mode: "off"                     # default; quoted so YAML 1.1 tools don't read a bool
+      cooldown: 2160h                 # default (90d): VP raises are rare by design
       score_at_or_above: 85
       window: current_year              # longest window: raise_vp is the most
                                          # governance-sensitive action, requires
@@ -159,7 +188,7 @@ notifications:
     chat_id: ""                       # env: KATANA_TELEGRAM_CHAT_ID
 
 # ── Storage ───────────────────────────────────────────────────────────────────
-# sqlite is REQUIRED whenever any enabled chain may broadcast (dry_run false):
+# sqlite is REQUIRED whenever any enabled chain may broadcast (dry_run: false):
 # katana refuses to start otherwise, because driver "none" keeps no lifecycle
 # history and would re-broadcast the same ejection every cycle. Dry-run-only
 # setups may use "none" (rehearsal dedup degrades; a startup warning is logged).
@@ -185,7 +214,9 @@ web:
 #                       signing/broadcasting. Use it to onboard a new chain or
 #                       as a standing manual-approval mode.
 # A chain may override: poll_interval, proposal (incl. actions/action_priority/
-# VP bounds — whole-block replace), gnokey (field merge), and add exceptions.
+# VP bounds — whole-block replace; omitted action fields such as mode/cooldown
+# still get the built-in defaults), gnokey (field merge), safety (field merge),
+# and add exceptions.
 chains:
   test6:
     rpc_endpoint: "https://rpc.test6.testnets.gno.land"
@@ -193,7 +224,7 @@ chains:
     chain_id: "test6"
     gnomonitoring_chain: "test6"
     enabled: true
-    # dry_run: true                   # uncomment to rehearse without broadcasting
+    # dry_run: false                  # uncomment to arm this chain (root default: true)
 
   betanet:
     rpc_endpoint: "https://rpc.betanet.testnets.gno.land"
