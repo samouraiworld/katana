@@ -227,12 +227,6 @@ func TestVoteCycleTxLookupErrors(t *testing.T) {
 	}
 }
 
-type failUpdateStore struct{ store.Store }
-
-func (failUpdateStore) UpdateStatus(context.Context, int64, string, time.Time) error {
-	return errors.New("disk full")
-}
-
 // Vote-side operational failures reach /health: an unreachable tx-indexer and
 // a status write that fails. A clean "no match yet" does not.
 func TestVoteCycleOperationalErrors(t *testing.T) {

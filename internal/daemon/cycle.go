@@ -86,14 +86,28 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) error {
 		cycleErr = fmt.Errorf("recording evaluations: %w", err)
 	}
 
+	// A non-excepted validator in the valset but missing from the report
+	// cannot be judged: it counts as downward, so a partial report cannot
+	// dilute the guardrail below.
+	reported := make(map[string]bool, len(reports))
+	for _, report := range reports {
+		reported[strings.ToLower(report.Addr)] = true
+	}
+	missing := 0
+	for _, v := range valset {
+		if !reported[strings.ToLower(v.Address)] && !d.cfg.IsException(rt.Key, v.Address, "") {
+			missing++
+		}
+	}
+
 	// Mass-eligibility guardrail: many validators failing at once points at
 	// bad metrics (a gnomonitoring outage, a chain-wide incident) rather than
 	// at many bad operators. Propose nothing and alert once per episode.
-	if float64(downward)*100 > rt.Safety.MaxEligibleShare*float64(len(valset)) {
-		d.logger.Printf("[%s][eval] CRITICAL: %d of %d validators qualify for eject/lower_vp, above safety.max_eligible_share=%g%% — proposing nothing this cycle",
-			rt.Key, downward, len(valset), rt.Safety.MaxEligibleShare)
+	if flagged := downward + missing; float64(flagged)*100 > rt.Safety.MaxEligibleShare*float64(len(valset)) {
+		d.logger.Printf("[%s][eval] CRITICAL: %d of %d validators qualify for eject/lower_vp or are missing from the report (%d missing), above safety.max_eligible_share=%g%% — proposing nothing this cycle",
+			rt.Key, flagged, len(valset), missing, rt.Safety.MaxEligibleShare)
 		if d.setGuardTripped(rt.Key, true) {
-			d.dispatchGuardrail(ctx, rt, downward, len(valset))
+			d.dispatchGuardrail(ctx, rt, flagged, len(valset))
 		}
 		return cycleErr // a tripped guardrail is a deliberate skip, not a failure
 	}
@@ -164,7 +178,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) error {
 		// open ejections (they may still pass) as already gone.
 		if dec.Action == config.ActionEject {
 			if openEjects < 0 {
-				if openEjects, err = d.openEjections(ctx, rt.Key, inValset); err != nil {
+				if openEjects, err = d.openEjections(ctx, rt, inValset); err != nil {
 					d.logger.Printf("[%s][eval] SUPPRESS %s: counting open ejections: %v", rt.Key, disp(report.Moniker, report.Addr), err)
 					cycleErr = fmt.Errorf("counting open ejections: %w", err)
 					openEjects = -1
@@ -202,7 +216,8 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) error {
 		byAction[dec.Action]++
 		// A definitive broadcast failure created nothing: it uses up neither
 		// the budget nor the valset. A manual ejection may still be
-		// broadcast by hand, so it counts as open.
+		// broadcast by hand, so it counts as open: here for the rest of this
+		// cycle, and through openEjections in later ones.
 		if res == broadcastOnChain {
 			broadcasts++
 		}
@@ -220,21 +235,28 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) error {
 	return cycleErr
 }
 
-// openEjections counts the chain's tracked (pending, unconfirmed, expired)
-// eject proposals whose validator is still in the valset.
-func (d *Daemon) openEjections(ctx context.Context, chain string, inValset map[string]bool) (int, error) {
-	tracked, err := d.st.TrackedProposals(ctx, chain)
+// openEjections counts the chain's open ejections of validators still in the
+// valset: tracked (pending, unconfirmed, expired) eject proposals, plus eject
+// hand-offs (dry-run records) younger than the eject cooldown. An operator may
+// still broadcast a hand-off by hand, and until the cooldown ends the gate
+// keeps katana from proposing that validator again. Each validator counts once.
+func (d *Daemon) openEjections(ctx context.Context, rt config.Runtime, inValset map[string]bool) (int, error) {
+	tracked, err := d.st.TrackedProposals(ctx, rt.Key)
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	for _, p := range tracked {
+	handedOff, err := d.st.DryRunsSince(ctx, rt.Key, d.now().Add(-rt.Proposal.CooldownFor(config.ActionEject)))
+	if err != nil {
+		return 0, err
+	}
+	open := map[string]bool{}
+	for _, p := range append(tracked, handedOff...) {
 		// An unset action is a legacy row, which was always an eject.
-		if (p.Action == config.ActionEject || p.Action == "") && inValset[strings.ToLower(p.Address)] {
-			n++
+		if addr := strings.ToLower(p.Address); (p.Action == config.ActionEject || p.Action == "") && inValset[addr] {
+			open[addr] = true
 		}
 	}
-	return n, nil
+	return len(open), nil
 }
 
 // setGuardTripped records whether the chain's mass-eligibility guardrail is
@@ -340,6 +362,10 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	}
 
 	out, err := d.signAndBroadcast(ctx, built, rt.Gnokey)
+	// The tx may have landed even if a shutdown interrupted gnokey: record
+	// and notify the outcome regardless of cancellation (the intent row
+	// already gates a restart, but would lose the hash and the alert).
+	ctx = context.WithoutCancel(ctx)
 	tx := proposal.ParseTxOutput(out)
 	result := store.ProposalRecord{Output: out, TxHash: tx.TxHash}
 	outcome := proposal.Classify(out, err)
@@ -651,6 +677,7 @@ func (d *Daemon) execute(ctx context.Context, rt config.Runtime, p store.Proposa
 
 	b := proposal.ExecuteCall(rt.ChainID, rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm, p.OnchainID)
 	out, err := d.signAndBroadcast(ctx, b, rt.Gnokey)
+	ctx = context.WithoutCancel(ctx) // notify even if a shutdown interrupted gnokey
 	outcome := proposal.Classify(out, err)
 	if outcome != proposal.Committed {
 		d.logger.Printf("[%s][vote] EXECUTE %s for proposal %s (yes=%.2f%% no=%.2f%%): %v\n%s", rt.Key, outcome, p.OnchainID, prop.YesPercent, prop.NoPercent, err, out)
@@ -701,7 +728,8 @@ func (d *Daemon) dispatch(ctx context.Context, event notify.Event, rt config.Run
 }
 
 // dispatchGuardrail alerts that the chain's mass-eligibility guardrail
-// tripped: eligible of valsetSize validators qualify for eject/lower_vp.
+// tripped: eligible of valsetSize validators qualify for eject/lower_vp or
+// are missing from the gnomonitoring report.
 func (d *Daemon) dispatchGuardrail(ctx context.Context, rt config.Runtime, eligible, valsetSize int) {
 	if !d.notifier.Enabled() {
 		return

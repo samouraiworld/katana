@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -172,6 +173,24 @@ func TestVoteCycleExecuteDisabled(t *testing.T) {
 	}
 }
 
+// A dry_run chain signs nothing, ExecuteOrRejectProposal included.
+func TestVoteCycleDryRunNeverExecutes(t *testing.T) {
+	f := newFixture(t, "dev", func(c *config.Config) {
+		c.Chains["test"].DryRun = boolPtr(true)
+		c.Chains["test"].ExecuteProposals = boolPtr(true)
+	})
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+
+	f.d.voteCycle(context.Background(), f.runtime(t))
+	if n := f.broadcasts.count(); n != 0 {
+		t.Fatalf("broadcasts = %d, want 0 on a dry_run chain", n)
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+}
+
 func TestVoteCycleExpiresAndKeepsWatching(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, "dev", nil)
@@ -184,8 +203,8 @@ func TestVoteCycleExpiresAndKeepsWatching(t *testing.T) {
 		t.Fatalf("status = %q resolved_at = %v, want expired with a resolution time", last.Status, last.ResolvedAt)
 	}
 	notifs := f.notifs.all()
-	if len(notifs) != 1 || !strings.Contains(notifs[0], "expired") {
-		t.Fatalf("notifications = %v, want one expired", notifs)
+	if len(notifs) != 1 || !strings.Contains(notifs[0], "expired") || !strings.Contains(notifs[0], "336h0m0s") {
+		t.Fatalf("notifications = %v, want one expired citing the 336h pending_timeout", notifs)
 	}
 
 	// Expired once: no repeat notification while it stays open.
@@ -224,6 +243,53 @@ func TestVoteCycleExecutedOverdueProposalIsNotExpired(t *testing.T) {
 	notifs := f.notifs.all()
 	if len(notifs) != 1 || strings.Contains(notifs[0], "expired") {
 		t.Fatalf("notifications = %v, want one accepted", notifs)
+	}
+}
+
+// An execute call whose outcome is unknown may still decide the proposal: an
+// overdue row is left for the next tick to read, not expired first.
+func TestVoteCycleAmbiguousExecuteIsNotExpired(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, 15*24*time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+	f.broadcasts.set("broadcast tx: broadcasting bytes: request timeout", errors.New("gnokey: exit status 1"))
+
+	f.d.voteCycle(context.Background(), f.runtime(t))
+	if n := len(executeCalls(f)); n != 1 {
+		t.Fatalf("execute calls = %d, want 1", n)
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending\nlogs:\n%s", got, f.logs.String())
+	}
+	if notifs := f.notifs.all(); len(notifs) != 0 {
+		t.Fatalf("notifications = %v, want none", notifs)
+	}
+}
+
+// failUpdateStore fails every status write.
+type failUpdateStore struct{ store.Store }
+
+func (failUpdateStore) UpdateStatus(context.Context, int64, string, time.Time) error {
+	return errors.New("disk full")
+}
+
+// An outcome is notified only once persisted: a failing write retries next
+// tick without notifying the same outcome every time.
+func TestVoteCycleUnpersistedOutcomeIsNotNotified(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "accepted"))
+	f.d.st = failUpdateStore{Store: f.st}
+
+	for i := 0; i < 2; i++ {
+		f.d.voteCycle(ctx, f.runtime(t))
+	}
+	if notifs := f.notifs.all(); len(notifs) != 0 {
+		t.Fatalf("notifications = %v, want none\nlogs:\n%s", notifs, f.logs.String())
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending", got)
 	}
 }
 
@@ -473,5 +539,53 @@ func TestBroadcastRecordsReconcileData(t *testing.T) {
 	got := lastStatus(t, f)
 	if got.BroadcastHeight != 42 || got.PayloadHash == "" || got.PayloadHash != txindexer.RunPayloadHash(calls[0].Script) {
 		t.Fatalf("row BroadcastHeight=%d PayloadHash=%q, want 42 and the script's hash", got.BroadcastHeight, got.PayloadHash)
+	}
+}
+
+// A shutdown signal landing while gnokey runs interrupts it after the tx may
+// have been sent: the outcome must still be recorded and alerted, or the
+// restarted daemon would re-propose with no record of the first attempt.
+func TestEvalCycleRecordsInterruptedBroadcast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newFixture(t, "dev", nil)
+	f.broadcasts.onCall = func(proposal.Built) { cancel() }
+	f.broadcasts.set("", fmt.Errorf("gnokey interrupted: %w", context.Canceled))
+
+	f.d.evalCycle(ctx, f.runtime(t))
+	if got := lastStatus(t, f).Status; got != store.StatusUnconfirmed {
+		t.Fatalf("status = %q, want unconfirmed\nlogs:\n%s", got, f.logs.String())
+	}
+	notifs := f.notifs.all()
+	if len(notifs) != 1 || !strings.Contains(notifs[0], "unconfirmed") {
+		t.Fatalf("notifications = %v, want one unconfirmed", notifs)
+	}
+}
+
+// The last allowed execute attempt being interrupted by a shutdown still
+// raises the give-up alert.
+func TestVoteCycleAlertsOnInterruptedLastExecute(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+	f.broadcasts.set("", fmt.Errorf("gnokey interrupted: %w", context.Canceled))
+
+	start := time.Now()
+	for i := 0; i < maxExecuteFailures; i++ {
+		if i == maxExecuteFailures-1 {
+			f.broadcasts.onCall = func(proposal.Built) { cancel() }
+		}
+		at := start.Add(time.Duration(i) * 2 * executeRetry)
+		f.d.now = func() time.Time { return at }
+		f.d.voteCycle(ctx, f.runtime(t))
+	}
+	if n := len(executeCalls(f)); n != maxExecuteFailures {
+		t.Fatalf("execute calls = %d, want %d\nlogs:\n%s", n, maxExecuteFailures, f.logs.String())
+	}
+	notifs := f.notifs.all()
+	if len(notifs) != 1 || !strings.Contains(notifs[0], "execution failed") {
+		t.Fatalf("notifications = %v, want one execution-failed alert", notifs)
 	}
 }

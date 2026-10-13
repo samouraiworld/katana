@@ -38,7 +38,8 @@ safety:
   max_proposals_per_day: 3            # max proposals per chain over a rolling 24h
   max_eligible_share: 25              # % of the valset; if more validators than this are
                                       # eligible for eject/lower_vp at once, the cycle is
-                                      # aborted (likely a monitoring outage, not bad validators)
+                                      # aborted (likely a monitoring outage, not bad validators);
+                                      # validators missing from the report count as eligible
   min_valset_size: 4                  # never eject if the valset would drop below this
 
 # ── gnomonitoring REST API ────────────────────────────────────────────────────
@@ -188,14 +189,17 @@ vote_tracking:
   status_source: rpc                  # rpc (vm/qrender) | graphql
   execute_proposals: true             # katana calls ExecuteOrRejectProposal on its own proposals
                                       # once a supermajority is reached. Overridable per chain.
+                                      # Ignored on a dry_run chain (nothing is signed).
   pending_timeout: 336h               # 14d. A proposal still open after this is marked
                                       # expired and notified once (stalled vote). It stays
                                       # open on-chain, so the validator stays gated and katana
                                       # keeps watching/executing it. Overridable per chain.
 
 # ── Notifications ─────────────────────────────────────────────────────────────
-# Sent only after a successful broadcast (and accepted/rejected outcomes).
-# Nothing is sent on errors.
+# Sent on a successful broadcast and accepted/rejected outcomes, plus alerts for
+# an unconfirmed broadcast (may be on-chain), an expired proposal and an
+# execution that keeps failing; dry_run chains get the would-be proposal.
+# Other errors are only logged.
 notifications:
   enabled: true
   discord:
