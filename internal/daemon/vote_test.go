@@ -199,8 +199,8 @@ func TestVoteCycleExpiresAndKeepsWatching(t *testing.T) {
 		t.Fatalf("status = %q resolved_at = %v, want expired with a resolution time", last.Status, last.ResolvedAt)
 	}
 	notifs := f.notifs.all()
-	if len(notifs) != 1 || !strings.Contains(notifs[0], "expired") {
-		t.Fatalf("notifications = %v, want one expired", notifs)
+	if len(notifs) != 1 || !strings.Contains(notifs[0], "expired") || !strings.Contains(notifs[0], "336h0m0s") {
+		t.Fatalf("notifications = %v, want one expired citing the 336h pending_timeout", notifs)
 	}
 
 	// Expired once: no repeat notification while it stays open.
@@ -239,6 +239,53 @@ func TestVoteCycleExecutedOverdueProposalIsNotExpired(t *testing.T) {
 	notifs := f.notifs.all()
 	if len(notifs) != 1 || strings.Contains(notifs[0], "expired") {
 		t.Fatalf("notifications = %v, want one accepted", notifs)
+	}
+}
+
+// An execute call whose outcome is unknown may still decide the proposal: an
+// overdue row is left for the next tick to read, not expired first.
+func TestVoteCycleAmbiguousExecuteIsNotExpired(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, 15*24*time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+	f.broadcasts.set("broadcast tx: broadcasting bytes: request timeout", errors.New("gnokey: exit status 1"))
+
+	f.d.voteCycle(context.Background(), f.runtime(t))
+	if n := len(executeCalls(f)); n != 1 {
+		t.Fatalf("execute calls = %d, want 1", n)
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending\nlogs:\n%s", got, f.logs.String())
+	}
+	if notifs := f.notifs.all(); len(notifs) != 0 {
+		t.Fatalf("notifications = %v, want none", notifs)
+	}
+}
+
+// failUpdateStore fails every status write.
+type failUpdateStore struct{ store.Store }
+
+func (failUpdateStore) UpdateStatus(context.Context, int64, string, time.Time) error {
+	return errors.New("disk full")
+}
+
+// An outcome is notified only once persisted: a failing write retries next
+// tick without notifying the same outcome every time.
+func TestVoteCycleUnpersistedOutcomeIsNotNotified(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "dev", nil)
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "accepted"))
+	f.d.st = failUpdateStore{Store: f.st}
+
+	for i := 0; i < 2; i++ {
+		f.d.voteCycle(ctx, f.runtime(t))
+	}
+	if notifs := f.notifs.all(); len(notifs) != 0 {
+		t.Fatalf("notifications = %v, want none\nlogs:\n%s", notifs, f.logs.String())
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending", got)
 	}
 }
 
