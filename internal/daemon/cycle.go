@@ -164,7 +164,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		// open ejections (they may still pass) as already gone.
 		if dec.Action == config.ActionEject {
 			if openEjects < 0 {
-				if openEjects, err = d.openEjections(ctx, rt.Key, inValset); err != nil {
+				if openEjects, err = d.openEjections(ctx, rt, inValset); err != nil {
 					d.logger.Printf("[%s][eval] SUPPRESS %s: counting open ejections: %v", rt.Key, disp(report.Moniker, report.Addr), err)
 					openEjects = -1
 					continue
@@ -198,7 +198,8 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		byAction[dec.Action]++
 		// A definitive broadcast failure created nothing: it uses up neither
 		// the budget nor the valset. A manual ejection may still be
-		// broadcast by hand, so it counts as open.
+		// broadcast by hand, so it counts as open: here for the rest of this
+		// cycle, and through openEjections in later ones.
 		if res == broadcastOnChain {
 			broadcasts++
 		}
@@ -215,21 +216,28 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	}
 }
 
-// openEjections counts the chain's tracked (pending, unconfirmed, expired)
-// eject proposals whose validator is still in the valset.
-func (d *Daemon) openEjections(ctx context.Context, chain string, inValset map[string]bool) (int, error) {
-	tracked, err := d.st.TrackedProposals(ctx, chain)
+// openEjections counts the chain's open ejections of validators still in the
+// valset: tracked (pending, unconfirmed, expired) eject proposals, plus eject
+// hand-offs (dry-run records) younger than the eject cooldown. An operator may
+// still broadcast a hand-off by hand, and until the cooldown ends the gate
+// keeps katana from proposing that validator again. Each validator counts once.
+func (d *Daemon) openEjections(ctx context.Context, rt config.Runtime, inValset map[string]bool) (int, error) {
+	tracked, err := d.st.TrackedProposals(ctx, rt.Key)
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	for _, p := range tracked {
+	handedOff, err := d.st.DryRunsSince(ctx, rt.Key, d.now().Add(-rt.Proposal.CooldownFor(config.ActionEject)))
+	if err != nil {
+		return 0, err
+	}
+	open := map[string]bool{}
+	for _, p := range append(tracked, handedOff...) {
 		// An unset action is a legacy row, which was always an eject.
-		if (p.Action == config.ActionEject || p.Action == "") && inValset[strings.ToLower(p.Address)] {
-			n++
+		if addr := strings.ToLower(p.Address); (p.Action == config.ActionEject || p.Action == "") && inValset[addr] {
+			open[addr] = true
 		}
 	}
-	return n, nil
+	return len(open), nil
 }
 
 // setGuardTripped records whether the chain's mass-eligibility guardrail is

@@ -176,7 +176,7 @@ cannot be disabled, only loosened:
 | `max_proposals_per_cycle` | `1`     | broadcasts per chain per eval cycle                                                        |
 | `max_proposals_per_day`   | `3`     | broadcasts per chain over a rolling 24h (dry-run/manual records and failed broadcasts don't count) |
 | `max_eligible_share`      | `25`    | % of the valset eligible for eject/lower_vp above which the cycle proposes nothing and a `guardrail` alert is sent (once per episode) |
-| `min_valset_size`         | `4`     | no ejection that would leave fewer validators, counting open ejections as already gone     |
+| `min_valset_size`         | `4`     | no ejection that would leave fewer validators, counting open ejections (pending/unconfirmed/expired, plus manual hand-offs within the eject cooldown) as already gone |
 
 A gnomonitoring response katana cannot trust — an empty list, a missing
 window, a missing or `null` score or voting power — skips the whole cycle

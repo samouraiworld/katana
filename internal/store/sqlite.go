@@ -293,6 +293,17 @@ func (s *SQLite) BroadcastsSince(ctx context.Context, chain string, since time.T
 	return n, err
 }
 
+func (s *SQLite) DryRunsSince(ctx context.Context, chain string, since time.Time) ([]ProposalRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+proposalCols+` FROM proposals WHERE chain = ? AND created_at >= ? AND status = ? ORDER BY id`,
+		chain, fmtTime(since), StatusDryRun)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectProposals(rows)
+}
+
 func (s *SQLite) ListProposals(ctx context.Context, limit int) ([]ProposalRecord, error) {
 	if limit <= 0 {
 		limit = 100

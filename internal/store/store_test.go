@@ -321,3 +321,32 @@ func TestBroadcastsSince(t *testing.T) {
 		t.Fatalf("Noop.BroadcastsSince = %d, %v; want 0, nil", n, err)
 	}
 }
+
+func TestDryRunsSince(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+
+	rec := func(chain, addr string, at time.Time, status string) {
+		if _, err := st.RecordProposal(ctx, ProposalRecord{
+			CreatedAt: at, Chain: chain, ChainID: "dev", Address: addr, Status: status,
+		}); err != nil {
+			t.Fatalf("RecordProposal: %v", err)
+		}
+	}
+	recent := now.Add(-time.Hour)
+	rec("local", "g1want", recent, StatusDryRun)
+	// Not returned: other statuses, too old, other chain.
+	rec("local", "g1x", recent, StatusPending)
+	rec("local", "g1x", recent, "")
+	rec("local", "g1x", now.Add(-25*time.Hour), StatusDryRun)
+	rec("other", "g1x", recent, StatusDryRun)
+
+	got, err := st.DryRunsSince(ctx, "local", now.Add(-24*time.Hour))
+	if err != nil || len(got) != 1 || got[0].Address != "g1want" {
+		t.Fatalf("DryRunsSince = %+v, %v; want only g1want", got, err)
+	}
+	if got, err := (Noop{}).DryRunsSince(ctx, "local", now); err != nil || len(got) != 0 {
+		t.Fatalf("Noop.DryRunsSince = %+v, %v; want none", got, err)
+	}
+}

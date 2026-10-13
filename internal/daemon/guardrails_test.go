@@ -345,3 +345,55 @@ func TestFailedEjectionDoesNotCountAsOpen(t *testing.T) {
 		t.Fatalf("broadcast attempts = %d, want 2 (failed ejection is not open)\nlogs:\n%s", got, f.logs.String())
 	}
 }
+
+// manualEject sets eject to mode manual (the dry-run hand-off).
+func manualEject(c *config.Config) {
+	ac := c.Proposal.Actions[config.ActionEject]
+	ac.Mode = config.ModeManual
+	c.Proposal.Actions[config.ActionEject] = ac
+}
+
+// A manual ejection handed off in an earlier cycle may still be broadcast by
+// hand: it keeps counting as open across cycles, so min_valset_size cannot be
+// bypassed one hand-off per cycle.
+func TestMinValsetSizeCountsHandOffsAcrossCycles(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 2, 3, manualEject) // 5 validators; one ejection leaves 4
+	rt := strict(f.runtime(t))
+	rt.Safety.MaxEligibleShare = 50
+
+	now := f.d.now()
+	f.d.evalCycle(ctx, rt)
+	f.d.now = func() time.Time { return now.Add(time.Hour) }
+	f.d.evalCycle(ctx, rt)
+
+	props, err := f.st.ListProposals(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props) != 1 || props[0].Address != "g1bad0" {
+		t.Fatalf("proposals = %+v, want only g1bad0 handed off (g1bad1 would leave 3 < 4)\nlogs:\n%s", props, f.logs.String())
+	}
+	if !strings.Contains(f.logs.String(), "min_valset_size") {
+		t.Fatalf("the guardrail must be logged\nlogs:\n%s", f.logs.String())
+	}
+}
+
+// A hand-off older than the eject cooldown no longer counts as open: the gate
+// would let katana propose that validator again.
+func TestMinValsetSizeIgnoresStaleHandOffs(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 1, 4, nil) // 5 validators
+	rt := strict(f.runtime(t))
+	if _, err := f.st.RecordProposal(ctx, store.ProposalRecord{
+		CreatedAt: f.d.now().Add(-rt.Proposal.CooldownFor(config.ActionEject) - time.Hour), Chain: "test", ChainID: "dev",
+		Address: "g1ok0", Action: config.ActionEject, Status: store.StatusDryRun, Success: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1 (stale hand-off is not open)\nlogs:\n%s", got, f.logs.String())
+	}
+}

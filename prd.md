@@ -234,8 +234,10 @@ submitted). Each loops on its own ticker.
     chain that cycle and sends one `guardrail` notification per episode —
     mass failure points at bad metrics, not bad validators.
   - `min_valset_size` (default 4): no ejection that would leave fewer
-    validators, counting open (pending/unconfirmed/expired) ejections as
-    already gone.
+    validators, counting open ejections of validators still in the valset
+    as already gone: pending/unconfirmed/expired ones, and manual hand-offs
+    (dry-run records) younger than the eject cooldown, since an operator may
+    still broadcast those by hand.
   - A malformed gnomonitoring response (empty list, missing window, missing
     or null score/voting power) skips the cycle; it never reads as score 0.
   - A store error on any lifecycle-gate read closes the gate.
