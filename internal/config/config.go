@@ -192,14 +192,17 @@ type VoteTracking struct {
 	// ExecuteProposals is the global default for whether katana calls
 	// ExecuteOrRejectProposal on its own proposals once a supermajority is
 	// reached (nil = true). GovDAO v3 resolves a proposal only on that call.
+	// A dry_run chain never executes, whatever this says.
 	ExecuteProposals *bool `yaml:"execute_proposals"`
 	// PendingTimeout is how long a proposal may stay open before katana marks
 	// it expired. Proposals never expire on-chain.
 	PendingTimeout string `yaml:"pending_timeout"`
 }
 
-// Notifications configures outbound channels. Sent only after a successful
-// on-chain broadcast (and on accepted/rejected outcomes).
+// Notifications configures outbound channels. Sent on a successful broadcast,
+// accepted/rejected outcomes, an unconfirmed broadcast, an expired proposal, a
+// given-up execution, and a dry-run would-be proposal; other errors are only
+// logged.
 type Notifications struct {
 	Enabled  bool            `yaml:"enabled"`
 	Discord  WebhookChannel  `yaml:"discord"`
@@ -478,6 +481,8 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 	if ch.ExecuteProposals != nil {
 		execute = *ch.ExecuteProposals
 	}
+	// dry_run signs nothing, ExecuteOrRejectProposal included.
+	execute = execute && !dryRun
 	timeoutStr := c.VoteTracking.PendingTimeout
 	if ch.PendingTimeout != "" {
 		timeoutStr = ch.PendingTimeout

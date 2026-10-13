@@ -59,10 +59,10 @@ supermajority; a NO majority alone resolves nothing, and proposals never expire
 on-chain. So the vote worker also:
 - calls `ExecuteOrRejectProposal(pid)` with katana's key when the page shows a
   supermajority (`vote_tracking.execute_proposals`, default `true`, per-chain
-  override; retried at most hourly). An executor that returns an error marks
-  the proposal denied. One that panics (e.g. ejecting a validator already gone)
-  reverts the call: after 3 failed attempts katana stops and sends an
-  *execution failed* alert;
+  override; retried at most hourly; never on a `dry_run` chain, which signs
+  nothing). An executor that returns an error marks the proposal denied. One
+  that panics (e.g. ejecting a validator already gone) reverts the call: after
+  3 failed attempts katana stops and sends an *execution failed* alert;
 - marks a proposal still open after `vote_tracking.pending_timeout` (default
   `336h` = 14d) as **expired** and notifies once (stalled vote). GovDAO
   proposals cannot be withdrawn, so it stays open and votable: the validator
@@ -220,11 +220,20 @@ katana notifies every enabled channel (Discord, Slack, Telegram). Example
 *"...has been sent to lower its voting power from 500 to 400 (-2.1% of total
 valset VP)."*
 
+It also alerts when a proposal needs an operator:
+- **unconfirmed** — gnokey failed after sending the tx (RPC timeout, dropped
+  connection, shutdown mid-run), so the proposal may or may not be on-chain;
+- **expired** — still open after `vote_tracking.pending_timeout` (sent once;
+  katana keeps watching it);
+- **execution failed** — the proposal reached a supermajority but 3
+  `ExecuteOrRejectProposal` calls failed, so katana stopped retrying.
+
 Additionally, on `dry_run: true` chains, katana sends a notification with the would-be proposal script (eject or VP-change) and ready-to-run `gnokey` command — see [Rehearsal / dry-run](#rehearsal--dry-run).
 
-Notifications are color-coded by action: green for `raise_vp`, orange for `lower_vp`, red for `eject` (Discord embed color / Slack attachment color; Telegram uses a 🟢/🟠/🔴 emoji prefix since it has no native color concept). The title states the lifecycle stage (submitted/accepted/rejected/dry-run).
+Notifications are color-coded by action: green for `raise_vp`, orange for `lower_vp`, red for `eject` (Discord embed color / Slack attachment color; Telegram uses a 🟢/🟠/🔴 emoji prefix since it has no native color concept). The title states the lifecycle stage (submitted/accepted/rejected/expired/unconfirmed/execution failed/dry-run).
 
-Nothing is sent on errors.
+Nothing else is sent: a broadcast rejected before sending (e.g. insufficient
+funds) and other errors are only logged.
 
 ## Requirements
 
