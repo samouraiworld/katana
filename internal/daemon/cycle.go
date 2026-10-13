@@ -286,8 +286,8 @@ const (
 // (signing via gnokey, recording it, notifying on success) or — when manual
 // (dry_run chain, or the action's mode is manual) — logs and notifies the
 // complete would-be proposal, with the script and a ready-to-run gnokey
-// command attached, without touching the chain. totalWindowVP is
-// dec.Window's total valset VP this cycle, used to compute the
+// command attached, without touching the chain. totalVP is the live valset's
+// total voting power (RPC /validators) this cycle, used to compute the
 // notification's VPDeltaPercent.
 func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalVP int64, manual bool) (produceResult, error) {
 	// A valset action is keyed by the operator address, but metrics are keyed
