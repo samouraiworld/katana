@@ -426,6 +426,24 @@ func TestBroadcastOutcomeWriteFailureKeepsGate(t *testing.T) {
 	}
 }
 
+// An outcome write superseded by a reconcile (the vote worker got there
+// first) is not a failure: the cycle succeeds and nothing is logged CRITICAL
+// about the write.
+func TestBroadcastOutcomeSupersededIsNotAFailure(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.st = &failStore{Store: f.st, outcomeErr: fmt.Errorf("row 1: %w", store.ErrBroadcastSuperseded)}
+
+	if err := f.d.evalCycle(context.Background(), f.runtime(t)); err != nil {
+		t.Fatalf("evalCycle = %v, want nil\nlogs:\n%s", err, f.logs.String())
+	}
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1", got)
+	}
+	if strings.Contains(f.logs.String(), "recording the outcome failed") {
+		t.Fatalf("superseded outcome logged as a failure:\n%s", f.logs.String())
+	}
+}
+
 // manualEject sets eject to mode manual (the dry-run hand-off).
 func manualEject(c *config.Config) {
 	ac := c.Proposal.Actions[config.ActionEject]

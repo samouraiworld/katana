@@ -202,18 +202,29 @@ func (s *SQLite) RecordProposal(ctx context.Context, r ProposalRecord) (int64, e
 }
 
 func (s *SQLite) RecordBroadcastOutcome(ctx context.Context, id int64, o ProposalRecord) error {
+	// Guarded like Reconcile: only the bare intent is completed, so a row the
+	// vote worker reconciled while gnokey ran keeps its tx hash and id.
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE proposals SET output = ?, success = ?, status = ?, tx_hash = ?, onchain_proposal_id = ? WHERE id = ?`,
-		o.Output, boolInt(o.Success), o.Status, o.TxHash, o.OnchainID, id)
+		`UPDATE proposals SET output = ?, success = ?, status = ?, tx_hash = ?, onchain_proposal_id = ?
+		 WHERE id = ? AND status = ? AND tx_hash = '' AND onchain_proposal_id = ''`,
+		o.Output, boolInt(o.Success), o.Status, o.TxHash, o.OnchainID,
+		id, StatusUnconfirmed)
 	if err != nil {
 		return err
 	}
 	if n, err := res.RowsAffected(); err != nil {
 		return err
-	} else if n != 1 {
+	} else if n == 1 {
+		return nil
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM proposals WHERE id = ?`, id).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
 		return fmt.Errorf("proposal row %d not found", id)
 	}
-	return nil
+	return fmt.Errorf("proposal row %d: %w", id, ErrBroadcastSuperseded)
 }
 
 func (s *SQLite) SetOnchainID(ctx context.Context, id int64, onchainID string) error {

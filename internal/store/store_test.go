@@ -492,6 +492,39 @@ func TestRecordBroadcastOutcome(t *testing.T) {
 	}
 }
 
+// The vote worker may reconcile the intent row from the tx-indexer while
+// gnokey still runs: a late ambiguous outcome must not wipe the reconciled tx
+// hash and GovDAO id, and is reported as superseded, not as a failure.
+func TestRecordBroadcastOutcomeAfterReconcile(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	id, err := st.RecordProposal(ctx, ProposalRecord{
+		CreatedAt: time.Now(), Chain: "local", ChainID: "dev", Address: "g1bad",
+		Status: StatusUnconfirmed, BroadcastHeight: 9, PayloadHash: "abc",
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	if err := st.Reconcile(ctx, id, "h=", "4"); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	err = st.RecordBroadcastOutcome(ctx, id, ProposalRecord{Output: "timeout", Status: StatusUnconfirmed})
+	if !errors.Is(err, ErrBroadcastSuperseded) {
+		t.Fatalf("RecordBroadcastOutcome err = %v, want ErrBroadcastSuperseded", err)
+	}
+	last, err := st.LastProposal(ctx, "local", "g1bad")
+	if err != nil || last == nil {
+		t.Fatalf("LastProposal: %+v, %v", last, err)
+	}
+	if last.Status != StatusPending || last.TxHash != "h=" || last.OnchainID != "4" {
+		t.Fatalf("reconciled row overwritten: %+v", last)
+	}
+
+	if err := st.RecordBroadcastOutcome(ctx, id+100, ProposalRecord{Status: StatusPending}); err == nil || errors.Is(err, ErrBroadcastSuperseded) {
+		t.Fatalf("missing row err = %v, want a plain failure", err)
+	}
+}
+
 func TestDryRunsSince(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)

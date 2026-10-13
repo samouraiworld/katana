@@ -383,7 +383,11 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	}
 	rec.OnchainID, rec.TxHash = result.OnchainID, result.TxHash
 	var cycleErr error
-	if err := d.st.RecordBroadcastOutcome(ctx, id, result); err != nil {
+	if err := d.st.RecordBroadcastOutcome(ctx, id, result); errors.Is(err, store.ErrBroadcastSuperseded) {
+		// The vote worker reconciled the row from the tx-indexer while
+		// gnokey ran: its on-chain record is the better one.
+		d.logger.Printf("[%s][eval] broadcast %s for %s: row %d was already reconciled by the vote worker, keeping it", rt.Key, outcome, dec.Address, id)
+	} else if err != nil {
 		// The intent row stays unconfirmed: the gate holds and the vote
 		// worker can still reconcile it from the tx-indexer.
 		d.logger.Printf("[%s][eval] CRITICAL: broadcast %s for %s but recording the outcome failed: %v — row %d stays unconfirmed (gate closed)", rt.Key, outcome, dec.Address, err, id)
