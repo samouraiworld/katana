@@ -232,9 +232,29 @@ func testHealth(t *testing.T) {
 		pollInterval: "1s", webListen: addr})
 	var code int
 	var body string
-	waitFor(t, "/health 200", 30*time.Second, func() bool {
+	// The JSON /health body (internal/daemon/health.go healthReport).
+	type workerHealth struct {
+		Kind        string `json:"kind"`
+		LastSuccess string `json:"last_success"`
+		Stale       bool   `json:"stale"`
+	}
+	workers := func() map[string]workerHealth {
+		var r struct {
+			Workers []workerHealth `json:"workers"`
+		}
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			t.Fatalf("decoding /health body %q: %v", body, err)
+		}
+		out := map[string]workerHealth{}
+		for _, w := range r.Workers {
+			out[w.Kind] = w
+		}
+		return out
+	}
+	// 200 alone could still be the startup grace: wait for a real success.
+	waitFor(t, "/health 200 with a successful eval cycle", 30*time.Second, func() bool {
 		code, body = health(addr)
-		return code == http.StatusOK
+		return code == http.StatusOK && workers()["eval"].LastSuccess != ""
 	})
 	t.Logf("/health %d %s", code, body)
 	gm.Close()
@@ -243,8 +263,17 @@ func testHealth(t *testing.T) {
 		return code == http.StatusServiceUnavailable
 	})
 	t.Logf("/health %d %s", code, body)
-	if !strings.Contains(body, `"status":"unhealthy"`) || !strings.Contains(body, `"stale":true`) {
+	if !strings.Contains(body, `"status":"unhealthy"`) {
 		t.Fatalf("503 body = %s", body)
+	}
+	ws := workers()
+	if !ws["eval"].Stale {
+		t.Fatalf("eval worker not stale: %s", body)
+	}
+	for kind, w := range ws {
+		if w.Stale != (kind == "eval") {
+			t.Fatalf("%s worker stale=%v, want only the eval worker stale: %s", kind, w.Stale, body)
+		}
 	}
 	if rs := k.rows(t); len(rs) != 0 {
 		t.Fatalf("proposals recorded: %+v", rs)

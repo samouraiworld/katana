@@ -146,6 +146,44 @@ func TestRunWorkerRecoversPanic(t *testing.T) {
 	}
 }
 
+// A cycle that returns nil refreshes the worker's last success.
+func TestRunWorkerRecordsSuccess(t *testing.T) {
+	c := newClock()
+	d := &Daemon{logger: log.New(&bytes.Buffer{}, "", 0), now: c.now}
+	d.health = newHealthRegistry(d.now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.runWorker(ctx, "eval", "test", 5*time.Millisecond, func(context.Context) error {
+			if calls.Add(1) == 2 {
+				cancel()
+			}
+			// Only this goroutine moves the clock while the worker runs.
+			c.advance(10 * time.Millisecond)
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not stop")
+	}
+
+	w := workerOf(d.health)
+	if w.LastSuccess.IsZero() || !w.LastFailure.IsZero() {
+		t.Fatalf("successful cycle not recorded: %+v", w)
+	}
+	// 20ms in: past the 15ms startup grace, so only the success at 10ms
+	// keeps the worker fresh.
+	if !healthOf(d.health) {
+		t.Fatalf("unhealthy right after a successful cycle: %+v", workerOf(d.health))
+	}
+}
+
 // A cycle cut short by shutdown is not recorded as a failure.
 func TestRunWorkerIgnoresCancelledCycle(t *testing.T) {
 	d := &Daemon{logger: log.New(&bytes.Buffer{}, "", 0), now: time.Now}
