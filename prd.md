@@ -84,9 +84,11 @@ submitted). Each loops on its own ticker.
    sub-metrics (`sign_rate`, `incident_rate_per_week`, `downtime_blocks`, …),
    each broken out per reporting window (`last_24h` | `current_week` |
    `current_month` | `current_year`) — see §6.4b.
-2. Compute each window's total valset voting power across every reported
-   validator (`rules.TotalVotingPower`), needed to clamp `lower_vp`/`raise_vp`
-   targets against `max_voting_power_share`.
+2. Read the live valset from the chain RPC (`/validators`): each validator's
+   current voting power and the total valset voting power (`rules.Valset`),
+   needed to step and clamp `lower_vp`/`raise_vp` targets against
+   `max_voting_power_share`. gnomonitoring's voting power is not used; an
+   unreadable RPC voting power skips the cycle.
 3. For each candidate (validator in the report): evaluate its score against
    the configured action thresholds (`rules.Evaluate` — `eject` / `lower_vp` /
    `raise_vp`, first match in `action_priority` wins) → check exceptions →
@@ -592,8 +594,11 @@ chains:
 - **OR-2** `data/` (SQLite + proposals) persists in a volume.
 - **OR-3** Structured, leveled logs (`log_level`).
 - **OR-4** Expose a `/health` endpoint on `web.listen` reporting liveness, so an
-  external monitor (Grafana) can alert if the service goes down. `/metrics` is
-  **not** required for now. *(decision D6 — confirmed: health only.)* `[TO BUILD]`
+  external monitor (Grafana) can alert if the service goes down. It answers
+  503 once any worker (eval or vote, per chain) has gone 3 of its poll
+  intervals without a successful cycle (the same window is the startup
+  grace), 200 otherwise, with a per-worker JSON body either way. `/metrics`
+  is **not** required for now. *(decision D6 — confirmed: health only.)* `[TO BUILD]`
 
 ## 10. Security & safety
 
@@ -668,7 +673,9 @@ RPC, GovDAO, gnokey, or network access.
 - **TR-daemon** — a single worker cycle end-to-end with all deps faked; graceful
   shutdown stops tickers; a failing cycle does not crash the service; per-chain
   isolation (one chain's failure does not affect others).
-- **TR-health** — `/health` returns 200 while the service is alive.
+- **TR-health** — `/health` returns 200 while every worker has had a
+  successful cycle within 3 poll intervals, 503 once one has not, with the
+  per-worker JSON body.
 
 ### 12.3 Test infrastructure to introduce
 
