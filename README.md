@@ -59,10 +59,10 @@ supermajority; a NO majority alone resolves nothing, and proposals never expire
 on-chain. So the vote worker also:
 - calls `ExecuteOrRejectProposal(pid)` with katana's key when the page shows a
   supermajority (`vote_tracking.execute_proposals`, default `true`, per-chain
-  override; retried at most hourly). An executor that returns an error marks
-  the proposal denied. One that panics (e.g. ejecting a validator already gone)
-  reverts the call: after 3 failed attempts katana stops and sends an
-  *execution failed* alert;
+  override; retried at most hourly; never on a `dry_run` chain, which signs
+  nothing). An executor that returns an error marks the proposal denied. One
+  that panics (e.g. ejecting a validator already gone) reverts the call: after
+  3 failed attempts katana stops and sends an *execution failed* alert;
 - marks a proposal still open after `vote_tracking.pending_timeout` (default
   `336h` = 14d) as **expired** and notifies once (stalled vote). GovDAO
   proposals cannot be withdrawn, so it stays open and votable: the validator

@@ -590,6 +590,59 @@ chains:
 	}
 }
 
+// dry_run means nothing is signed: it also disables ExecuteOrRejectProposal,
+// whatever execute_proposals says, globally or per chain.
+func TestDryRunDisablesExecuteProposals(t *testing.T) {
+	const yaml = `
+gnomonitoring: {base_url: "x"}
+gnokey: {key_name: "k"}
+storage: {driver: sqlite}
+dry_run: true
+vote_tracking:
+  execute_proposals: true
+chains:
+  inherits:
+    rpc_endpoint: "r1"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+  explicit:
+    rpc_endpoint: "r2"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    execute_proposals: true
+  armed:
+    rpc_endpoint: "r3"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    dry_run: false
+  armed_disabled:
+    rpc_endpoint: "r4"
+    chain_id: "d"
+    gnomonitoring_chain: "l"
+    enabled: true
+    dry_run: false
+    execute_proposals: false
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for chain, want := range map[string]bool{
+		"inherits": false, "explicit": false, "armed": true, "armed_disabled": false,
+	} {
+		rt, err := c.Runtime(chain)
+		if err != nil {
+			t.Fatalf("Runtime(%s): %v", chain, err)
+		}
+		if rt.ExecuteProposals != want {
+			t.Errorf("%s: ExecuteProposals = %v, want %v (dry_run %v)", chain, rt.ExecuteProposals, want, rt.DryRun)
+		}
+	}
+}
+
 func TestPendingTimeoutMustBePositive(t *testing.T) {
 	for _, v := range []string{"0s", "-1h", "soon"} {
 		yaml := strings.Replace(validYAML, "storage:", "vote_tracking:\n  pending_timeout: "+v+"\nstorage:", 1)

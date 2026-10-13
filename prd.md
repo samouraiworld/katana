@@ -315,7 +315,9 @@ actions) if the validator's score still qualifies — see FR-7.2.
   call made once YES or NO reaches the supermajority (66.66 %); a NO majority
   alone resolves nothing. When `execute_proposals` is on (default, per-chain
   override), katana calls `ExecuteOrRejectProposal(pid)` with its own key once
-  the render shows a supermajority, at most once per hour per proposal. Only
+  the render shows a supermajority, at most once per hour per proposal. A
+  `dry_run` chain never executes: it signs nothing, whatever
+  `execute_proposals` says. Only
   an executor that *returns* an error turns into a denial; a panicking one
   reverts the call, so katana stops after 3 failed attempts and alerts
   (`execute_failed`).

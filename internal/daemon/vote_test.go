@@ -169,6 +169,24 @@ func TestVoteCycleExecuteDisabled(t *testing.T) {
 	}
 }
 
+// A dry_run chain signs nothing, ExecuteOrRejectProposal included.
+func TestVoteCycleDryRunNeverExecutes(t *testing.T) {
+	f := newFixture(t, "dev", func(c *config.Config) {
+		c.Chains["test"].DryRun = boolPtr(true)
+		c.Chains["test"].ExecuteProposals = boolPtr(true)
+	})
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "open_supermajority_yes"))
+
+	f.d.voteCycle(context.Background(), f.runtime(t))
+	if n := f.broadcasts.count(); n != 0 {
+		t.Fatalf("broadcasts = %d, want 0 on a dry_run chain", n)
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+}
+
 func TestVoteCycleExpiresAndKeepsWatching(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, "dev", nil)

@@ -168,6 +168,7 @@ type VoteTracking struct {
 	// ExecuteProposals is the global default for whether katana calls
 	// ExecuteOrRejectProposal on its own proposals once a supermajority is
 	// reached (nil = true). GovDAO v3 resolves a proposal only on that call.
+	// A dry_run chain never executes, whatever this says.
 	ExecuteProposals *bool `yaml:"execute_proposals"`
 	// PendingTimeout is how long a proposal may stay open before katana marks
 	// it expired. Proposals never expire on-chain.
@@ -437,6 +438,8 @@ func (c *Config) Runtime(chainID string) (Runtime, error) {
 	if ch.ExecuteProposals != nil {
 		execute = *ch.ExecuteProposals
 	}
+	// dry_run signs nothing, ExecuteOrRejectProposal included.
+	execute = execute && !dryRun
 	timeoutStr := c.VoteTracking.PendingTimeout
 	if ch.PendingTimeout != "" {
 		timeoutStr = ch.PendingTimeout
