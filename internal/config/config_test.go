@@ -537,7 +537,8 @@ chains:
 }
 
 func TestVoteTrackingDefaults(t *testing.T) {
-	c, err := Load(writeConfig(t, validYAML))
+	// Armed: a dry_run chain never executes, whatever execute_proposals says.
+	c, err := Load(writeConfig(t, "dry_run: false\n"+validYAML))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -558,6 +559,7 @@ func TestVoteTrackingPerChainOverride(t *testing.T) {
 gnomonitoring: {base_url: "x"}
 gnokey: {key_name: "k"}
 storage: {driver: sqlite}
+dry_run: false
 vote_tracking:
   execute_proposals: false
   pending_timeout: 72h
