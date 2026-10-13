@@ -335,8 +335,10 @@ actions) if the validator's score still qualifies — see FR-7.2.
 
 ### 6.9 Notifications `[TO BUILD]`
 
-Notifications never fire on a failed/errored broadcast; they follow the on-chain
-lifecycle. Three events, all in English (decision D3):
+Notifications follow the on-chain lifecycle, all in English (decision D3): three
+outcome events (FR-8.1 to FR-8.3) plus three operator alerts (FR-8.6 to
+FR-8.8), and the dry-run hand-off (FR-6.6). A broadcast that failed before
+sending, and any other error, is only logged.
 
 - **FR-8.1** *Proposal sent* — after a **successful broadcast** of a proposal
   (eject / lower_vp / raise_vp):
@@ -353,6 +355,15 @@ lifecycle. Three events, all in English (decision D3):
   link to the proposal is appended when the chain's `gnoweb_url` is known.
 - **FR-8.5** Best-effort: a failed notification is logged, never blocks nor
   crashes a worker; short timeout.
+- **FR-8.6** *Proposal unconfirmed* — gnokey failed after sending the tx
+  (FR-VT.8), so it may be on-chain:
+  > `The <action> proposal for validator <moniker> (<address>) on <chain> may or may not be on-chain: gnokey failed after sending it. katana files no other proposal for this validator until this is resolved; check the chain for a GovDAO proposal from katana's key.`
+- **FR-8.7** *Proposal expired* — still open after `pending_timeout`, sent once
+  (FR-VT.7):
+  > `The <action> proposal for validator <moniker> (<address>) on <chain> expired: no supermajority after <pending_timeout>. It is still open on-chain and cannot be withdrawn: katana files no other proposal for this validator until it is decided, and keeps watching it.`
+- **FR-8.8** *Execution failed* — katana gave up on `ExecuteOrRejectProposal`
+  after 3 failed attempts (FR-VT.6):
+  > `The <action> proposal for validator <moniker> (<address>) on <chain> reached a supermajority, but katana's ExecuteOrRejectProposal calls keep failing, so it is still open. katana stopped retrying; execute or investigate it manually.`
 
 ### 6.10 Persistence `[EXISTS + extend]`
 
@@ -459,7 +470,8 @@ vote_tracking:
   govdao_realm: "gno.land/r/gov/dao"   # realm that emits ProposalCreated + exposes status
   status_source: rpc               # rpc (vm/qrender, default) | graphql (indexer fallback) (D14)
 
-# [NEW] Notifications — sent only after a SUCCESSFUL on-chain broadcast (D2).
+# [NEW] Notifications — on a SUCCESSFUL on-chain broadcast (D2), outcomes and
+# operator alerts (unconfirmed / expired / execution failed), see §6.9.
 notifications:
   enabled: true
   discord:

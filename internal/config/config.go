@@ -175,8 +175,10 @@ type VoteTracking struct {
 	PendingTimeout string `yaml:"pending_timeout"`
 }
 
-// Notifications configures outbound channels. Sent only after a successful
-// on-chain broadcast (and on accepted/rejected outcomes).
+// Notifications configures outbound channels. Sent on a successful broadcast,
+// accepted/rejected outcomes, an unconfirmed broadcast, an expired proposal, a
+// given-up execution, and a dry-run would-be proposal; other errors are only
+// logged.
 type Notifications struct {
 	Enabled  bool            `yaml:"enabled"`
 	Discord  WebhookChannel  `yaml:"discord"`

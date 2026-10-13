@@ -141,8 +141,10 @@ vote_tracking:
                                       # keeps watching/executing it. Overridable per chain.
 
 # ── Notifications ─────────────────────────────────────────────────────────────
-# Sent only after a successful broadcast (and accepted/rejected outcomes).
-# Nothing is sent on errors.
+# Sent on a successful broadcast and accepted/rejected outcomes, plus alerts for
+# an unconfirmed broadcast (may be on-chain), an expired proposal and an
+# execution that keeps failing; dry_run chains get the would-be proposal.
+# Other errors are only logged.
 notifications:
   enabled: true
   discord:
