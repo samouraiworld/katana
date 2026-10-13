@@ -620,7 +620,7 @@ against this devnet and asserts its SQLite `proposals` table, notifications and
 | `guardrail_min_valset_size` | ejecting validator4 would leave 3 < 4 → suppressed |
 | `health` | `/health` 200, then 503 once gnomonitoring is gone for 3 poll intervals |
 | `vp_change_executes` | `raise_vp` then `lower_vp` accepted + executed → validator4 power 1 → 2 → 1 |
-| `accept` | 100% YES → `accepted`, `ValidatorRemoved`, validator4 leaves `/validators` (re-onboarded afterwards) |
+| `accept` | 100% YES → `accepted`, validator4 leaves `/validators` (re-onboarded afterwards) |
 
 ```bash
 export PATH=/path/to/mainnet-gnokey-dir:$PATH   # gnokey built from chain/mainnet
