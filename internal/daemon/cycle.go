@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,35 +15,25 @@ import (
 	"github.com/samouraiworld/katana/internal/proposal"
 	"github.com/samouraiworld/katana/internal/rules"
 	"github.com/samouraiworld/katana/internal/store"
+	"github.com/samouraiworld/katana/internal/txindexer"
 )
-
-// reportWindows are the four periods gnomonitoring always includes in a
-// report; totals are precomputed for all of them once per cycle so any
-// action's configured window has its total valset VP ready, with no extra
-// API call.
-var reportWindows = []string{"last_24h", "current_week", "current_month", "current_year"}
 
 // evalCycle runs one evaluation pass for a chain: fetch validator reports,
 // evaluate every candidate against the score-driven action model, and
 // produce a proposal for each eligible, non-suppressed validator.
-func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
+func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) error {
 	// Chain-identity assert (also runs on the worker's first cycle at startup):
 	// skip the whole cycle before any state is written when the node no longer
 	// reports the configured chain id.
 	gno := gnoland.New(rt.RPCEndpoint)
 	if !d.assertChainID(ctx, gno, rt) {
-		return
+		return errors.New("chain identity check failed")
 	}
 
 	reports, err := d.gnomon.FetchReports(ctx, rt.GnomonitoringChain)
 	if err != nil {
 		d.logger.Printf("[%s][eval] %v", rt.Key, err)
-		return
-	}
-
-	totalVP := map[string]int64{}
-	for _, w := range reportWindows {
-		totalVP[w] = rules.TotalVotingPower(reports, w)
+		return err
 	}
 
 	// Fetched once per cycle rather than re-queried per eligible candidate:
@@ -53,16 +44,19 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	valset, err := gno.Validators(ctx)
 	if err != nil {
 		d.logger.Printf("[%s][eval] valset fetch failed: %v (skipping cycle)", rt.Key, err)
-		return
+		return fmt.Errorf("valset fetch: %w", err)
 	}
 	if len(valset) == 0 {
 		d.logger.Printf("[%s][eval] node reports an empty valset (skipping cycle)", rt.Key)
-		return
+		return errors.New("node reports an empty valset")
 	}
 	inValset := make(map[string]bool, len(valset))
 	for _, v := range valset {
 		inValset[strings.ToLower(v.Address)] = true
 	}
+	// The live valset, not gnomonitoring, is the voting-power source for the
+	// VP-change targets: a report's VP is a window aggregate and can be stale.
+	vs := rules.NewValset(valset)
 
 	// First pass: decide every report, so the mass-eligibility guardrail
 	// sees the whole valset before anything is proposed.
@@ -72,7 +66,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	downward := 0
 	for i, report := range reports {
 		dec := rules.Evaluate(report, rt.Proposal.ActionPriority, rt.Proposal.Actions,
-			*rt.Proposal.MinVotingPower, *rt.Proposal.MaxVotingPowerShare, totalVP)
+			*rt.Proposal.MinVotingPower, *rt.Proposal.MaxVotingPowerShare, vs)
 		decs[i] = dec
 		excepted[i] = d.cfg.IsException(rt.Key, report.Addr, report.Moniker)
 		evals = append(evals, store.EvalRecord{
@@ -84,8 +78,12 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 			downward++
 		}
 	}
+	// cycleErr marks the cycle failed for /health while letting it go on:
+	// a store error closes the gate for one candidate, not the whole pass.
+	var cycleErr error
 	if err := d.st.RecordEvaluations(ctx, evals); err != nil {
 		d.logger.Printf("[%s][eval] recording evaluations: %v", rt.Key, err)
+		cycleErr = fmt.Errorf("recording evaluations: %w", err)
 	}
 
 	// A non-excepted validator in the valset but missing from the report
@@ -111,7 +109,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		if d.setGuardTripped(rt.Key, true) {
 			d.dispatchGuardrail(ctx, rt, flagged, len(valset))
 		}
-		return
+		return cycleErr // a tripped guardrail is a deliberate skip, not a failure
 	}
 	d.setGuardTripped(rt.Key, false)
 
@@ -119,7 +117,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 	recent, err := d.st.BroadcastsSince(ctx, rt.Key, d.now().Add(-24*time.Hour))
 	if err != nil {
 		d.logger.Printf("[%s][eval] counting recent broadcasts: %v (skipping cycle)", rt.Key, err)
-		return
+		return fmt.Errorf("counting recent broadcasts: %w", err)
 	}
 	broadcasts := 0
 	openEjects := -1 // open ejections of validators still in the valset; -1 = not counted yet
@@ -151,11 +149,13 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		last, err := d.st.LastProposal(ctx, rt.Key, report.Addr)
 		if err != nil {
 			d.logger.Printf("[%s][eval] SUPPRESS %s: reading last proposal: %v", rt.Key, disp(report.Moniker, report.Addr), err)
+			cycleErr = fmt.Errorf("reading last proposal: %w", err)
 			continue
 		}
 		rejections, err := d.st.RejectionCount(ctx, rt.Key, report.Addr)
 		if err != nil {
 			d.logger.Printf("[%s][eval] SUPPRESS %s: reading rejection count: %v", rt.Key, disp(report.Moniker, report.Addr), err)
+			cycleErr = fmt.Errorf("reading rejection count: %w", err)
 			continue
 		}
 		if g := lifecycle.Gate(last, rejections, lifecycle.Params{
@@ -180,6 +180,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 			if openEjects < 0 {
 				if openEjects, err = d.openEjections(ctx, rt, inValset); err != nil {
 					d.logger.Printf("[%s][eval] SUPPRESS %s: counting open ejections: %v", rt.Key, disp(report.Moniker, report.Addr), err)
+					cycleErr = fmt.Errorf("counting open ejections: %w", err)
 					openEjects = -1
 					continue
 				}
@@ -204,7 +205,10 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		}
 
 		d.logger.Printf("[%s][eval] ELIGIBLE %s action=%s mode=%s: %s", rt.Key, disp(report.Moniker, report.Addr), dec.Action, mode, dec.Reason)
-		res := d.produce(ctx, rt, gno, dec, totalVP[dec.Window], mode == config.ModeManual)
+		res, err := d.produce(ctx, rt, gno, dec, vs.Total, mode == config.ModeManual)
+		if err != nil {
+			cycleErr = err
+		}
 		if res == skipped {
 			continue
 		}
@@ -228,6 +232,7 @@ func (d *Daemon) evalCycle(ctx context.Context, rt config.Runtime) {
 		d.logger.Printf("[%s][eval] produced %d proposal(s) (eject=%d lower_vp=%d raise_vp=%d)",
 			rt.Key, produced, byAction[config.ActionEject], byAction[config.ActionLowerVP], byAction[config.ActionRaiseVP])
 	}
+	return cycleErr
 }
 
 // openEjections counts the chain's open ejections of validators still in the
@@ -281,10 +286,10 @@ const (
 // (signing via gnokey, recording it, notifying on success) or — when manual
 // (dry_run chain, or the action's mode is manual) — logs and notifies the
 // complete would-be proposal, with the script and a ready-to-run gnokey
-// command attached, without touching the chain. totalWindowVP is
-// dec.Window's total valset VP this cycle, used to compute the
+// command attached, without touching the chain. totalVP is the live valset's
+// total voting power (RPC /validators) this cycle, used to compute the
 // notification's VPDeltaPercent.
-func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalWindowVP int64, manual bool) produceResult {
+func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Client, dec rules.Decision, totalVP int64, manual bool) (produceResult, error) {
 	// A valset action is keyed by the operator address, but metrics are keyed
 	// by the signing address. A missing mapping is fatal for the broadcast (we
 	// would act on an unknown operator).
@@ -293,7 +298,7 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		operator = op
 	} else {
 		d.logger.Printf("[%s][eval] no operator mapping for signing address %s; skipping broadcast", rt.Key, dec.Address)
-		return skipped
+		return skipped, nil
 	}
 
 	built := proposal.Build(proposal.Target{
@@ -322,46 +327,72 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 	// Re-assert chain identity immediately before acting: a genesis reset can
 	// land mid-cycle, after the check that opened this pass.
 	if !d.assertChainID(ctx, gno, rt) {
-		return skipped
+		return skipped, nil
 	}
 
 	vpDeltaPercent := 0.0
-	if totalWindowVP > 0 {
-		vpDeltaPercent = float64(dec.TargetPower-dec.CurrentPower) / float64(totalWindowVP) * 100
+	if totalVP > 0 {
+		vpDeltaPercent = float64(dec.TargetPower-dec.CurrentPower) / float64(totalVP) * 100
 	}
 	nt := notifyTarget{Address: dec.Address, Moniker: dec.Moniker, Action: dec.Action, CurrentPower: dec.CurrentPower, TargetPower: dec.TargetPower}
 
 	if manual {
 		d.dryRun(ctx, rt, built, rec, operator, nt, vpDeltaPercent)
-		return handedOff
+		return handedOff, nil
+	}
+
+	// Recovery data in case gnokey loses the tx hash (see reconcile): the
+	// exact payload and the height the tx can only land after. A failed
+	// height read only disables that recovery, never the broadcast.
+	rec.PayloadHash = payloadHash(built)
+	if h, err := gno.LatestHeight(ctx); err != nil {
+		d.logger.Printf("[%s][eval] reading chain height before broadcast: %v (an unconfirmed outcome could not be reconciled)", rt.Key, err)
+	} else {
+		rec.BroadcastHeight = h
+	}
+
+	// Record the intent before gnokey runs, as unconfirmed: it closes the
+	// gate whatever happens next (crash, failed outcome write), and carries
+	// the reconcile data. No durable record, no broadcast.
+	rec.Status = store.StatusUnconfirmed
+	id, recErr := d.st.RecordProposal(ctx, rec)
+	if recErr != nil {
+		d.logger.Printf("[%s][eval] NOT broadcasting %s for %s: recording the broadcast intent failed: %v", rt.Key, dec.Action, dec.Address, recErr)
+		return skipped, fmt.Errorf("recording broadcast intent: %w", recErr)
 	}
 
 	out, err := d.signAndBroadcast(ctx, built, rt.Gnokey)
 	// The tx may have landed even if a shutdown interrupted gnokey: record
-	// and notify the outcome regardless of cancellation, or a restart would
-	// re-propose with no trace of this attempt.
+	// and notify the outcome regardless of cancellation (the intent row
+	// already gates a restart, but would lose the hash and the alert).
 	ctx, cancel := d.detach(ctx)
 	defer cancel()
 	tx := proposal.ParseTxOutput(out)
-	rec.Output = out
-	rec.TxHash = tx.TxHash
+	result := store.ProposalRecord{Output: out, TxHash: tx.TxHash}
 	outcome := proposal.Classify(out, err)
 	switch outcome {
 	case proposal.Committed:
-		rec.Success = true
-		rec.Status = store.StatusPending
-		rec.OnchainID = govdao.ProposalIDFromEvents([]byte(tx.Events), d.cfg.VoteTracking.GovdaoRealm)
+		result.Success = true
+		result.Status = store.StatusPending
+		result.OnchainID = govdao.ProposalIDFromEvents([]byte(tx.Events), d.cfg.VoteTracking.GovdaoRealm)
 	case proposal.Ambiguous:
 		// The tx may be on-chain: gate like a pending proposal until the
-		// vote worker resolves or expires it.
-		rec.Status = store.StatusUnconfirmed
+		// vote worker resolves, reconciles or expires it.
+		result.Status = store.StatusUnconfirmed
+	default:
+		result.Status = "" // definitive failure: nothing on-chain, no gate
 	}
-	id, recErr := d.st.RecordProposal(ctx, rec)
-	if recErr != nil {
-		// The proposal may be on-chain but we failed to persist it: the
-		// lifecycle gate has no record and will re-broadcast an identical
-		// proposal next cycle. Surface this loudly rather than silently spam.
-		d.logger.Printf("[%s][eval] CRITICAL: broadcast %s (id=%q) but recording it failed for %s: %v — re-broadcast likely next cycle", rt.Key, outcome, rec.OnchainID, dec.Address, recErr)
+	rec.OnchainID, rec.TxHash = result.OnchainID, result.TxHash
+	var cycleErr error
+	if err := d.st.RecordBroadcastOutcome(ctx, id, result); errors.Is(err, store.ErrBroadcastSuperseded) {
+		// The vote worker reconciled the row from the tx-indexer while
+		// gnokey ran: its on-chain record is the better one.
+		d.logger.Printf("[%s][eval] broadcast %s for %s: row %d was already reconciled by the vote worker, keeping it", rt.Key, outcome, dec.Address, id)
+	} else if err != nil {
+		// The intent row stays unconfirmed: the gate holds and the vote
+		// worker can still reconcile it from the tx-indexer.
+		d.logger.Printf("[%s][eval] CRITICAL: broadcast %s for %s but recording the outcome failed: %v — row %d stays unconfirmed (gate closed)", rt.Key, outcome, dec.Address, err, id)
+		cycleErr = fmt.Errorf("recording broadcast outcome: %w", err)
 	}
 
 	switch outcome {
@@ -376,9 +407,9 @@ func (d *Daemon) produce(ctx context.Context, rt config.Runtime, gno *gnoland.Cl
 		d.dispatch(ctx, notify.EventUnconfirmed, rt, id, nt, "", vpDeltaPercent, observePayload{})
 	default:
 		d.logger.Printf("[%s][eval] broadcast failed for %s: %v", rt.Key, dec.Address, err)
-		return broadcastFailed
+		return broadcastFailed, cycleErr
 	}
-	return broadcastOnChain
+	return broadcastOnChain, cycleErr
 }
 
 // notifyTarget carries the validator/action identity dispatch needs to build
@@ -463,34 +494,52 @@ type executeState struct {
 // voteCycle follows this chain's tracked proposals: it resolves missing
 // proposal ids, executes proposals that reached a supermajority, records
 // GovDAO outcomes, and expires proposals left open past pending_timeout.
-func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) {
+func (d *Daemon) voteCycle(ctx context.Context, rt config.Runtime) error {
 	tracked, err := d.st.TrackedProposals(ctx, rt.Key)
 	if err != nil {
 		d.logger.Printf("[%s][vote] %v", rt.Key, err)
-		return
+		return err
 	}
 	if len(tracked) == 0 {
-		return
+		return nil
 	}
 	gd := govdao.New(rt.RPCEndpoint, d.cfg.VoteTracking.GovdaoRealm)
+	var cycleErr error
 	for _, p := range tracked {
-		d.trackProposal(ctx, rt, gd, p)
+		if err := d.trackProposal(ctx, rt, gd, p); err != nil {
+			cycleErr = err
+		}
 	}
+	return cycleErr
 }
 
-func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord) {
+// trackProposal advances one tracked proposal. It returns an operational
+// error for /health: the GovDAO status or a configured tx-indexer could not be
+// read, /tx could not be queried, or lifecycle state could not be persisted.
+// An unrecognised render is one too, though the row is left untouched. A /tx
+// lookup that finds no tx, or a committed tx without a ProposalCreated event,
+// is not one (an ambiguous broadcast may simply never have landed).
+func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord) error {
 	nt := notifyTarget{Address: p.Address, Moniker: p.Moniker, Action: p.Action, CurrentPower: p.CurrentPower, TargetPower: p.TargetPower}
+	var opErr error
 
 	if p.TxHash == "" {
 		// Rows recorded before the tx_hash column existed: the hash is in
 		// the stored gnokey output.
 		p.TxHash = proposal.ParseTxOutput(p.Output).TxHash
 	}
+	if p.OnchainID == "" && p.TxHash == "" {
+		p, opErr = d.reconcile(ctx, rt, p)
+	}
 	if p.OnchainID == "" && p.TxHash != "" {
 		if id, err := gd.TxProposalID(ctx, p.TxHash); err != nil {
 			d.logger.Printf("[%s][vote] proposal row %d: resolving id from tx %s: %v", rt.Key, p.ID, p.TxHash, err)
+			if !errors.Is(err, govdao.ErrTxNotFound) && !errors.Is(err, govdao.ErrNoProposalCreated) {
+				opErr = errors.Join(opErr, fmt.Errorf("resolving proposal id from tx %s: %w", p.TxHash, err))
+			}
 		} else if err := d.st.SetOnchainID(ctx, p.ID, id); err != nil {
 			d.logger.Printf("[%s][vote] proposal row %d: recording id %s: %v", rt.Key, p.ID, id, err)
+			opErr = fmt.Errorf("recording proposal id: %w", err)
 		} else {
 			d.logger.Printf("[%s][vote] proposal row %d: resolved GovDAO id %s from tx %s", rt.Key, p.ID, id, p.TxHash)
 			p.OnchainID = id
@@ -498,83 +547,131 @@ func (d *Daemon) trackProposal(ctx context.Context, rt config.Runtime, gd *govda
 	}
 	if p.OnchainID == "" {
 		// Nothing to poll: only the timeout can close this row.
-		d.expireIfDue(ctx, rt, p, nt)
-		return
+		return errors.Join(opErr, d.expireIfDue(ctx, rt, p, nt))
 	}
 
 	prop, err := gd.Proposal(ctx, p.OnchainID)
 	if err != nil {
 		d.logger.Printf("[%s][vote] status query failed for proposal %s: %v", rt.Key, p.OnchainID, err)
-		return
+		return errors.Join(opErr, fmt.Errorf("status query for proposal %s: %w", p.OnchainID, err))
 	}
 	switch prop.Status {
 	case govdao.Accepted:
-		d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
+		return errors.Join(opErr, d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt))
 	case govdao.Rejected:
-		d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
+		return errors.Join(opErr, d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt))
 	case govdao.Pending:
 		if rt.ExecuteProposals && prop.Executable() {
 			switch d.execute(ctx, rt, p, prop) {
 			case proposal.Committed:
 				// The call decided the proposal: record the outcome now
 				// rather than expiring it first.
-				d.recordAfterExecute(ctx, rt, gd, p, nt)
-				return
+				return errors.Join(opErr, d.recordAfterExecute(ctx, rt, gd, p, nt))
 			case proposal.Ambiguous:
 				// The outcome is on its way; let the next tick read it.
-				return
+				return opErr
 			}
 		}
-		d.expireIfDue(ctx, rt, p, nt)
+		return errors.Join(opErr, d.expireIfDue(ctx, rt, p, nt))
 	default:
 		// Unknown is inert: never terminal, never expired, never notified.
+		// It still fails the cycle: tracking is broken (e.g. a realm
+		// upgrade changed the render) and /health must show it.
 		d.logger.Printf("[%s][vote] proposal %s: unrecognised render, keeping it %s", rt.Key, p.OnchainID, p.Status)
+		return errors.Join(opErr, fmt.Errorf("chain %s: unrecognised render for proposal %s on %s", rt.Key, p.OnchainID, d.cfg.VoteTracking.GovdaoRealm))
 	}
+}
+
+// reconcile looks a hashless broadcast (gnokey timed out while sending) up on
+// the tx-indexer: a committed tx from katana's key, after the recorded height,
+// carrying the exact payload and a ProposalCreated event. On a single match
+// the row gets its tx hash and GovDAO id and is tracked like any other; no
+// indexer, no match or an ambiguous match leaves it as it was (still gating).
+func (d *Daemon) reconcile(ctx context.Context, rt config.Runtime, p store.ProposalRecord) (store.ProposalRecord, error) {
+	if rt.TxIndexerURL == "" || p.BroadcastHeight <= 0 || p.PayloadHash == "" {
+		return p, nil
+	}
+	// BroadcastHeight was already committed when the broadcast started: the
+	// tx can only land in a later block.
+	txs, err := txindexer.New(rt.TxIndexerURL, d.cfg.VoteTracking.GovdaoRealm, nil).ProposalsByCaller(ctx, rt.Gnokey.Address, p.BroadcastHeight+1)
+	if err != nil {
+		d.logger.Printf("[%s][vote] proposal row %d: tx-indexer lookup: %v", rt.Key, p.ID, err)
+		return p, fmt.Errorf("tx-indexer lookup: %w", err)
+	}
+	tx, ok := txindexer.Match(txs, p.PayloadHash)
+	if !ok {
+		return p, nil
+	}
+	if err := d.st.Reconcile(ctx, p.ID, tx.Hash, tx.ProposalID); err != nil {
+		d.logger.Printf("[%s][vote] proposal row %d: recording reconciled tx %s: %v", rt.Key, p.ID, tx.Hash, err)
+		if errors.Is(err, store.ErrNotReconciled) {
+			return p, nil // the row moved on meanwhile (e.g. the eval worker recorded the outcome)
+		}
+		return p, fmt.Errorf("recording reconciled tx: %w", err)
+	}
+	d.logger.Printf("[%s][vote] proposal row %d: RECONCILED via tx-indexer — tx %s at height %d, GovDAO id %s", rt.Key, p.ID, tx.Hash, tx.BlockHeight, tx.ProposalID)
+	p.TxHash, p.OnchainID = tx.Hash, tx.ProposalID
+	if p.Status == store.StatusUnconfirmed {
+		p.Status = store.StatusPending
+	}
+	return p, nil
+}
+
+// payloadHash fingerprints exactly what a built proposal submits, the way the
+// tx-indexer will show it back (see txindexer.Tx.PayloadHash).
+func payloadHash(b proposal.Built) string {
+	if b.Submit == "call" {
+		return txindexer.CallPayloadHash(b.RealmPath, b.Function, b.Args)
+	}
+	return txindexer.RunPayloadHash(b.Script)
 }
 
 // recordAfterExecute reads the render right after a committed execute call
 // and records the outcome it shows.
-func (d *Daemon) recordAfterExecute(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord, nt notifyTarget) {
+func (d *Daemon) recordAfterExecute(ctx context.Context, rt config.Runtime, gd *govdao.Client, p store.ProposalRecord, nt notifyTarget) error {
 	prop, err := gd.Proposal(ctx, p.OnchainID)
 	if err != nil {
 		d.logger.Printf("[%s][vote] status query after execute failed for proposal %s: %v", rt.Key, p.OnchainID, err)
-		return
+		return fmt.Errorf("status query after execute for proposal %s: %w", p.OnchainID, err)
 	}
 	switch prop.Status {
 	case govdao.Accepted:
-		d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
+		return d.resolve(ctx, rt, p, store.StatusAccepted, notify.EventAccepted, nt)
 	case govdao.Rejected:
-		d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
+		return d.resolve(ctx, rt, p, store.StatusRejected, notify.EventRejected, nt)
 	}
+	return nil
 }
 
 // resolve records a GovDAO outcome and notifies it. The notification only
 // goes out once the status is persisted, so a failed write is retried next
 // tick instead of notifying the same outcome repeatedly.
-func (d *Daemon) resolve(ctx context.Context, rt config.Runtime, p store.ProposalRecord, status string, event notify.Event, nt notifyTarget) {
+func (d *Daemon) resolve(ctx context.Context, rt config.Runtime, p store.ProposalRecord, status string, event notify.Event, nt notifyTarget) error {
 	if err := d.st.UpdateStatus(ctx, p.ID, status, d.now()); err != nil {
 		d.logger.Printf("[%s][vote] proposal %s: recording %s: %v", rt.Key, p.OnchainID, status, err)
-		return
+		return fmt.Errorf("recording %s: %w", status, err)
 	}
 	d.execMu.Lock()
 	delete(d.executed, p.ID)
 	d.execMu.Unlock()
 	d.logger.Printf("[%s][vote] proposal %s %s — %s action=%s", rt.Key, p.OnchainID, strings.ToUpper(status), disp(p.Moniker, p.Address), p.Action)
 	d.dispatch(ctx, event, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
+	return nil
 }
 
 // expireIfDue marks a still-open proposal expired once pending_timeout has
 // passed since it was broadcast. Expired rows stay tracked for a late outcome.
-func (d *Daemon) expireIfDue(ctx context.Context, rt config.Runtime, p store.ProposalRecord, nt notifyTarget) {
+func (d *Daemon) expireIfDue(ctx context.Context, rt config.Runtime, p store.ProposalRecord, nt notifyTarget) error {
 	if p.Status == store.StatusExpired || d.now().Sub(p.CreatedAt) < rt.PendingTimeout {
-		return
+		return nil
 	}
 	if err := d.st.UpdateStatus(ctx, p.ID, store.StatusExpired, d.now()); err != nil {
 		d.logger.Printf("[%s][vote] proposal row %d: recording expiry: %v", rt.Key, p.ID, err)
-		return
+		return fmt.Errorf("recording expiry: %w", err)
 	}
 	d.logger.Printf("[%s][vote] proposal %q (row %d) EXPIRED after %s — %s action=%s", rt.Key, p.OnchainID, p.ID, rt.PendingTimeout, disp(p.Moniker, p.Address), p.Action)
 	d.dispatch(ctx, notify.EventExpired, rt, p.ID, nt, p.OnchainID, 0, observePayload{})
+	return nil
 }
 
 // execute calls ExecuteOrRejectProposal on a proposal that reached a

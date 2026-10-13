@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 GENESIS_FILE="genesis.json"
 BALANCE_FILE="genesis_balances.txt"
 GNO_REPOS="/gnoroot/examples/gno.land"
-GNOGENESIS_IMG="${GNOGENESIS_IMG:-gno-contribs:local}"
+GNOGENESIS_IMG="${GNOGENESIS_IMG:-gno-contribs:mainnet}"
 
 : "${VALIDATOR1_ADDR:?}" "${VALIDATOR1_PUBKEY:?}" "${VALIDATOR1_NAME:?}"
 : "${VALIDATOR2_ADDR:?}" "${VALIDATOR2_PUBKEY:?}" "${VALIDATOR2_NAME:?}"

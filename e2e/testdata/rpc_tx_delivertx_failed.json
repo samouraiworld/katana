@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": "",
+  "result": {
+    "hash": "fw09HZp+zWGO4NpT0vIdf8ItRKlMBn8q4vr1nwT+KGk=",
+    "height": "15",
+    "index": 0,
+    "tx_result": {
+      "ResponseBase": {
+        "Error": {
+          "@type": "/abci.StringError",
+          "value": "proposal already executed. Accepted: true"
+        },
+        "Data": null,
+        "Events": null,
+        "Log": "msg:0,success:false,log:--= Error =--\nData: errors.FmtError{format:\"proposal already executed. Accepted: true\", args:[]interface {}(nil)}\nMsg Traces:\n    0  /gnoroot/tm2/pkg/errors/errors.go:103 - VM panic: proposal already executed. Accepted: true\nStacktrace:\npanic: proposal already executed. Accepted: true\nexecuteProposal at gno.land/r/gov/dao/proxy.gno:54\nExecuteOrRejectProposal at gno.land/r/gov/dao/proxy.gno:61\n\n\nStack Trace:\n    0  /gnoroot/tm2/pkg/errors/errors.go:88\n    1  /gnoroot/tm2/pkg/errors/errors.go:103\n    2  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:1453\n    3  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:1426\n    4  /usr/local/go/src/runtime/panic.go:783\n... 27 more lines elided,events:[]",
+        "Info": "vm.version=dev"
+      },
+      "GasWanted": "100000000",
+      "GasUsed": "9909355"
+    },
+    "tx": "CmgKCi92bS5tX2NhbGwSWgooZzFqcTkzbjlwdzJxeGtxNG1rczg5eWVud216bGtnamFwa3RjdWRlayISZ25vLmxhbmQvci9nb3YvZGFvKhdFeGVjdXRlT3JSZWplY3RQcm9wb3NhbDIBMRITCICEr18SDDEwMDAwMDB1Z25vdBqoAQo6ChMvdG0uUHViS2V5U2VjcDI1NmsxEiMKIQJJluQClfcfYa63ssfPL3x5Olf4ZkSAI6CwQBr8KaunUBJA8bpV69s1eB/d7XVnkqFeNCKGvWcfwI+CHQohAaYCw/Qu68E94vtBH1y6m0dL5e2Qo/IWGEwkB0mdVJ2mvOkR9xooZzFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFsdXV4ZQ=="
+  }
+}

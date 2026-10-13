@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -63,12 +64,16 @@ type abciQueryResponse struct {
 	} `json:"error"`
 }
 
-// Supermajority mirrors gno.land/r/gov/dao/v3/impl's law.Supermajority: the
-// YES or NO share a proposal needs before an ExecuteProposal call resolves it.
+// Supermajority mirrors the GovDAO implementation's law.Supermajority
+// (gno.land/r/gov/dao/impl/v0 on the chain/mainnet tag, r/gov/dao/v3/impl on
+// test13; 66.66 on both): the YES or NO share a proposal needs before an
+// ExecuteProposal call resolves it.
 const Supermajority = 66.66
 
-// Marker lines emitted by gno.land/r/gov/dao/v3/impl's proposalStatus.String()
-// on a single-proposal page. Exactly one of them is present per render.
+// Marker lines emitted by the GovDAO implementation's proposalStatus.String()
+// (r/gov/dao/impl/v0 on mainnet, r/gov/dao/v3/impl on test13; identical lines,
+// both also emit an "- ABSTAIN PERCENT: " line that katana ignores) on a
+// single-proposal page. Exactly one of them is present per render.
 const (
 	markerAccepted = "- **PROPOSAL HAS BEEN ACCEPTED**"
 	markerDenied   = "- **PROPOSAL HAS BEEN DENIED**"
@@ -124,8 +129,10 @@ func (c *Client) Proposal(ctx context.Context, proposalID string) (Proposal, err
 	return ParseRender(string(raw)), nil
 }
 
-// ParseRender reads the status and vote tallies out of a GovDAO v3
-// single-proposal page.
+// ParseRender reads the status and vote tallies out of a GovDAO
+// single-proposal page (r/gov/dao/impl/v0 on mainnet, v3/impl on test13).
+// A proposal created by a previous implementation renders a "not available"
+// page with no marker: that yields Unknown, like any unrecognised render.
 //
 // Only whole marker lines count. Anything looser is unsafe: the page embeds
 // the proposal's own title and description (which may say "ACCEPTED", or carry
@@ -227,9 +234,26 @@ type txResponse struct {
 	} `json:"error"`
 }
 
+// ErrTxNotFound: the node has no committed tx for the hash (not included yet,
+// or never). An expected state for an ambiguous broadcast, not an RPC failure.
+var ErrTxNotFound = errors.New("tx not found")
+
+// ErrNoProposalCreated: the tx is committed but carries no single
+// ProposalCreated event from the realm (e.g. it failed in DeliverTx).
+var ErrNoProposalCreated = errors.New("no single ProposalCreated event")
+
+// isTxNotFound matches the RPC error data of a missing tx: tm2's
+// state.NoTxResultForHashError on the chain/mainnet tag ("Could not find tx
+// result for hash #<HEX>"), and the older "tx (<HEX>) not found".
+func isTxNotFound(data string) bool {
+	return strings.HasPrefix(data, "Could not find tx result for hash") ||
+		(strings.HasPrefix(data, "tx (") && strings.HasSuffix(data, ") not found"))
+}
+
 // TxProposalID looks a committed tx up by its base64 hash (as gnokey prints
 // it) via RPC /tx and returns the proposal id from its events. A tx that is
-// not committed yet comes back as an error.
+// not committed yet is ErrTxNotFound, a committed one without the event is
+// ErrNoProposalCreated; any other error is an RPC or response failure.
 func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(txHash)
 	if err != nil {
@@ -243,6 +267,9 @@ func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error
 		return "", err
 	}
 	if body.Error != nil {
+		if isTxNotFound(body.Error.Data) {
+			return "", fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+		}
 		return "", fmt.Errorf("RPC error: %s %s", body.Error.Message, body.Error.Data)
 	}
 	if body.Result == nil {
@@ -254,21 +281,29 @@ func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error
 	}
 	id := ProposalIDFromEvents(events, c.realm)
 	if id == "" {
-		return "", fmt.Errorf("tx %s: no single ProposalCreated event from %s", txHash, c.realm)
+		return "", fmt.Errorf("tx %s: %w from %s", txHash, ErrNoProposalCreated, c.realm)
 	}
 	return id, nil
 }
 
 // findEvents returns the first "events" array (any letter case) in a
 // DeliverTx result. The amino JSON nests it under ResponseBase; searching
-// keeps katana independent of that layout.
+// keeps katana independent of that layout. A null array (what a tx that
+// failed in DeliverTx carries) is an empty one: the tx is committed, it just
+// emitted nothing. Only a result without the key at all is malformed (nil).
 func findEvents(raw json.RawMessage) json.RawMessage {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil
 	}
 	for k, v := range obj {
-		if strings.EqualFold(k, "events") && len(v) > 0 && v[0] == '[' {
+		if !strings.EqualFold(k, "events") {
+			continue
+		}
+		if string(v) == "null" {
+			return json.RawMessage("[]")
+		}
+		if len(v) > 0 && v[0] == '[' {
 			return v
 		}
 	}

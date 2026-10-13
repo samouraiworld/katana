@@ -9,6 +9,6 @@ import (
 )
 
 func main(cur realm) {
-	pr := proposal.NewValidatorProposalRequest(cross(cur), address("g1ps3yvz3fjkmpng8p5jaysjd92uh73z5s6trv59"))
+	pr := proposal.NewValidatorProposalRequest(cross(cur), address("g1xqwtx7typgztlwtqzqqungq6lpy5k3a9p8djxp"))
 	dao.MustCreateProposal(cross(cur), pr)
 }

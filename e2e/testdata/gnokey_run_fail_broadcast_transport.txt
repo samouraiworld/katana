@@ -1,0 +1,10 @@
+Enter password.
+--= Error =--
+Data: unable to call RPC method broadcast_tx_commit, unable to send request, Post "http://127.0.0.1:26700": EOF
+Msg Traces:
+    0  gno/tm2/pkg/crypto/keys/client/broadcast.go:170 - broadcasting bytes
+    1  gno/tm2/pkg/crypto/keys/client/maketx.go:352 - broadcast tx
+--= /Error =--
+
+
+exit=1

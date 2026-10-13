@@ -115,12 +115,12 @@ add-key:
 	  -gas-fee 1000000ugnot -gas-wanted 5000000 -broadcast -chainid dev -remote $(RPC) \
 	  -home "$(DEV_HOME)" -insecure-password-stdin dev; \
 	echo ">>> [3/3] ensuring $$NEWADDR is a GovDAO member"; \
-	if gnokey query vm/qrender -remote $(RPC) -data 'gno.land/r/gov/dao/v3/memberstore:members' 2>/dev/null | grep -q "$$NEWADDR"; then \
+	if gnokey query vm/qrender -remote $(RPC) -data 'gno.land/r/gov/dao/memberstore/v0:members' 2>/dev/null | grep -q "$$NEWADDR"; then \
 	  echo "    already a GovDAO member — skipping"; \
 	else \
 	  echo "    proposing $$NEWADDR as a T1 member (dev creates the proposal, votes YES, executes)"; \
 	  SCRIPTDIR=$$(mktemp -d); SCRIPT="$$SCRIPTDIR/addmember.gno"; \
-	  printf 'package main\n\nimport (\n\t"gno.land/r/gov/dao"\n\t"gno.land/r/gov/dao/v3/impl"\n)\n\nfunc main(cur realm) {\n\tpr := impl.NewAddMemberRequest(cross(cur), address("%s"), "T1", "katana e2e signer")\n\tdao.MustCreateProposal(cross(cur), pr)\n}\n' "$$NEWADDR" > "$$SCRIPT"; \
+	  printf 'package main\n\nimport (\n\t"gno.land/r/gov/dao"\n\t"gno.land/r/gov/dao/impl/v0"\n)\n\nfunc main(cur realm) {\n\tpr := impl.NewAddMemberRequest(cross(cur), address("%s"), "T1", "katana e2e signer")\n\tdao.MustCreateProposal(cross(cur), pr)\n}\n' "$$NEWADDR" > "$$SCRIPT"; \
 	  OUT=$$(echo "$(DEV_PASS)" | gnokey maketx run -gas-fee 1000000ugnot -gas-wanted 100000000 -broadcast -chainid dev -remote $(RPC) -home "$(DEV_HOME)" -insecure-password-stdin dev "$$SCRIPT" 2>&1) || true; \
 	  rm -rf "$$SCRIPTDIR"; \
 	  echo "$$OUT" | grep -q '"type":"ProposalCreated"' || { echo "!! add-member proposal failed:"; echo "$$OUT" | tail -20; exit 1; }; \
@@ -280,8 +280,8 @@ start-val4:
 scenario1: up-validator4
 	@echo ">>> Step 1: initialize GovDAO (InitWithUsers)"
 	@if gnokey query vm/qeval -remote $(RPC) \
-		-data 'gno.land/r/gov/dao.AllowedDAOs()' 2>/dev/null | grep -q 'gno.land/r/gov/dao/v3/impl'; then \
-		echo "    GovDAO already initialized on this chain (AllowedDAOs locked to v3/impl) - skipping."; \
+		-data 'gno.land/r/gov/dao.AllowedDAOs()' 2>/dev/null | grep -q 'gno.land/r/gov/dao/impl/v0'; then \
+		echo "    GovDAO already initialized on this chain (AllowedDAOs locked to impl/v0) - skipping."; \
 		echo "    (InitWithUsers is one-shot per chain lifetime; run 'make reinit' first for a clean re-init)"; \
 	else \
 		echo "$(DEV_PASS)" | gnokey maketx run \
@@ -301,7 +301,7 @@ scenario1: up-validator4
 		-args "on-prem" \
 		-args $(VALIDATOR4_OP_ADDR) \
 		-args $(VALIDATOR4_PUB) \
-		-send 20000000ugnot -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast \
+		-gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast \
 		-chainid dev -remote $(RPC) \
 		-home "$(DEV_HOME)" -insecure-password-stdin v4op
 	@echo ">>> Step 4: create GovDAO proposal (expects #0)"
@@ -326,7 +326,7 @@ scenario1: up-validator4
 		-home "$(DEV_HOME)" -insecure-password-stdin dev
 	@echo ">>> Step 7: verify validator4 joined the valset"
 	gnokey query vm/qeval \
-		-data 'gno.land/r/sys/validators/v3.IsValidator("$(VALIDATOR4_ADDR)")' \
+		-data 'gno.land/r/sys/validators/v0.IsValidator("$(VALIDATOR4_ADDR)")' \
 		-remote $(RPC)
 	curl -s http://localhost:26661/status | jq '.result.validator_info'
 
@@ -372,7 +372,7 @@ scenario5: up-validator4
 	@echo ">>> Rejected-proposal scenario (FRESH chain expected: targets proposal #0)"
 	@echo ">>> Step 1: initialize GovDAO (skipped if already initialized)"
 	@if gnokey query vm/qeval -remote $(RPC) \
-		-data 'gno.land/r/gov/dao.AllowedDAOs()' 2>/dev/null | grep -q 'gno.land/r/gov/dao/v3/impl'; then \
+		-data 'gno.land/r/gov/dao.AllowedDAOs()' 2>/dev/null | grep -q 'gno.land/r/gov/dao/impl/v0'; then \
 		echo "    GovDAO already initialized - skipping."; \
 	else \
 		echo "$(DEV_PASS)" | gnokey maketx run \
@@ -389,7 +389,7 @@ scenario5: up-validator4
 		-args "on-prem" \
 		-args $(VALIDATOR4_OP_ADDR) \
 		-args $(VALIDATOR4_PUB) \
-		-send 20000000ugnot -gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast \
+		-gas-fee 1000000ugnot -gas-wanted 50000000 -broadcast \
 		-chainid dev -remote $(RPC) \
 		-home "$(DEV_HOME)" -insecure-password-stdin v4op
 	@echo ">>> Step 3: create GovDAO proposal (expects #0)"

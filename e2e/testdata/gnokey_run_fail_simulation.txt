@@ -1,0 +1,31 @@
+Enter password.
+GAS WANTED: 100000000
+GAS USED:   12528396
+HEIGHT:     0
+EVENTS:     []
+INFO:       vm.version=dev, suggested gas-wanted (gas used + 5%): 13154816
+TX HASH:    
+--= Error =--
+Data: unknown operator: g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek
+Msg Traces:
+    0  gno/tm2/pkg/errors/errors.go:103 - deliver transaction failed: log:msg:0,success:false,log:--= Error =--
+Data: errors.FmtError{format:"unknown operator: g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek", args:[]interface {}(nil)}
+Msg Traces:
+    0  /gnoroot/tm2/pkg/errors/errors.go:103 - VM panic: unknown operator: g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek
+Stacktrace:
+panic: unknown operator: g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek
+NewValidatorProposalRequest at gno.land/r/sys/validators/v0/proposal.gno:100
+main at gno.land/e/g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek/run/eject_nonvaloper.gno:9
+
+
+Stack Trace:
+    0  /gnoroot/tm2/pkg/errors/errors.go:88
+    1  /gnoroot/tm2/pkg/errors/errors.go:103
+    2  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:1453
+    3  /gnoroot/gno.land/pkg/sdk/vm/keeper.go:1426
+    4  /usr/local/go/src/runtime/panic.go:783
+... 29 more lines elided,events:[]
+--= /Error =--
+
+
+exit=1

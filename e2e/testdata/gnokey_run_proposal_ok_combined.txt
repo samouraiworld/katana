@@ -1,0 +1,12 @@
+Enter password.
+
+OK!
+GAS WANTED: 100000000
+GAS USED:   29046666
+HEIGHT:     8
+STORAGE DELTA:  43266 bytes
+STORAGE FEE:    4326600ugnot
+TOTAL TX COST:  5326600ugnot
+EVENTS:     [{"type":"ProposalCreated","attrs":[{"key":"id","value":"2"}],"pkg_path":"gno.land/r/gov/dao"},{"bytes_delta":3259,"fee_delta":{"denom":"ugnot","amount":325900},"pkg_path":"gno.land/r/gov/dao"},{"bytes_delta":2531,"fee_delta":{"denom":"ugnot","amount":253100},"pkg_path":"gno.land/r/gov/dao/impl/v0"},{"bytes_delta":36208,"fee_delta":{"denom":"ugnot","amount":3620800},"pkg_path":"gno.land/r/gov/dao/memberstore/v0"},{"bytes_delta":1268,"fee_delta":{"denom":"ugnot","amount":126800},"pkg_path":"gno.land/r/sys/validators/v0"}]
+INFO:       
+TX HASH:    j6iKhwYrUpu1zZw4AEwHRyPvx9HrPqghSZAEUTuAR8Q=

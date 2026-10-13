@@ -1,9 +1,12 @@
 # Regenerating the GovDAO render fixtures
 
 `../render/*.md` are verbatim `gno.land/r/gov/dao:<id>` pages produced by the
-GovDAO v3 realm itself, not hand-written strings. They were generated from
-gno commit `2c817cec4` with the two filetests in this directory
-(`*.gno.txt`, renamed so Go tooling ignores them).
+GovDAO realm itself, not hand-written strings. They were regenerated from the
+gno.land mainnet tag (`chain/mainnet`, commit `9c8eb132e483`, GovDAO
+implementation `r/gov/dao/impl/v0`, initialised through `r/gov/dao/init/v0`)
+with the two filetests in this directory (`*.gno.txt`, renamed so Go tooling
+ignores them). The output is byte-identical to the earlier test13 capture
+(gno `2c817cec4`, `r/gov/dao/v3/impl`).
 
 1. Build a `gno` binary from the same gno checkout as the realm source. An
    older installed binary fails on stdlib natives:

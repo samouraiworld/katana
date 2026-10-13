@@ -1,6 +1,6 @@
 services:
   validator:
-    image: "${GNO_IMAGE:-gno-validator:local}"
+    image: "${GNO_IMAGE:-gno-validator:mainnet}"
     restart: on-failure
     user: "${DOCKER_USER:-1000:1000}"
     ports:
@@ -18,7 +18,7 @@ services:
       PEX: "true"
 
   validator2:
-    image: "${GNO_IMAGE:-gno-validator:local}"
+    image: "${GNO_IMAGE:-gno-validator:mainnet}"
     restart: on-failure
     user: "${DOCKER_USER:-1000:1000}"
     ports:
@@ -36,7 +36,7 @@ services:
       PEX: "true"
 
   validator3:
-    image: "${GNO_IMAGE:-gno-validator:local}"
+    image: "${GNO_IMAGE:-gno-validator:mainnet}"
     restart: on-failure
     user: "${DOCKER_USER:-1000:1000}"
     ports:
@@ -58,7 +58,7 @@ services:
   # via GovDAO" scenario:
   #   docker compose --profile phase2 up -d validator4
   validator4:
-    image: "${GNO_IMAGE:-gno-validator:local}"
+    image: "${GNO_IMAGE:-gno-validator:mainnet}"
     restart: on-failure
     user: "${DOCKER_USER:-1000:1000}"
     profiles: ["phase2"]
@@ -87,7 +87,8 @@ services:
       - tx-indexer-db:/var/lib/app/
 
   gnoweb:
-    image: ghcr.io/gnolang/gno/gnoweb:master
+    # Built from GNO_REPO_PATH by bootstrap.sh, same source as the validators.
+    image: "${GNOWEB_IMAGE:-gno-gnoweb:mainnet}"
     restart: unless-stopped
     ports:
       - 127.0.0.1:8890:8888

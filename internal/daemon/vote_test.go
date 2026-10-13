@@ -2,8 +2,12 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +17,7 @@ import (
 	"github.com/samouraiworld/katana/internal/config"
 	"github.com/samouraiworld/katana/internal/proposal"
 	"github.com/samouraiworld/katana/internal/store"
+	"github.com/samouraiworld/katana/internal/txindexer"
 )
 
 // render loads a real GovDAO v3 proposal page from the govdao fixtures.
@@ -329,6 +334,26 @@ func TestVoteCycleUnknownNeverExpires(t *testing.T) {
 	}
 }
 
+// An unrecognised render (e.g. after a realm upgrade) leaves the row as it
+// was and unnotified, but fails the cycle so /health surfaces broken tracking.
+func TestVoteCycleUnknownRenderIsOperationalError(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.cfg.VoteTracking.GovdaoRealm = "gno.land/r/gov/dao/custom"
+	seed(t, f, "7", "", store.StatusPending, time.Hour)
+	f.chain.setRender("7", render(t, "open_forged_marker"))
+
+	err := f.d.voteCycle(context.Background(), f.runtime(t))
+	if err == nil || !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "gno.land/r/gov/dao/custom") {
+		t.Fatalf("voteCycle = %v, want an error naming the proposal and realm", err)
+	}
+	if got := lastStatus(t, f).Status; got != store.StatusPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+	if n := len(f.notifs.all()); n != 0 {
+		t.Fatalf("notifications = %d, want 0", n)
+	}
+}
+
 func TestVoteCycleResolvesMissingIDFromTxHash(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, "dev", nil)
@@ -429,6 +454,167 @@ func TestVoteCycleGivesUpOnFailingExecute(t *testing.T) {
 	}
 }
 
+// indexerServer serves the real tx-indexer response fixture and returns the
+// tx it contains, as the txindexer client parses it.
+func indexerServer(t *testing.T) (string, txindexer.Tx) {
+	t.Helper()
+	body, err := os.ReadFile("../txindexer/testdata/indexer_proposals_by_caller.response.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	txs, err := txindexer.New(srv.URL, "gno.land/r/gov/dao", nil).ProposalsByCaller(context.Background(), "g1katana", 1)
+	if err != nil || len(txs) == 0 {
+		t.Fatalf("fixture: %d txs, err %v", len(txs), err)
+	}
+	return srv.URL, txs[0]
+}
+
+func seedHashless(t *testing.T, f *fixture, status, payloadHash string) int64 {
+	t.Helper()
+	id, err := f.st.RecordProposal(context.Background(), store.ProposalRecord{
+		CreatedAt: f.d.now().Add(-time.Minute), Chain: "test", ChainID: "dev",
+		Address: "g1bad", Moniker: "bad", Action: config.ActionEject, Status: status,
+		BroadcastHeight: 10, PayloadHash: payloadHash,
+	})
+	if err != nil {
+		t.Fatalf("RecordProposal: %v", err)
+	}
+	return id
+}
+
+// A hashless unconfirmed broadcast is matched on the tx-indexer by payload
+// hash, and gets its tx hash and GovDAO id back.
+func TestVoteReconcilesHashlessUnconfirmed(t *testing.T) {
+	url, tx := indexerServer(t)
+	f := newFixture(t, "dev", nil)
+	rt := f.runtime(t)
+	rt.TxIndexerURL = url
+	rt.Gnokey.Address = "g1katana"
+	seedHashless(t, f, store.StatusUnconfirmed, tx.PayloadHash())
+	f.chain.setRender(tx.ProposalID, "- **Proposal is open for votes**\n- YES PERCENT: 0%\n- NO PERCENT: 0%\n")
+
+	if err := f.d.voteCycle(context.Background(), rt); err != nil {
+		t.Fatalf("voteCycle: %v\nlogs:\n%s", err, f.logs.String())
+	}
+	got := lastStatus(t, f)
+	if got.TxHash != tx.Hash || got.OnchainID != tx.ProposalID || got.Status != store.StatusPending {
+		t.Fatalf("row = %+v, want tx %s id %s pending\nlogs:\n%s", got, tx.Hash, tx.ProposalID, f.logs.String())
+	}
+}
+
+// Reconcile asks the indexer for the configured GovDAO realm, not a
+// hard-coded one.
+func TestVoteReconcileUsesConfiguredRealm(t *testing.T) {
+	var reqBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqBody, _ = io.ReadAll(r.Body)
+		w.Write([]byte(`{"data":{"getTransactions":null}}`))
+	}))
+	t.Cleanup(srv.Close)
+	f := newFixture(t, "dev", nil)
+	f.d.cfg.VoteTracking.GovdaoRealm = "gno.land/r/gov/dao/custom"
+	rt := f.runtime(t)
+	rt.TxIndexerURL, rt.Gnokey.Address = srv.URL, "g1katana"
+	seedHashless(t, f, store.StatusUnconfirmed, "deadbeef")
+
+	if err := f.d.voteCycle(context.Background(), rt); err != nil {
+		t.Fatalf("voteCycle: %v", err)
+	}
+	if !strings.Contains(string(reqBody), `"realm":"gno.land/r/gov/dao/custom"`) {
+		t.Fatalf("indexer request does not use the configured realm: %s", reqBody)
+	}
+	// The tx lands after the recorded height: the query asks for heights
+	// >= BroadcastHeight+1, sent as "afterHeight" (strictly greater) = 10.
+	var req struct {
+		Variables struct {
+			AfterHeight int64 `json:"afterHeight"`
+		} `json:"variables"`
+	}
+	if err := json.Unmarshal(reqBody, &req); err != nil || req.Variables.AfterHeight != 10 {
+		t.Fatalf("afterHeight = %d (%v), want 10 (min height BroadcastHeight+1 = 11)", req.Variables.AfterHeight, err)
+	}
+}
+
+// No match (or no indexer configured): the row stays unconfirmed and hashless.
+func TestVoteReconcileNoMatch(t *testing.T) {
+	url, _ := indexerServer(t)
+	for name, indexer := range map[string]string{"no match": url, "no indexer": ""} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, "dev", nil)
+			rt := f.runtime(t)
+			rt.TxIndexerURL = indexer
+			rt.Gnokey.Address = "g1katana"
+			seedHashless(t, f, store.StatusUnconfirmed, "deadbeef")
+
+			f.d.voteCycle(context.Background(), rt)
+			if got := lastStatus(t, f); got.TxHash != "" || got.OnchainID != "" || got.Status != store.StatusUnconfirmed {
+				t.Fatalf("row = %+v, want untouched", got)
+			}
+		})
+	}
+}
+
+// A broadcast records what reconcile needs should gnokey lose the tx hash.
+func TestBroadcastRecordsReconcileData(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.evalCycle(context.Background(), f.runtime(t))
+
+	calls := f.broadcasts.calls()
+	if len(calls) != 1 {
+		t.Fatalf("broadcasts = %d, want 1\nlogs:\n%s", len(calls), f.logs.String())
+	}
+	got := lastStatus(t, f)
+	if got.BroadcastHeight != 42 || got.PayloadHash == "" || got.PayloadHash != txindexer.RunPayloadHash(calls[0].Script) {
+		t.Fatalf("row BroadcastHeight=%d PayloadHash=%q, want 42 and the script's hash", got.BroadcastHeight, got.PayloadHash)
+	}
+}
+
+// An unreadable chain height only disables reconcile for that row: the
+// broadcast still goes out, recorded with BroadcastHeight 0.
+func TestBroadcastSurvivesUnreadableHeight(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.chain.mu.Lock()
+	f.chain.badHeight = true
+	f.chain.mu.Unlock()
+	f.d.evalCycle(context.Background(), f.runtime(t))
+
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1\nlogs:\n%s", got, f.logs.String())
+	}
+	if got := lastStatus(t, f); got.BroadcastHeight != 0 || got.PayloadHash == "" {
+		t.Fatalf("row BroadcastHeight=%d PayloadHash=%q, want 0 and a payload hash", got.BroadcastHeight, got.PayloadHash)
+	}
+}
+
+// A call-mode broadcast records the MsgCall fingerprint, not a script hash.
+func TestBroadcastRecordsCallPayloadHash(t *testing.T) {
+	f := newFixture(t, "dev", func(c *config.Config) {
+		c.Proposal.Submit = "call"
+		for _, a := range []string{config.ActionLowerVP, config.ActionRaiseVP} {
+			ac := c.Proposal.Actions[a]
+			ac.Mode = config.ModeOff
+			c.Proposal.Actions[a] = ac
+		}
+		ej := c.Proposal.Actions[config.ActionEject]
+		ej.RealmPkgPath, ej.Function, ej.Args = "gno.land/r/test/valset", "Eject", []string{"{operator_address}", "{title}"}
+		c.Proposal.Actions[config.ActionEject] = ej
+	})
+	f.d.evalCycle(context.Background(), f.runtime(t))
+
+	calls := f.broadcasts.calls()
+	if len(calls) != 1 || calls[0].Submit != "call" {
+		t.Fatalf("broadcasts = %+v, want one call\nlogs:\n%s", calls, f.logs.String())
+	}
+	b := calls[0]
+	if got, want := lastStatus(t, f).PayloadHash, txindexer.CallPayloadHash(b.RealmPath, b.Function, b.Args); got != want || got == txindexer.RunPayloadHash(b.Script) {
+		t.Fatalf("PayloadHash = %q, want the call hash %q", got, want)
+	}
+}
+
 // A shutdown signal landing while gnokey runs interrupts it after the tx may
 // have been sent: the outcome must still be recorded and alerted, or the
 // restarted daemon would re-propose with no record of the first attempt.
@@ -449,13 +635,13 @@ func TestEvalCycleRecordsInterruptedBroadcast(t *testing.T) {
 	}
 }
 
-// blockingRecordStore never completes RecordProposal before its ctx ends,
-// like a wedged database.
-type blockingRecordStore struct{ store.Store }
+// blockingOutcomeStore never completes RecordBroadcastOutcome before its ctx
+// ends, like a wedged database.
+type blockingOutcomeStore struct{ store.Store }
 
-func (blockingRecordStore) RecordProposal(ctx context.Context, _ store.ProposalRecord) (int64, error) {
+func (blockingOutcomeStore) RecordBroadcastOutcome(ctx context.Context, _ int64, _ store.ProposalRecord) error {
 	<-ctx.Done()
-	return 0, ctx.Err()
+	return ctx.Err()
 }
 
 // Recording an interrupted broadcast survives the shutdown, but is bounded:
@@ -464,7 +650,7 @@ func TestInterruptedBroadcastRecordingIsBounded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f := newFixture(t, "dev", nil)
-	f.d.st = blockingRecordStore{f.st}
+	f.d.st = blockingOutcomeStore{f.st}
 	f.d.outcomeTimeout = 50 * time.Millisecond
 	f.broadcasts.onCall = func(proposal.Built) { cancel() }
 	f.broadcasts.set("", fmt.Errorf("gnokey interrupted: %w", context.Canceled))

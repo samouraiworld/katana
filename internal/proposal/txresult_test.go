@@ -139,6 +139,11 @@ func TestRealGnokeyOutputs(t *testing.T) {
 			if (r.TxHash != "") != tt.wantHash {
 				t.Errorf("TxHash = %q, want present=%v", r.TxHash, tt.wantHash)
 			}
+			// The mainnet gnokey prints the GAS/HEIGHT/EVENTS block on a
+			// DeliverTx failure too: a real height, but never OK!.
+			if tt.file == "call_fail_delivertx" && (r.OK || r.Height == 0) {
+				t.Errorf("ParseTxOutput = %+v, want !OK with the block height", r)
+			}
 			if tt.want == Committed && (!r.OK || r.Height == 0 || !strings.Contains(r.Events, `"ProposalCreated"`)) {
 				t.Errorf("ParseTxOutput = %+v, want OK with a height and a ProposalCreated event", r)
 			}

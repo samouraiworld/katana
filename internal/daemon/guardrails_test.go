@@ -19,6 +19,21 @@ import (
 type failStore struct {
 	store.Store
 	lastErr, rejErr, sinceErr, trackedErr, dryRunsErr error
+	recordErr, outcomeErr                             error
+}
+
+func (f *failStore) RecordProposal(ctx context.Context, r store.ProposalRecord) (int64, error) {
+	if f.recordErr != nil {
+		return 0, f.recordErr
+	}
+	return f.Store.RecordProposal(ctx, r)
+}
+
+func (f *failStore) RecordBroadcastOutcome(ctx context.Context, id int64, o store.ProposalRecord) error {
+	if f.outcomeErr != nil {
+		return f.outcomeErr
+	}
+	return f.Store.RecordBroadcastOutcome(ctx, id, o)
 }
 
 func (f *failStore) LastProposal(ctx context.Context, chain, addr string) (*store.ProposalRecord, error) {
@@ -72,7 +87,9 @@ func TestEvalCycleFailsClosedOnStoreErrors(t *testing.T) {
 			fs.Store = f.st
 			f.d.st = fs
 
-			f.d.evalCycle(context.Background(), f.runtime(t))
+			if err := f.d.evalCycle(context.Background(), f.runtime(t)); err == nil {
+				t.Fatalf("a %s error must fail the cycle for /health", name)
+			}
 
 			if got := f.broadcasts.count(); got != 0 {
 				t.Fatalf("broadcasts = %d, want 0 on a %s error\nlogs:\n%s", got, name, f.logs.String())
@@ -202,7 +219,10 @@ func TestMassEligibilityAbortsCycle(t *testing.T) {
 	f := newValsetFixture(t, 3, 7, nil) // 30% eligible > 25%
 	rt := strict(f.runtime(t))
 
-	f.d.evalCycle(ctx, rt)
+	// A tripped guardrail is a deliberate skip: the cycle still succeeds.
+	if err := f.d.evalCycle(ctx, rt); err != nil {
+		t.Fatalf("tripped guardrail reported as a failed cycle: %v", err)
+	}
 	f.d.evalCycle(ctx, rt)
 	if got := f.broadcasts.count(); got != 0 {
 		t.Fatalf("broadcasts = %d, want 0 (mass eligibility)\nlogs:\n%s", got, f.logs.String())
@@ -363,6 +383,67 @@ func TestFailedEjectionDoesNotCountAsOpen(t *testing.T) {
 	}
 }
 
+// No broadcast without a durable record first: if the intent row cannot be
+// written, gnokey is never run (a broadcast nobody recorded would leave the
+// validator ungated and be repeated next cycle).
+func TestBroadcastRequiresIntentRecord(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.st = &failStore{Store: f.st, recordErr: errors.New("disk full")}
+
+	if err := f.d.evalCycle(context.Background(), f.runtime(t)); err == nil {
+		t.Fatal("a failed intent write must fail the cycle")
+	}
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 when the intent cannot be recorded", got)
+	}
+}
+
+// If the outcome cannot be written after a broadcast, the intent row stays
+// unconfirmed (gating, reconcilable) and the cycle fails.
+func TestBroadcastOutcomeWriteFailureKeepsGate(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "dev", nil)
+	f.d.st = &failStore{Store: f.st, outcomeErr: errors.New("disk full")}
+	rt := f.runtime(t)
+
+	if err := f.d.evalCycle(ctx, rt); err == nil {
+		t.Fatal("a failed outcome write must fail the cycle")
+	}
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1", got)
+	}
+	props, err := f.st.ListProposals(ctx, 10)
+	if err != nil || len(props) != 1 {
+		t.Fatalf("proposals = %+v, err %v", props, err)
+	}
+	if p := props[0]; p.Status != store.StatusUnconfirmed || p.PayloadHash == "" || p.BroadcastHeight == 0 {
+		t.Fatalf("intent row = %+v, want unconfirmed with reconcile data", p)
+	}
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d after a second cycle, want still 1 (gate closed)", got)
+	}
+}
+
+// An outcome write superseded by a reconcile (the vote worker got there
+// first) is not a failure: the cycle succeeds and nothing is logged CRITICAL
+// about the write.
+func TestBroadcastOutcomeSupersededIsNotAFailure(t *testing.T) {
+	f := newFixture(t, "dev", nil)
+	f.d.st = &failStore{Store: f.st, outcomeErr: fmt.Errorf("row 1: %w", store.ErrBroadcastSuperseded)}
+
+	if err := f.d.evalCycle(context.Background(), f.runtime(t)); err != nil {
+		t.Fatalf("evalCycle = %v, want nil\nlogs:\n%s", err, f.logs.String())
+	}
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1", got)
+	}
+	if strings.Contains(f.logs.String(), "recording the outcome failed") {
+		t.Fatalf("superseded outcome logged as a failure:\n%s", f.logs.String())
+	}
+}
+
 // manualEject sets eject to mode manual (the dry-run hand-off).
 func manualEject(c *config.Config) {
 	ac := c.Proposal.Actions[config.ActionEject]
@@ -472,9 +553,7 @@ func TestMassEligibilityCountsValidatorsMissingFromReport(t *testing.T) {
 func TestGateUsesActionCooldown(t *testing.T) {
 	ctx := context.Background()
 	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// g1big keeps g1bad's VP share low enough for a real raise.
-		big := strings.ReplaceAll(valReport("g1big", 70), "1000", "19000")
-		w.Write([]byte("[" + valReport("g1bad", 95) + "," + big + "]"))
+		w.Write([]byte("[" + valReport("g1bad", 95) + "," + valReport("g1big", 70) + "]"))
 	}))
 	t.Cleanup(gnomon.Close)
 	raiseCooldown := "2160h"
@@ -485,6 +564,8 @@ func TestGateUsesActionCooldown(t *testing.T) {
 		c.Proposal.Actions[config.ActionRaiseVP] = ac
 	})
 	f.chain.valset = []string{"g1bad", "g1big"}
+	// g1big keeps g1bad's VP share low enough for a real raise.
+	f.chain.setPower("g1big", 19000)
 
 	// Older than proposal.cooldown (720h), newer than raise_vp's (2160h).
 	at := f.d.now().Add(-1000 * time.Hour)

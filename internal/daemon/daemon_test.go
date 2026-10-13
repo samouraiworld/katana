@@ -33,11 +33,22 @@ func float64Ptr(f float64) *float64 { return &f }
 type stubChain struct {
 	network   string            // node_info.network reported by /status
 	valset    []string          // consensus signing addresses
+	powers    map[string]int64  // signing address → voting power (default 1000)
 	operators map[string]string // operator address → signing address
 
-	mu      sync.Mutex
-	renders map[string]string // GovDAO proposal id → realm render
-	txs     map[string]string // hex tx hash → DeliverTx events JSON
+	mu        sync.Mutex
+	badHeight bool              // /status serves an unreadable latest_block_height
+	renders   map[string]string // GovDAO proposal id → realm render
+	txs       map[string]string // hex tx hash → DeliverTx events JSON
+}
+
+func (s *stubChain) setPower(addr string, power int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.powers == nil {
+		s.powers = map[string]int64{}
+	}
+	s.powers[addr] = power
 }
 
 func (s *stubChain) setRender(id, render string) {
@@ -53,14 +64,25 @@ func (s *stubChain) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/status":
-			fmt.Fprintf(w, `{"result":{"node_info":{"network":%q}}}`, s.network)
+			s.mu.Lock()
+			height := "42"
+			if s.badHeight {
+				height = "not-a-height"
+			}
+			s.mu.Unlock()
+			fmt.Fprintf(w, `{"result":{"node_info":{"network":%q},"sync_info":{"latest_block_height":%q}}}`, s.network, height)
 		case "/validators":
 			entries := make([]string, 0, len(s.valset))
 			for _, a := range s.valset {
-				entries = append(entries, fmt.Sprintf(`{"address":%q,"voting_power":"1"}`, a))
+				s.mu.Lock()
+				power, ok := s.powers[a]
+				s.mu.Unlock()
+				if !ok {
+					power = 1000
+				}
+				entries = append(entries, fmt.Sprintf(`{"address":%q,"voting_power":"%d"}`, a, power))
 			}
-			fmt.Fprintf(w, `{"result":{"block_height":"1","validators":[%s],"total":"%d"}}`,
-				strings.Join(entries, ","), len(s.valset))
+			fmt.Fprintf(w, `{"result":{"block_height":"1","validators":[%s]}}`, strings.Join(entries, ","))
 		case "/abci_query":
 			// vm/qeval render call; the Render argument is hex-encoded in ?data.
 			raw, _ := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("data"), "0x"))
@@ -91,7 +113,7 @@ func (s *stubChain) handler() http.HandlerFunc {
 			events, ok := s.txs[strings.TrimPrefix(r.URL.Query().Get("hash"), "0x")]
 			s.mu.Unlock()
 			if !ok {
-				fmt.Fprint(w, `{"error":{"code":-32603,"message":"Internal error","data":"tx not found"}}`)
+				fmt.Fprint(w, `{"error":{"code":-32603,"message":"Internal error","data":"Could not find tx result for hash #00"}}`)
 				return
 			}
 			fmt.Fprintf(w, `{"result":{"tx_result":{"ResponseBase":{"Events":%s}}}}`, events)
@@ -487,6 +509,9 @@ func TestEvalCycleRaisesVotingPower(t *testing.T) {
 	f := newFixture(t, "dev", func(c *config.Config) {
 		c.Gnomonitoring.BaseURL = gnomon.URL
 	})
+	// Voting power comes from the RPC valset, not the reports above: g1peer
+	// carries the 19000 that makes the live total 20000.
+	f.chain.setPower("g1peer", 19000)
 
 	f.d.evalCycle(ctx, f.runtime(t))
 
@@ -546,17 +571,16 @@ func TestExceptionsBlockAllThreeActions(t *testing.T) {
 func TestConsecutiveLowerVPCyclesDoNotCompound(t *testing.T) {
 	ctx := context.Background()
 
+	// gnomonitoring keeps reporting a stale 1000: only the live RPC valset
+	// moves, and it alone must drive each step.
 	power := int64(1000)
-	report := func() string {
-		return fmt.Sprintf(`[{"addr":"g1bad","moniker":"bad","periods":{
-			"current_month":{"score":50,"voting_power":%d},
-			"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
-			"current_week":{"score":50,"voting_power":%d},
-			"current_year":{"score":50,"voting_power":%d}
-		}}]`, power, power, power)
-	}
 	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(report()))
+		w.Write([]byte(`[{"addr":"g1bad","moniker":"bad","periods":{
+			"current_month":{"score":50,"voting_power":1000},
+			"last_24h":{"score":100,"tier":"Excellent","voting_power":1000},
+			"current_week":{"score":50,"voting_power":1000},
+			"current_year":{"score":50,"voting_power":1000}
+		}}]`))
 	}))
 	t.Cleanup(gnomon.Close)
 	f := newFixture(t, "dev", func(c *config.Config) {
@@ -585,6 +609,7 @@ func TestConsecutiveLowerVPCyclesDoNotCompound(t *testing.T) {
 			t.Fatalf("cycle %d: UpdateStatus: %v", i, err)
 		}
 		power = props[0].TargetPower // simulate the proposal having been accepted on-chain
+		f.chain.setPower("g1bad", power)
 	}
 }
 

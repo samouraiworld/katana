@@ -3,6 +3,7 @@ package govdao
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,9 +33,11 @@ func TestStatusParsesResponseBaseData(t *testing.T) {
 	}
 }
 
-// TestParseRender runs the parser over real GovDAO v3 proposal pages. The
-// fixtures in testdata/render are verbatim gno.land/r/gov/dao:<id> renders
-// produced by the realm itself (see testdata/gen for the generating filetests).
+// TestParseRender runs the parser over real GovDAO proposal pages rendered by
+// r/gov/dao/impl/v0 at the gno.land mainnet tag (chain/mainnet, 9c8eb132e483).
+// The fixtures in testdata/render are verbatim gno.land/r/gov/dao:<id> renders
+// produced by the realm itself (see testdata/gen for the generating filetests);
+// they are byte-identical to the earlier test13 (r/gov/dao/v3/impl) renders.
 func TestParseRender(t *testing.T) {
 	tests := []struct {
 		fixture  string
@@ -200,14 +203,68 @@ func TestTxProposalID(t *testing.T) {
 	}
 }
 
+// A tx that is not committed (yet) is ErrTxNotFound: the tm2 message of the
+// chain/mainnet tag (state.NoTxResultForHashError), and the older one.
 func TestTxProposalIDNotCommitted(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"","error":{"code":-32603,"message":"Internal error","data":"tx (AB6561) not found"}}`))
-	}))
-	defer srv.Close()
+	for _, data := range []string{
+		"Could not find tx result for hash #AB6561",
+		"tx (AB6561) not found",
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"","error":{"code":-32603,"message":"Internal error","data":"` + data + `"}}`))
+		}))
+		id, err := New(srv.URL, "gno.land/r/gov/dao").TxProposalID(context.Background(), "q2Vh")
+		srv.Close()
+		if !errors.Is(err, ErrTxNotFound) || id != "" {
+			t.Fatalf("%q: TxProposalID = %q, %v; want ErrTxNotFound", data, id, err)
+		}
+	}
+}
 
-	id, err := New(srv.URL, "gno.land/r/gov/dao").TxProposalID(context.Background(), "q2Vh")
-	if err == nil || id != "" {
-		t.Fatalf("TxProposalID = %q, %v; want an error", id, err)
+// A committed tx without a single ProposalCreated event from the realm (e.g.
+// it failed in DeliverTx) is ErrNoProposalCreated.
+func TestTxProposalIDNoProposalCreated(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty events": `{"jsonrpc":"2.0","id":"","result":{"tx_result":{"ResponseBase":{"Events":[]}}}}`,
+		// The real DeliverTx-failed shape: an Error and "Events": null.
+		"failed in DeliverTx": `{"jsonrpc":"2.0","id":"","result":{"hash":"q2Vh","height":"15","index":0,"tx_result":{"ResponseBase":{"Error":{"@type":"/abci.StringError","value":"proposal already executed. Accepted: true"},"Data":null,"Events":null,"Log":"msg:0,success:false","Info":"vm.version=dev"},"GasWanted":"100000000","GasUsed":"9909355"}}}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		defer srv.Close()
+		id, err := New(srv.URL, "gno.land/r/gov/dao").TxProposalID(context.Background(), "q2Vh")
+		if !errors.Is(err, ErrNoProposalCreated) || id != "" {
+			t.Fatalf("%s: TxProposalID = %q, %v; want ErrNoProposalCreated", name, id, err)
+		}
+	}
+}
+
+// Anything else (transport, HTTP status, other RPC error, malformed body) is
+// neither sentinel: it is an operational failure.
+func TestTxProposalIDOperationalErrors(t *testing.T) {
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	cases := map[string]http.HandlerFunc{
+		"http status": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) },
+		"rpc error": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"","error":{"code":-32603,"message":"Internal error","data":"error while getting tx result: leveldb: closed"}}`))
+		},
+		"malformed": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`<html>proxy</html>`)) },
+		"no events": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"","result":{"tx_result":{}}}`))
+		},
+	}
+	urls := map[string]string{"unreachable": down.URL}
+	for name, h := range cases {
+		srv := httptest.NewServer(h)
+		defer srv.Close()
+		urls[name] = srv.URL
+	}
+	for name, u := range urls {
+		_, err := New(u, "gno.land/r/gov/dao").TxProposalID(context.Background(), "q2Vh")
+		if err == nil || errors.Is(err, ErrTxNotFound) || errors.Is(err, ErrNoProposalCreated) {
+			t.Fatalf("%s: err = %v, want an operational error", name, err)
+		}
 	}
 }

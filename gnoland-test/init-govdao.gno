@@ -4,9 +4,9 @@
 package main
 
 import (
-	govdaoinit "gno.land/r/gov/dao/v3/init"
+	govdaoinit "gno.land/r/gov/dao/init/v0"
 )
 
 func main(cur realm) {
-	govdaoinit.InitWithUsers(cross(cur), address("g1q2myr825pvw02es0srq0f66r4djyxsvqkh0x5a"))
+	govdaoinit.InitWithUsers(cross(cur), address("g1jq93n9pw2qxkq4mks89yenwmzlkgjapktcudek"))
 }

@@ -7,8 +7,10 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -47,6 +49,8 @@ type Daemon struct {
 
 	guardMu      sync.Mutex
 	guardTripped map[string]bool // chain key → mass-eligibility guardrail tripped last cycle
+
+	health *healthRegistry // last successful cycle per worker, served on /health
 }
 
 // New builds a Daemon from the loaded config and an open store.
@@ -64,6 +68,7 @@ func New(cfg *config.Config, st store.Store, logger *log.Logger) *Daemon {
 		},
 		resolvers: map[string]*valopers.Resolver{},
 		executed:  map[int64]*executeState{},
+		health:    newHealthRegistry(time.Now),
 	}
 }
 
@@ -112,14 +117,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		wg.Add(2)
 		go func(rt config.Runtime) {
 			defer wg.Done()
-			d.runWorker(ctx, "eval", rt.Key, rt.PollInterval, func(c context.Context) {
-				d.evalCycle(c, rt)
+			d.runWorker(ctx, "eval", rt.Key, rt.PollInterval, func(c context.Context) error {
+				return d.evalCycle(c, rt)
 			})
 		}(rt)
 		go func(rt config.Runtime) {
 			defer wg.Done()
-			d.runWorker(ctx, "vote", rt.Key, rt.VotePollInterval, func(c context.Context) {
-				d.voteCycle(c, rt)
+			d.runWorker(ctx, "vote", rt.Key, rt.VotePollInterval, func(c context.Context) error {
+				return d.voteCycle(c, rt)
 			})
 		}(rt)
 	}
@@ -150,11 +155,19 @@ func storageWarning(cfg *config.Config) string {
 }
 
 // runWorker runs cycle immediately, then on every tick, until ctx is cancelled.
-// A panic or error inside cycle must not stop the loop (cycle handles its own
-// errors); the loop only exits on cancellation.
-func (d *Daemon) runWorker(ctx context.Context, kind, chainKey string, interval time.Duration, cycle func(context.Context)) {
+// A panic or error inside cycle must not stop the loop: each outcome is
+// recorded for /health and the loop only exits on cancellation.
+func (d *Daemon) runWorker(ctx context.Context, kind, chainKey string, interval time.Duration, cycle func(context.Context) error) {
 	d.logger.Printf("[%s][%s] worker started (every %s)", chainKey, kind, interval)
-	cycle(ctx)
+	d.health.register(chainKey, kind, interval)
+	run := func() {
+		err := d.runCycle(ctx, kind, chainKey, cycle)
+		if ctx.Err() != nil {
+			return // cut short by shutdown, not a failure
+		}
+		d.health.record(chainKey, kind, err)
+	}
+	run()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -164,18 +177,30 @@ func (d *Daemon) runWorker(ctx context.Context, kind, chainKey string, interval 
 			d.logger.Printf("[%s][%s] worker stopped", chainKey, kind)
 			return
 		case <-ticker.C:
-			cycle(ctx)
+			run()
 		}
 	}
 }
 
-// startHealthServer serves GET /health for external liveness monitoring.
+// runCycle runs one cycle, turning a panic into an error so one bad cycle
+// cannot kill the daemon. In-memory state (execute attempts, guardrail
+// episodes) survives; the panic is logged with its stack.
+func (d *Daemon) runCycle(ctx context.Context, kind, chainKey string, cycle func(context.Context) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			d.logger.Printf("[%s][%s] PANIC in cycle (recovered, worker keeps running): %v\n%s", chainKey, kind, r, debug.Stack())
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return cycle(ctx)
+}
+
+// startHealthServer serves GET /health for external liveness monitoring: 503
+// once any worker has gone staleAfter poll intervals without a successful
+// cycle (see healthRegistry).
 func (d *Daemon) startHealthServer() *http.Server {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	mux.Handle("/health", d.health)
 	srv := &http.Server{Addr: d.cfg.Web.Listen, Handler: mux}
 	go func() {
 		d.logger.Printf("health server listening on %s (/health)", d.cfg.Web.Listen)
