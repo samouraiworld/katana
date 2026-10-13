@@ -18,7 +18,7 @@ import (
 // failStore makes chosen lifecycle queries fail on top of a real Store.
 type failStore struct {
 	store.Store
-	lastErr, rejErr, sinceErr error
+	lastErr, rejErr, sinceErr, trackedErr, dryRunsErr error
 }
 
 func (f *failStore) LastProposal(ctx context.Context, chain, addr string) (*store.ProposalRecord, error) {
@@ -42,6 +42,20 @@ func (f *failStore) BroadcastsSince(ctx context.Context, chain string, since tim
 	return f.Store.BroadcastsSince(ctx, chain, since)
 }
 
+func (f *failStore) TrackedProposals(ctx context.Context, chain string) ([]store.ProposalRecord, error) {
+	if f.trackedErr != nil {
+		return nil, f.trackedErr
+	}
+	return f.Store.TrackedProposals(ctx, chain)
+}
+
+func (f *failStore) DryRunsSince(ctx context.Context, chain string, since time.Time) ([]store.ProposalRecord, error) {
+	if f.dryRunsErr != nil {
+		return nil, f.dryRunsErr
+	}
+	return f.Store.DryRunsSince(ctx, chain, since)
+}
+
 // A store error on any lifecycle query must close the gate, never open it.
 func TestEvalCycleFailsClosedOnStoreErrors(t *testing.T) {
 	boom := errors.New("database is locked")
@@ -49,6 +63,9 @@ func TestEvalCycleFailsClosedOnStoreErrors(t *testing.T) {
 		"LastProposal":    {lastErr: boom},
 		"RejectionCount":  {rejErr: boom},
 		"BroadcastsSince": {sinceErr: boom},
+		// Read while counting open ejections for min_valset_size.
+		"TrackedProposals": {trackedErr: boom},
+		"DryRunsSince":     {dryRunsErr: boom},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, "dev", nil)
@@ -448,5 +465,147 @@ func TestMassEligibilityCountsValidatorsMissingFromReport(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The gate applies the candidate action's own cooldown, not proposal.cooldown.
+func TestGateUsesActionCooldown(t *testing.T) {
+	ctx := context.Background()
+	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// g1big keeps g1bad's VP share low enough for a real raise.
+		big := strings.ReplaceAll(valReport("g1big", 70), "1000", "19000")
+		w.Write([]byte("[" + valReport("g1bad", 95) + "," + big + "]"))
+	}))
+	t.Cleanup(gnomon.Close)
+	raiseCooldown := "2160h"
+	f := newFixture(t, "dev", func(c *config.Config) {
+		c.Gnomonitoring.BaseURL = gnomon.URL
+		ac := c.Proposal.Actions[config.ActionRaiseVP]
+		ac.Cooldown = &raiseCooldown
+		c.Proposal.Actions[config.ActionRaiseVP] = ac
+	})
+	f.chain.valset = []string{"g1bad", "g1big"}
+
+	// Older than proposal.cooldown (720h), newer than raise_vp's (2160h).
+	at := f.d.now().Add(-1000 * time.Hour)
+	id, err := f.st.RecordProposal(ctx, store.ProposalRecord{
+		CreatedAt: at, Chain: "test", ChainID: "dev", Address: "g1bad",
+		Action: config.ActionRaiseVP, Status: store.StatusPending, Success: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpdateStatus(ctx, id, store.StatusAccepted, at); err != nil {
+		t.Fatal(err)
+	}
+
+	f.d.evalCycle(ctx, f.runtime(t))
+	if got := f.broadcasts.count(); got != 0 {
+		t.Fatalf("broadcasts = %d, want 0 (raise_vp cooldown not over)\nlogs:\n%s", got, f.logs.String())
+	}
+
+	// Once the raise_vp cooldown is over, the raise goes out.
+	now := f.d.now()
+	f.d.now = func() time.Time { return now.Add(1200 * time.Hour) }
+	f.d.evalCycle(ctx, f.runtime(t))
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1 after the raise_vp cooldown\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// The daily cap counts this cycle's broadcasts on top of the stored ones.
+func TestMaxProposalsPerDayCountsThisCycle(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 3, 9, nil) // 3 of 12 = 25%, not above
+	rt := strict(f.runtime(t))
+	rt.Safety.MaxProposalsPerCycle = 3
+	rt.Safety.MaxProposalsPerDay = 3
+	for i := 0; i < 2; i++ {
+		if _, err := f.st.RecordProposal(ctx, store.ProposalRecord{
+			CreatedAt: f.d.now().Add(-time.Hour), Chain: "test", ChainID: "dev", Address: fmt.Sprintf("g1other%d", i),
+			Status: store.StatusPending, Success: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1 (2 in the last 24h, daily cap 3)\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// Only non-excepted, in-valset validators eligible for eject/lower_vp count
+// toward max_eligible_share.
+func TestMassEligibilityFilters(t *testing.T) {
+	ctx := context.Background()
+	var reports []string
+	for _, addr := range []string{"g1bad0", "g1exc0", "g1exc1", "g1far0", "g1far1"} {
+		reports = append(reports, valReport(addr, 10))
+	}
+	for _, addr := range []string{"g1hi0", "g1hi1"} {
+		reports = append(reports, valReport(addr, 95))
+	}
+	for i := 0; i < 5; i++ {
+		reports = append(reports, valReport(fmt.Sprintf("g1ok%d", i), 70))
+	}
+	body := "[" + strings.Join(reports, ",") + "]"
+	gnomon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(gnomon.Close)
+	f := newValsetFixture(t, 1, 5, func(c *config.Config) {
+		c.Gnomonitoring.BaseURL = gnomon.URL
+		c.Exceptions = []string{"g1exc0", "g1exc1"}
+	})
+	// 10 validators, 1 counted (g1bad0): excepted (g1exc*), out-of-valset
+	// (g1far*) and raise_vp-eligible (g1hi*) ones would each add 2 (30%).
+	f.chain.valset = append(f.chain.valset, "g1exc0", "g1exc1", "g1hi0", "g1hi1")
+
+	f.d.evalCycle(ctx, strict(f.runtime(t)))
+	if strings.Contains(f.logs.String(), "max_eligible_share") {
+		t.Fatalf("guardrail tripped on 1 of 10\nlogs:\n%s", f.logs.String())
+	}
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcasts = %d, want 1\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// An ambiguous broadcast may be on-chain: it uses up the cycle's budget.
+func TestAmbiguousBroadcastConsumesCaps(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 2, 8, nil)
+	f.broadcasts.onCall = func(proposal.Built) {
+		if len(f.broadcasts.built) == 1 {
+			f.broadcasts.out, f.broadcasts.err = "broadcast tx: broadcasting bytes: request timeout", errors.New("gnokey: exit status 1")
+		} else {
+			f.broadcasts.out, f.broadcasts.err = "", nil
+		}
+	}
+
+	f.d.evalCycle(ctx, strict(f.runtime(t)))
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcast attempts = %d, want 1 (the ambiguous one keeps its slot)\nlogs:\n%s", got, f.logs.String())
+	}
+}
+
+// And it counts as an open ejection for min_valset_size.
+func TestAmbiguousEjectionCountsAsOpen(t *testing.T) {
+	ctx := context.Background()
+	f := newValsetFixture(t, 2, 3, nil) // 5 validators; one ejection leaves 4
+	f.broadcasts.onCall = func(proposal.Built) {
+		if len(f.broadcasts.built) == 1 {
+			f.broadcasts.out, f.broadcasts.err = "broadcast tx: broadcasting bytes: request timeout", errors.New("gnokey: exit status 1")
+		} else {
+			f.broadcasts.out, f.broadcasts.err = "", nil
+		}
+	}
+	rt := strict(f.runtime(t))
+	rt.Safety.MaxProposalsPerCycle = 2
+	rt.Safety.MaxEligibleShare = 50
+
+	f.d.evalCycle(ctx, rt)
+	if got := f.broadcasts.count(); got != 1 {
+		t.Fatalf("broadcast attempts = %d, want 1 (ambiguous ejection is open)\nlogs:\n%s", got, f.logs.String())
 	}
 }
