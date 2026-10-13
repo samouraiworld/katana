@@ -224,13 +224,19 @@ func TestTxProposalIDNotCommitted(t *testing.T) {
 // A committed tx without a single ProposalCreated event from the realm (e.g.
 // it failed in DeliverTx) is ErrNoProposalCreated.
 func TestTxProposalIDNoProposalCreated(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"","result":{"tx_result":{"ResponseBase":{"Events":[]}}}}`))
-	}))
-	defer srv.Close()
-	id, err := New(srv.URL, "gno.land/r/gov/dao").TxProposalID(context.Background(), "q2Vh")
-	if !errors.Is(err, ErrNoProposalCreated) || id != "" {
-		t.Fatalf("TxProposalID = %q, %v; want ErrNoProposalCreated", id, err)
+	for name, body := range map[string]string{
+		"empty events": `{"jsonrpc":"2.0","id":"","result":{"tx_result":{"ResponseBase":{"Events":[]}}}}`,
+		// The real DeliverTx-failed shape: an Error and "Events": null.
+		"failed in DeliverTx": `{"jsonrpc":"2.0","id":"","result":{"hash":"q2Vh","height":"15","index":0,"tx_result":{"ResponseBase":{"Error":{"@type":"/abci.StringError","value":"proposal already executed. Accepted: true"},"Data":null,"Events":null,"Log":"msg:0,success:false","Info":"vm.version=dev"},"GasWanted":"100000000","GasUsed":"9909355"}}}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		defer srv.Close()
+		id, err := New(srv.URL, "gno.land/r/gov/dao").TxProposalID(context.Background(), "q2Vh")
+		if !errors.Is(err, ErrNoProposalCreated) || id != "" {
+			t.Fatalf("%s: TxProposalID = %q, %v; want ErrNoProposalCreated", name, id, err)
+		}
 	}
 }
 

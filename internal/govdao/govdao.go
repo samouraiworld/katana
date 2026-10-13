@@ -288,14 +288,22 @@ func (c *Client) TxProposalID(ctx context.Context, txHash string) (string, error
 
 // findEvents returns the first "events" array (any letter case) in a
 // DeliverTx result. The amino JSON nests it under ResponseBase; searching
-// keeps katana independent of that layout.
+// keeps katana independent of that layout. A null array (what a tx that
+// failed in DeliverTx carries) is an empty one: the tx is committed, it just
+// emitted nothing. Only a result without the key at all is malformed (nil).
 func findEvents(raw json.RawMessage) json.RawMessage {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil
 	}
 	for k, v := range obj {
-		if strings.EqualFold(k, "events") && len(v) > 0 && v[0] == '[' {
+		if !strings.EqualFold(k, "events") {
+			continue
+		}
+		if string(v) == "null" {
+			return json.RawMessage("[]")
+		}
+		if len(v) > 0 && v[0] == '[' {
 			return v
 		}
 	}

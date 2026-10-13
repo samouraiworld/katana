@@ -164,8 +164,8 @@ func TestFixtureRPCTx(t *testing.T) {
 
 	// A committed-but-failed tx carries "Events": null and an Error: no id.
 	srv = serveFile(t, "rpc_tx_delivertx_failed.json")
-	if id, err := govdao.New(srv.URL, realm).TxProposalID(ctx, "fw09HZp+zWGO4NpT0vIdf8ItRKlMBn8q4vr1nwT+KGk="); err == nil {
-		t.Fatalf("TxProposalID on a failed tx = %q, want an error", id)
+	if id, err := govdao.New(srv.URL, realm).TxProposalID(ctx, "fw09HZp+zWGO4NpT0vIdf8ItRKlMBn8q4vr1nwT+KGk="); !errors.Is(err, govdao.ErrNoProposalCreated) {
+		t.Fatalf("TxProposalID on a failed tx = %q, %v; want ErrNoProposalCreated", id, err)
 	}
 }
 
